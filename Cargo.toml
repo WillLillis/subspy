@@ -6,7 +6,7 @@ authors = [ "Will Lillis <will.lillis24@gmail.com>" ]
 repository = "https://github.com/WillLillis/subspy"
 license = "MIT"
 readme = "README.md"
-description = "A 'git status' caching utility for project with many submodules"
+description = "A 'git status' caching utility for repositories with many submodules"
 keywords = ["cli", "git"]
 categories = ["command-line-utilities", "development-tools"]
 

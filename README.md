@@ -1,23 +1,23 @@
 # SubSpy
 
-A faster `git status` when working in a repository with many submodules.
+A faster `git status` when working in repositories with many submodules.
 
 ### The Problem
 
-Running `git status` at the top level of a respository with many submodules can take minutes, a flow state-breaking pause!
-This problem is exacerbated on Windows, which is hindered by Windows Defender as wel as an inefficient [lstat implementation](https://git-scm.com/docs/git-update-index#_using_assume_unchanged_bit).
+Running `git status` at the top level of a repository with many submodules can take minutes, a flow state-breaking pause!
+This problem is exacerbated on Windows, which is hindered by Windows Defender as well as an inefficient [lstat implementation](https://git-scm.com/docs/git-update-index#_using_assume_unchanged_bit).
 
 There are a few potential workarounds you should try before using this tool, including 
 
 - Running `git gc`
-- Set `ignore = dirty` for the relevant submodules in your `.gitmodules` file
+- Set `ignore = dirty` as needed in your `.gitmodules` file (Usually unacceptable for anything besides vendored dependencies)
 - Don't use submodules ;)
 
 ### The Solution
 
-SubSpy provides a solution to this issue by placing recursive filesystem watches on your `.git` folder, `.gitmodules` file,
-and all submodule directories. The status for all submodules is cached by an initial indexing operation, and updated any time
-a change is detected in one of these locations.
+SubSpy provides a solution to this issue by placing recursive filesystem watches on your repository's `.git` folder, `.gitmodules`
+file, and all submodule directories. The status for all submodules is cached by an initial indexing operation and updated
+any time a change is detected in one of these locations.
 
 ### Usage
 
@@ -27,8 +27,42 @@ a change is detected in one of these locations.
 ~/very_large_project/ > subspy status
 ```
 
+### Installation
+
+Installing this tool requires the [Rust toolchain](https://rust-lang.org/tools/install/).
+
+```sh
+> git clone https://github.com/WillLillis/subspy
+> cd subspy
+> cargo install --path .
+```
+
+#### Outrageous Anecdotal Performance Claims
+
+I developed this tool to remove an annoyance at work. Here's a comparison between `subspy status` and `git status` on a
+repo with >200 submodules, running on Windows 11 with git bash. The `subspy` measurement was taken after the initial `watch`
+indexing step completed. The `git` measurement was taken after already running `git status` to "preheat" any caching mechanisms
+git may have in place.
+
+```sh
+~/very_large_project/ > time subspy status
+real    0m0.275s
+user    0m0.000s
+sys     0m0.000s
+
+~/very_large_project/ > time git status
+real    0m26.108s
+user    0m0.015s
+sys     0m0.000s
+```
+
 #### Future Improvements
 
 - [ ] Add a command to force the watcher to re-index
 - [ ] Add a command to shutdown the watcher
+- [ ] Parallelize the indexing of submodules (Need to do some measurements here)
 - [ ] Support some of `git status`'s flags for the `subspy status` command if reasonable
+- [ ] Sort item order of `status` command to more closely match `git status`'s
+- [ ] Flag to disable progress bar if it's problematic for some terminal emulators
+- [ ] Tests
+- [ ] crates.io releases if desired
