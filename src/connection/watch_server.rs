@@ -30,7 +30,10 @@ static SUBMOD_STATUSES: LazyLock<Mutex<BTreeMap<String, StatusSummary>>> =
 type WatcherList = Vec<(
     String,
     crossbeam_channel::Receiver<notify_debouncer_full::DebounceEventResult>,
-    notify_debouncer_full::Debouncer<notify::INotifyWatcher, notify_debouncer_full::NoCache>,
+    notify_debouncer_full::Debouncer<
+        notify::RecommendedWatcher,
+        notify_debouncer_full::RecommendedCache,
+    >,
 )>;
 
 fn place_watch(
