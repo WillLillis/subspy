@@ -58,8 +58,8 @@ sys     0m0.000s
 
 #### Future Improvements
 
-- [ ] Add a command to force the watcher to re-index
-- [ ] Add a command to shutdown the watcher
+- [x] Add a command to force the watcher to re-index
+- [x] Add a command to shutdown the watcher
 - [ ] Parallelize the indexing of submodules (Need to do some measurements here)
 - [ ] Support some of `git status`'s flags for the `subspy status` command if reasonable
 - [ ] Sort item order of `status` command to more closely match `git status`'s

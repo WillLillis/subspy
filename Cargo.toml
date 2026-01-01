@@ -18,6 +18,7 @@ pedantic = { level = "warn", priority = -1 }
 nursery = { level = "warn", priority = -1 }
 cargo = { level = "warn", priority = -1 }
 
+cast_possible_truncation = "allow"
 multiple_crate_versions = "allow"
 redundant_closure_for_method_calls = "allow"
 

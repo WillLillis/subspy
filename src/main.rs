@@ -7,24 +7,29 @@ use flexi_logger::{Cleanup, Criterion, FileSpec, Logger, Naming, WriteMode};
 use thiserror::Error;
 
 use subspy::{
-    connection::watch_server::watch,
+    DOT_GITMODULES,
+    connection::{client::request_reindex, watch_server::watch},
+    reindex::ReindexError,
+    shutdown::{ShutdownError, shutdown},
     status::{StatusError, status},
     watch::WatchError,
 };
 
-// TODO: Re-index, shutdown/stop commands
-
 #[derive(Subcommand)]
 enum Commands {
-    /// Start a watch on a git project
-    Watch(Watch),
+    /// Reindex a watch server
+    Reindex(Reindex),
+    /// Shutdown a watch server
+    Shutdown(Shutdown),
     /// Display the status of a watched git project
     Status(Status),
+    /// Start a watch server on a git project
+    Watch(Watch),
 }
 
 #[derive(Args)]
-struct Watch {
-    /// The directory containing the repository's `.gitmodules` file
+struct Reindex {
+    /// The directory whose watcher should reindex
     #[arg(short, long)]
     pub dir: Option<PathBuf>,
 }
@@ -32,6 +37,20 @@ struct Watch {
 #[derive(Args)]
 struct Status {
     /// The directory to query `git status` for
+    #[arg(short, long)]
+    pub dir: Option<PathBuf>,
+}
+
+#[derive(Args)]
+struct Shutdown {
+    /// The directory to shutdown a watcher for
+    #[arg(short, long)]
+    pub dir: Option<PathBuf>,
+}
+
+#[derive(Args)]
+struct Watch {
+    /// The directory containing the repository's `.gitmodules` file
     #[arg(short, long)]
     pub dir: Option<PathBuf>,
 }
@@ -49,16 +68,27 @@ pub enum RunError {
         path: PathBuf,
         error: std::io::Error,
     },
+    #[error(transparent)]
+    Reindex(#[from] ReindexError),
+    #[error(transparent)]
+    Shutdown(#[from] ShutdownError),
     #[error("Unable to determine home directory: {0}")]
     Home(#[from] HomeDirError),
     #[error(transparent)]
     Clap(#[from] clap::Error),
 }
 
-impl Watch {
+impl Reindex {
     fn run(self) -> RunResult<()> {
         let true_path = get_project_path(self.dir)?;
-        Ok(watch(true_path.as_path())?)
+        Ok(request_reindex(true_path.as_path())?)
+    }
+}
+
+impl Shutdown {
+    fn run(self) -> RunResult<()> {
+        let true_path = get_project_path(self.dir)?;
+        Ok(shutdown(true_path.as_path())?)
     }
 }
 
@@ -69,6 +99,13 @@ impl Status {
     }
 }
 
+impl Watch {
+    fn run(self) -> RunResult<()> {
+        let true_path = get_project_path(self.dir)?;
+        Ok(watch(true_path.as_path())?)
+    }
+}
+
 /// Uses `path` if present or uses the current working directory. Ensures the resolved path
 /// is a directory and contains a `.gitmodules` file.
 fn get_project_path(path: Option<PathBuf>) -> RunResult<PathBuf> {
@@ -76,7 +113,7 @@ fn get_project_path(path: Option<PathBuf>) -> RunResult<PathBuf> {
     let true_path =
         dunce::canonicalize(&path).map_err(|error| RunError::ProjectPath { path, error })?;
     let mut gitmodules_path = true_path.clone();
-    gitmodules_path.push(".gitmodules");
+    gitmodules_path.push(DOT_GITMODULES);
     if !true_path.is_dir() || !gitmodules_path.exists() {
         Err(RunError::ProjectPath {
             #[allow(clippy::redundant_clone)] // false positive
@@ -131,6 +168,8 @@ fn run() -> RunResult<()> {
     match command {
         Commands::Watch(watch_options) => watch_options.run()?,
         Commands::Status(status_options) => status_options.run()?,
+        Commands::Shutdown(shutdown_options) => shutdown_options.run()?,
+        Commands::Reindex(reindex_options) => reindex_options.run()?,
     }
 
     Ok(())

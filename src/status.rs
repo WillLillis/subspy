@@ -3,12 +3,16 @@ use git2::{Repository, Statuses};
 use std::path::Path;
 use thiserror::Error;
 
-use crate::{StatusSummary, connection::client::get_statuses, paint};
+use crate::{StatusSummary, connection::client::request_status, paint};
 
 pub type StatusResult<T> = Result<T, StatusError>;
 
 #[derive(Error, Debug)]
 pub enum StatusError {
+    #[error(transparent)]
+    BincodeEncode(#[from] bincode::error::EncodeError),
+    #[error(transparent)]
+    BincodeDecode(#[from] bincode::error::DecodeError),
     #[error(transparent)]
     IO(#[from] std::io::Error),
     #[error(transparent)]
@@ -279,8 +283,8 @@ fn display_status(
 /// # Errors
 ///
 /// Returns `Err` if statuses cannot be retrieved from the repository or watch server
-pub fn status(path: &Path) -> StatusResult<()> {
-    let repo = Repository::open(path)?;
+pub fn status(root_path: &Path) -> StatusResult<()> {
+    let repo = Repository::open(root_path)?;
 
     let mut opts = git2::StatusOptions::new();
     opts.include_untracked(true)
@@ -289,7 +293,7 @@ pub fn status(path: &Path) -> StatusResult<()> {
         .include_ignored(false); // Skip ignored files if not needed
     let non_submodule_statuses = repo.statuses(Some(&mut opts))?;
 
-    let submodule_statuses = get_statuses(path)?;
+    let submodule_statuses = request_status(root_path)?;
     display_status(&repo, &non_submodule_statuses, &submodule_statuses)?;
 
     Ok(())

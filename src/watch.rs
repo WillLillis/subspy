@@ -9,11 +9,17 @@ pub type WatchResult<T> = Result<T, WatchError>;
 #[derive(Error, Debug)]
 pub enum WatchError {
     #[error(transparent)]
+    BincodeEncode(#[from] bincode::error::EncodeError),
+    #[error(transparent)]
+    BincodeDecode(#[from] bincode::error::DecodeError),
+    #[error(transparent)]
     FileWatch(#[from] notify::Error),
     #[error(transparent)]
     Git(#[from] git2::Error),
     #[error(transparent)]
-    OtherTemp(#[from] std::io::Error),
+    IO(#[from] std::io::Error),
+    #[error(transparent)]
+    Receive(#[from] crossbeam_channel::RecvError),
 }
 
 /// Watches the repository at `path`

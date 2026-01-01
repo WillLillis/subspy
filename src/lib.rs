@@ -1,15 +1,18 @@
+use std::borrow::Cow;
+
 use anstyle::{Color, Style};
 use bincode::{BorrowDecode, Encode};
 use bitflags::bitflags;
+use indicatif::{ProgressBar, ProgressStyle};
 
 pub mod connection;
+pub mod reindex;
+pub mod shutdown;
 pub mod status;
 pub mod watch;
 
-pub(crate) fn paint(color: Option<impl Into<Color>>, text: &str) -> String {
-    let style = Style::new().fg_color(color.map(Into::into));
-    format!("{style}{text}{style:#}")
-}
+pub const DOT_GITMODULES: &str = ".gitmodules";
+pub const DOT_GIT: &str = ".git";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord, Hash, Encode, BorrowDecode)]
 pub struct StatusSummary(u32);
@@ -93,4 +96,18 @@ impl From<git2::SubmoduleStatus> for StatusSummary {
 
         submod_status
     }
+}
+
+pub(crate) fn paint(color: Option<impl Into<Color>>, text: &str) -> String {
+    let style = Style::new().fg_color(color.map(Into::into));
+    format!("{style}{text}{style:#}")
+}
+
+/// Creats a new styled `indicatif::ProgressBar`
+fn create_progress_bar(len: u64, prefix: impl Into<Cow<'static, str>>) -> indicatif::ProgressBar {
+    ProgressBar::new(len)
+        .with_style(
+            ProgressStyle::with_template("{prefix:.cyan.bold}: {wide_bar:} {pos}/{len}").unwrap(),
+        )
+        .with_prefix(prefix)
 }
