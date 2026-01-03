@@ -1,6 +1,6 @@
 //! Client-server implementation
+use core::hash::{Hash as _, Hasher as _};
 use std::{
-    hash::{Hash as _, Hasher as _},
     io::{BufRead as _, BufReader, Write as _},
     path::{Path, PathBuf},
 };
@@ -16,15 +16,17 @@ use crate::{DOT_GIT, StatusSummary, reindex::REINDEX_FILE_PREFIX, shutdown::SHUT
 pub mod client;
 pub mod watch_server;
 
+/// Common bincode configuration used to encode/decode messages between the client and server
 pub const BINCODE_CFG: bincode::config::Configuration = bincode::config::standard().with_no_limit();
 
+/// Delimiter used to signal the end of messages
 const MSG_DELIM: [u8; 4] = [u8::MAX, u8::MAX, u8::MAX, u8::MAX];
 
 #[derive(Clone, Debug, Eq, PartialEq, Encode, BorrowDecode)]
 pub enum ClientMessage {
     Reindex(u32),
-    Status(u32),
     Shutdown(u32),
+    Status(u32),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Encode, BorrowDecode)]
@@ -45,24 +47,22 @@ pub fn write_full_message(conn: &mut BufReader<Stream>, msg: &[u8]) -> std::io::
     Ok(())
 }
 
-/// Checks whether `msg` ends with `MSG_DELIM`
+/// Checks whether `msg` is nonempty and ends with `MSG_DELIM`
 fn has_delimiter(msg: &[u8]) -> bool {
     let len = msg.len();
     if len <= MSG_DELIM.len() {
         return false;
     }
-
-    [
-        msg.get(len - 4).copied(),
-        msg.get(len - 3).copied(),
-        msg.get(len - 2).copied(),
-        msg.get(len - 1).copied(),
-    ] == [
-        Some(MSG_DELIM[0]),
-        Some(MSG_DELIM[1]),
-        Some(MSG_DELIM[2]),
-        Some(MSG_DELIM[3]),
-    ]
+    // SAFETY: The length check above guarantees these indices are in-bounds
+    let msg_end = unsafe {
+        [
+            *msg.get_unchecked(len - 4),
+            *msg.get_unchecked(len - 3),
+            *msg.get_unchecked(len - 2),
+            *msg.get_unchecked(len - 1),
+        ]
+    };
+    msg_end == MSG_DELIM
 }
 
 /// Reads from `conn` into `buffer` until the delimiter `MSG_DELIM` is found.
@@ -131,18 +131,13 @@ pub fn create_listener(root_dir: &Path) -> std::io::Result<Listener> {
 /// Returns reindex sentinel file path for the repository at `root_dir`.
 #[must_use]
 pub fn get_reindex_file_path(root_dir: &Path, client_pid: u32) -> PathBuf {
-    let mut reindex_path = root_dir.to_path_buf();
-    reindex_path.push(DOT_GIT);
     let reindex_file_name = format!("{REINDEX_FILE_PREFIX}{client_pid}");
-    reindex_path.push(reindex_file_name);
-    reindex_path
+    root_dir.to_path_buf().join(DOT_GIT).join(reindex_file_name)
 }
 
 /// Returns shutdown sentinel file path for the repository at `root_dir`.
 #[must_use]
 pub fn get_shutdown_file_path(root_dir: &Path, client_pid: u32) -> PathBuf {
-    let mut reindex_path = root_dir.to_path_buf();
     let reindex_file_name = format!("{SHUTDOWN_FILE_PREFIX}{client_pid}");
-    reindex_path.push(reindex_file_name);
-    reindex_path
+    root_dir.to_path_buf().join(reindex_file_name)
 }

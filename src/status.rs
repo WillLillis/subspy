@@ -92,7 +92,7 @@ fn get_upstream_status(repo: &Repository) -> StatusResult<Option<String>> {
 }
 
 // Adapted from https://github.com/rust-lang/git2-rs/blob/master/examples/status.rs
-#[allow(clippy::too_many_lines)]
+#[expect(clippy::too_many_lines)]
 fn display_status(
     repo: &Repository,
     non_submodule_statues: &Statuses<'_>,

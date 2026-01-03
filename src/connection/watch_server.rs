@@ -36,13 +36,16 @@ static SUBMOD_STATUSES: LazyLock<Mutex<BTreeMap<String, StatusSummary>>> =
 static PROGRESS_QUEUE: LazyLock<Mutex<HashMap<u32, VecDeque<ProgressUpdate>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
+/// Message receiver type for a debounced watcher
 type WatchReceiver = crossbeam_channel::Receiver<notify_debouncer_full::DebounceEventResult>;
 
+/// Debounced watcher type
 type DebouncedWatcher = notify_debouncer_full::Debouncer<
     notify::RecommendedWatcher,
     notify_debouncer_full::RecommendedCache,
 >;
 
+/// Item watched by the server
 #[derive(Debug)]
 struct WatchListItem {
     pub relative_path: String,
@@ -51,7 +54,7 @@ struct WatchListItem {
 }
 
 impl WatchListItem {
-    #[allow(clippy::needless_pass_by_value)]
+    #[expect(clippy::needless_pass_by_value)]
     fn new(rel_path: impl ToString, receiver: WatchReceiver, watcher: DebouncedWatcher) -> Self {
         Self {
             relative_path: rel_path.to_string(),
@@ -63,6 +66,7 @@ impl WatchListItem {
 
 type WatchList = Vec<WatchListItem>;
 
+/// The primary state necessary to maintain a status watch over the repository at `root_path`
 #[derive(Debug)]
 struct WatchServer {
     /// Whether the server should continue to watch the repository at `root_path`
@@ -93,11 +97,11 @@ enum EventType {
 }
 
 fn pid_from_event(event: &Event, filename_prefix: &str) -> Option<u32> {
-    if let Some(name) = event.paths.iter().find(|p| {
+    if let Some(name_path) = event.paths.iter().find(|p| {
         p.file_name()
             .is_some_and(|n| n.to_string_lossy().starts_with(filename_prefix))
     }) && let Ok(id) =
-        name.file_name().unwrap().to_string_lossy()[filename_prefix.len()..].parse::<u32>()
+        name_path.file_name().unwrap().to_string_lossy()[filename_prefix.len()..].parse::<u32>()
     {
         Some(id)
     } else {
@@ -107,10 +111,8 @@ fn pid_from_event(event: &Event, filename_prefix: &str) -> Option<u32> {
 
 impl WatchServer {
     pub fn new(root_path: &Path) -> Self {
-        let mut gitmodules_path = root_path.to_path_buf();
-        gitmodules_path.push(DOT_GITMODULES);
-        let mut dot_git_path = root_path.to_path_buf();
-        dot_git_path.push(DOT_GIT);
+        let gitmodules_path = root_path.to_path_buf().join(DOT_GITMODULES);
+        let dot_git_path = root_path.to_path_buf().join(DOT_GIT);
 
         Self {
             do_watch: true,
@@ -133,18 +135,14 @@ impl WatchServer {
         std::thread::Builder::new()
             .name("subspy_listener".to_string())
             .spawn(move || {
-                fn filter_conn(conn: std::io::Result<Stream>) -> Option<Stream> {
-                    match conn {
-                        Ok(c) => Some(c),
-                        Err(e) => {
-                            error!("Incoming connection failed: {e}");
-                            None
-                        }
-                    }
-                }
-
                 let mut buffer = Vec::with_capacity(1024);
-                for conn in listener.incoming().filter_map(filter_conn) {
+                for conn in listener.incoming().filter_map(|c| match c {
+                    Ok(c) => Some(c),
+                    Err(e) => {
+                        error!("Incoming connection failed: {e}");
+                        None
+                    }
+                }) {
                     if handle_client_connection(conn, &mut buffer, path.as_path())? {
                         break;
                     }
@@ -237,14 +235,10 @@ impl WatchServer {
     ) -> WatchResult<()> {
         let submodules = repo.submodules()?;
         info!("Indexing project at {}", self.root_path.display());
-        let progress_bar = if display_progress {
-            Some(create_progress_bar(
-                submodules.len() as u64,
-                "Indexing submodules",
-            ))
-        } else {
-            None
-        };
+        let progress_bar = display_progress.then_some(create_progress_bar(
+            submodules.len() as u64,
+            "Indexing submodules",
+        ));
 
         let mut status_guard = SUBMOD_STATUSES.lock().expect("Mutex poisoned");
         if let Some(id) = self.client_pid {
@@ -255,8 +249,7 @@ impl WatchServer {
         for (i, submod) in submodules.iter().enumerate() {
             let sub_start = std::time::Instant::now();
             let rel_path = submod.path().to_string_lossy().to_string();
-            let mut submod_path = self.root_path.clone();
-            submod_path.push(submod.path());
+            let submod_path = self.root_path.clone().join(submod.path());
 
             let status = repo
                 .submodule_status(submod.path().to_str().unwrap(), git2::SubmoduleIgnore::None)?;
@@ -274,7 +267,7 @@ impl WatchServer {
                     ProgressUpdate::new(i as u32 + 1, submodules.len() as u32),
                 );
             }
-            if let Some(ref pb) = progress_bar {
+            if let Some(pb) = &progress_bar {
                 pb.inc(1);
             }
             info!(
@@ -288,7 +281,7 @@ impl WatchServer {
         drop(status_guard);
 
         self.client_pid = None;
-        if let Some(ref pb) = progress_bar {
+        if let Some(pb) = &progress_bar {
             pb.finish();
             println!(
                 "Indexing complete. If you haven't already, send this process to the background."
@@ -320,6 +313,8 @@ impl WatchServer {
         }
     }
 
+    /// The main watch loop for the server. Will loop until a client shutdown request is received
+    /// or an error is encountered.
     fn watch(&mut self) -> WatchResult<()> {
         // only display the progress bar on the first indexing
         let mut display_progress = true;
@@ -476,7 +471,7 @@ fn try_acquire<T>(guard: &'static LazyLock<Mutex<T>>) -> Option<std::sync::Mutex
 /// # Panics
 ///
 /// Panics if the `PROGRESS_QUEUE` mutex has been poisoned
-#[allow(clippy::significant_drop_tightening)] // false positive???
+#[expect(clippy::significant_drop_tightening)] // false positive???
 fn update_progress(client_pid: u32, progress_val: ProgressUpdate) {
     let mut progress_guard = PROGRESS_QUEUE.lock().expect("Progress mutex poisoned");
     let queue = progress_guard.entry(client_pid).or_default();
@@ -518,7 +513,7 @@ fn handle_status_request(mut conn: BufReader<Stream>, client_pid: u32) -> WatchR
     drop(guard);
 
     let msg = ServerMessage::Status(status_out);
-    let serialized = bincode::encode_to_vec(msg, BINCODE_CFG).unwrap();
+    let serialized = bincode::encode_to_vec(msg, BINCODE_CFG)?;
     write_full_message(&mut conn, &serialized)?;
 
     Ok(())
@@ -566,7 +561,6 @@ fn handle_reindex_request(
 ///
 /// Returns `Err` if `bincode` encoding or writing to `conn` fails
 fn try_send_progress_update(conn: &mut BufReader<Stream>, client_pid: u32) -> WatchResult<bool> {
-    println!("Trying");
     let Some(mut progress_queue) = try_acquire(&PROGRESS_QUEUE) else {
         return Ok(false);
     };
@@ -588,10 +582,10 @@ fn try_send_progress_update(conn: &mut BufReader<Stream>, client_pid: u32) -> Wa
 /// Acquires the `SUBMOD_STATUSES` guard. Every time the lock cannot be acquired
 /// (because it is currently locked by an indexing operation in the main loop), an attempt
 /// is made to send a progress update to the client.
-fn get_status_guard_with_progress<'a>(
+fn get_status_guard_with_progress<'guard>(
     conn: &mut BufReader<Stream>,
     client_pid: u32,
-) -> WatchResult<MutexGuard<'a, BTreeMap<String, StatusSummary>>> {
+) -> WatchResult<MutexGuard<'guard, BTreeMap<String, StatusSummary>>> {
     loop {
         if let Some(g) = try_acquire(&SUBMOD_STATUSES) {
             return Ok(g);

@@ -2,7 +2,7 @@ use std::{io::BufReader, path::Path};
 
 use interprocess::local_socket::{Stream, traits::Stream as _};
 use log::error;
-use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher as _};
 
 use crate::{
     StatusSummary,
@@ -21,7 +21,6 @@ use crate::{
 /// # Errors
 ///
 /// Returns `Err` if client-server communication or bincode encoding fails.
-#[allow(clippy::missing_panics_doc)]
 pub fn request_reindex(root_path: &Path) -> ReindexResult<()> {
     let name = ipc_name(root_path)?;
 
@@ -131,8 +130,8 @@ pub fn request_status(root_path: &Path) -> StatusResult<Vec<(String, StatusSumma
     let conn = Stream::connect(name)?;
     let mut conn = BufReader::new(conn);
     let status_req = ClientMessage::Status(std::process::id());
-    let msg = bincode::encode_to_vec(status_req, BINCODE_CFG)?;
-    write_full_message(&mut conn, &msg)?;
+    let req_msg = bincode::encode_to_vec(status_req, BINCODE_CFG)?;
+    write_full_message(&mut conn, &req_msg)?;
 
     let progress_bar = create_progress_bar(0, "Indexing in progress...");
     // TODO: Get some impirical data on the actual buffer size we need
@@ -140,9 +139,9 @@ pub fn request_status(root_path: &Path) -> StatusResult<Vec<(String, StatusSumma
     loop {
         read_full_message(&mut conn, &mut buffer)?;
 
-        let (msg, _): (ServerMessage, usize) =
-            bincode::borrow_decode_from_slice(&buffer, BINCODE_CFG).unwrap();
-        match msg {
+        let (resp_msg, _): (ServerMessage, usize) =
+            bincode::borrow_decode_from_slice(&buffer, BINCODE_CFG)?;
+        match resp_msg {
             ServerMessage::Status(items) => {
                 progress_bar.finish_and_clear();
                 return Ok(items);

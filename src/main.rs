@@ -116,7 +116,7 @@ fn get_project_path(path: Option<PathBuf>) -> RunResult<PathBuf> {
     gitmodules_path.push(DOT_GITMODULES);
     if !true_path.is_dir() || !gitmodules_path.exists() {
         Err(RunError::ProjectPath {
-            #[allow(clippy::redundant_clone)] // false positive
+            #[expect(clippy::redundant_clone)] // false positive
             path: true_path.clone(),
             error: io::Error::other("Path must be a directory containing `.gitmodules` file"),
         })?;
