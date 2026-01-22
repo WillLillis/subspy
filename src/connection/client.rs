@@ -73,17 +73,7 @@ pub fn request_reindex(root_path: &Path) -> ReindexResult<()> {
 /// Returns `Err` if client-server communication fails, a watcher cannot be created
 /// on the shutdown sentinel file, or if bincode fails to encode a message.
 pub fn request_shutdown(root_path: &Path) -> ShutdownResult<()> {
-    let name = ipc_name(root_path)?;
-
-    let conn = Stream::connect(name)?;
-    let mut conn = BufReader::new(conn);
-    let pid = std::process::id();
-    let status_req = ClientMessage::Shutdown(pid);
-    let msg = bincode::encode_to_vec(status_req, BINCODE_CFG)?;
-    write_full_message(&mut conn, &msg)?;
-
-    let shutdown_file_path = get_shutdown_file_path(root_path, pid);
-
+    // setup a watcher for when the sentinel shutdown gets deleted
     let (tx, rx) = crossbeam_channel::unbounded();
     let log_full_path = root_path.to_path_buf();
     let mut watcher = RecommendedWatcher::new(
@@ -97,9 +87,19 @@ pub fn request_shutdown(root_path: &Path) -> ShutdownResult<()> {
         },
         notify::Config::default(),
     )?;
-    watcher.watch(&shutdown_file_path, RecursiveMode::NonRecursive)?;
+    let pid = std::process::id();
+    let shutdown_file_path = get_shutdown_file_path(root_path, pid);
+    watcher.watch(root_path, RecursiveMode::NonRecursive)?;
 
-    'outer: loop {
+    let name = ipc_name(root_path)?;
+    let conn = Stream::connect(name)?;
+    let mut conn = BufReader::new(conn);
+    let status_req = ClientMessage::Shutdown(pid);
+    let msg = bincode::encode_to_vec(status_req, BINCODE_CFG)?;
+    write_full_message(&mut conn, &msg)?;
+
+    // wait until the watch server deletes the file to signal its shutdown
+    loop {
         let event = rx.recv()?.map_err(ShutdownError::Watch)?;
         if matches!(event.kind, EventKind::Remove(_))
             && event.paths.iter().any(|p| p.eq(&shutdown_file_path))
@@ -108,7 +108,7 @@ pub fn request_shutdown(root_path: &Path) -> ShutdownResult<()> {
                 "Successfully shutdown watch server for {}",
                 root_path.display()
             );
-            break 'outer;
+            break;
         }
     }
 

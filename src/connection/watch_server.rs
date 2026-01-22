@@ -3,7 +3,6 @@ use std::{
     io::BufReader,
     path::{Path, PathBuf},
     sync::{LazyLock, Mutex, MutexGuard, TryLockError},
-    time::Duration,
 };
 
 use bincode::{BorrowDecode, Encode};
@@ -11,10 +10,9 @@ use git2::Repository;
 use interprocess::local_socket::{Stream, traits::ListenerExt as _};
 use log::{error, info};
 use notify::{
-    Event, EventKind,
-    event::{AccessKind, AccessMode},
+    Event, EventKind, Watcher,
+    event::{AccessKind, AccessMode, CreateKind},
 };
-use notify_debouncer_full::new_debouncer;
 
 use crate::{
     DOT_GIT, DOT_GITMODULES, StatusSummary,
@@ -37,27 +35,32 @@ static PROGRESS_QUEUE: LazyLock<Mutex<HashMap<u32, VecDeque<ProgressUpdate>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Message receiver type for a debounced watcher
-type WatchReceiver = crossbeam_channel::Receiver<notify_debouncer_full::DebounceEventResult>;
+type WatchReceiver = crossbeam_channel::Receiver<Result<notify::Event, notify::Error>>;
 
-/// Debounced watcher type
-type DebouncedWatcher = notify_debouncer_full::Debouncer<
-    notify::RecommendedWatcher,
-    notify_debouncer_full::RecommendedCache,
->;
+/// Watcher type alias
+type ServerWatcher = notify::RecommendedWatcher;
 
 /// Item watched by the server
 #[derive(Debug)]
 struct WatchListItem {
+    // need to hang onto the watched path to `unwatch` later
+    pub watch_path: PathBuf,
     pub relative_path: String,
     pub receiver: WatchReceiver,
-    pub watcher: DebouncedWatcher,
+    pub watcher: ServerWatcher,
 }
 
 impl WatchListItem {
     #[expect(clippy::needless_pass_by_value)]
-    fn new(rel_path: impl ToString, receiver: WatchReceiver, watcher: DebouncedWatcher) -> Self {
+    fn new(
+        rel_path: impl ToString,
+        watch_path: PathBuf,
+        receiver: WatchReceiver,
+        watcher: ServerWatcher,
+    ) -> Self {
         Self {
             relative_path: rel_path.to_string(),
+            watch_path,
             receiver,
             watcher,
         }
@@ -156,8 +159,18 @@ impl WatchServer {
 
     /// Stop all the watchers in `self.watchers`, clearing the list
     fn clear_watchers(&mut self) {
-        for WatchListItem { watcher, .. } in self.watchers.drain(..) {
-            watcher.stop_nonblocking();
+        for WatchListItem {
+            mut watcher,
+            watch_path,
+            ..
+        } in self.watchers.drain(..)
+        {
+            if let Err(e) = watcher.unwatch(&watch_path) {
+                error!(
+                    "Failed to stop watcher for path {} -- {e}",
+                    watch_path.display()
+                );
+            }
         }
     }
 
@@ -170,13 +183,11 @@ impl WatchServer {
     fn place_watch(
         watch_path: impl AsRef<Path>,
         mode: notify::RecursiveMode,
-    ) -> notify::Result<(WatchReceiver, DebouncedWatcher)> {
+    ) -> notify::Result<(WatchReceiver, ServerWatcher)> {
         let (tx, rx) = crossbeam_channel::unbounded();
         let log_full_path = watch_path.as_ref().to_path_buf();
-        let mut debouncer = new_debouncer(
-            Duration::from_secs(1),
-            None,
-            move |res: notify_debouncer_full::DebounceEventResult| {
+        let mut watcher = ServerWatcher::new(
+            move |res: Result<notify::Event, notify::Error>| {
                 if let Err(e) = tx.send(res) {
                     error!(
                         "Watcher for {} failed to send -- {e}",
@@ -184,11 +195,12 @@ impl WatchServer {
                     );
                 }
             },
+            notify::Config::default(),
         )?;
-        debouncer.watch(&watch_path, mode)?;
+        watcher.watch(watch_path.as_ref(), mode)?;
         info!("Placed watch: {}", watch_path.as_ref().display());
 
-        Ok((rx, debouncer))
+        Ok((rx, watcher))
     }
 
     /// Places debounced watchers on the root path independent of the given repository's submodules
@@ -201,22 +213,34 @@ impl WatchServer {
             self.root_path.as_path(),
             notify::RecursiveMode::NonRecursive,
         )?;
-        self.watchers
-            .push(WatchListItem::new(DOT_GITMODULES, rx, debouncer));
+        self.watchers.push(WatchListItem::new(
+            DOT_GITMODULES,
+            self.root_path.clone(),
+            rx,
+            debouncer,
+        ));
 
         let (rx, debouncer) = Self::place_watch(
             self.dot_git_path.as_path(),
             notify::RecursiveMode::Recursive,
         )?;
-        self.watchers
-            .push(WatchListItem::new(DOT_GIT, rx, debouncer));
+        self.watchers.push(WatchListItem::new(
+            DOT_GIT,
+            self.dot_git_path.clone(),
+            rx,
+            debouncer,
+        ));
 
         let (rx, debouncer) = Self::place_watch(
             self.root_path.as_path(),
             notify::RecursiveMode::NonRecursive,
         )?;
-        self.watchers
-            .push(WatchListItem::new(SHUTDOWN_FILE_PREFIX, rx, debouncer));
+        self.watchers.push(WatchListItem::new(
+            SHUTDOWN_FILE_PREFIX,
+            self.root_path.clone(),
+            rx,
+            debouncer,
+        ));
 
         Ok(())
     }
@@ -258,8 +282,12 @@ impl WatchServer {
 
             let (rx, debouncer) =
                 Self::place_watch(&submod_path, notify::RecursiveMode::Recursive)?;
-            self.watchers
-                .push(WatchListItem::new(rel_path, rx, debouncer));
+            self.watchers.push(WatchListItem::new(
+                rel_path,
+                submod_path.clone(),
+                rx,
+                debouncer,
+            ));
 
             if let Some(id) = self.client_pid {
                 update_progress(
@@ -382,49 +410,42 @@ impl WatchServer {
             sel.recv(receiver); // Register each recv op
         }
 
-        'outer: loop {
+        loop {
             let oper = sel.select(); // Blocks until any ready
             let index = oper.index(); // Which rx fired
 
             match oper.recv(&self.watchers[index].receiver)? {
-                Ok(events) => {
-                    for event in events {
-                        let rel_path = self.watchers[index].relative_path.as_str();
-                        match self.get_event_type(&event, rel_path) {
-                            Some(EventType::GitOperation) => break 'outer,
-                            Some(EventType::ReindexRequest(id)) => {
-                                self.client_pid = Some(id);
-                                break 'outer;
-                            }
-                            Some(EventType::ShutdownRequest(id)) => {
-                                self.client_pid = Some(id);
-                                self.do_watch = false;
-                                break 'outer;
-                            }
-                            Some(EventType::SubmoduleChange) => {
-                                let submod_status = match repo
-                                    .submodule_status(rel_path, git2::SubmoduleIgnore::None)
-                                {
-                                    Ok(st) => st,
-                                    Err(e) => {
-                                        error!(
-                                            "Failed to get submodule status for path: {rel_path} -- {e}"
-                                        );
-                                        continue;
-                                    }
-                                };
-                                SUBMOD_STATUSES
-                                    .lock()
-                                    .expect("Mutex poisoned")
-                                    .entry(rel_path.to_string())
-                                    .and_modify(|st| *st = submod_status.into())
-                                    .or_insert_with(|| submod_status.into());
-                                // Any events for this receiver will refer to the same submodule. Once
-                                // we've triggered an update, any more will be redundant.
-                                break;
-                            }
-                            None => {} // try the next one
+                Ok(event) => {
+                    let rel_path = self.watchers[index].relative_path.as_str();
+                    match self.get_event_type(&event, rel_path) {
+                        Some(EventType::GitOperation) => break,
+                        Some(EventType::ReindexRequest(id)) => {
+                            self.client_pid = Some(id);
+                            break;
                         }
+                        Some(EventType::ShutdownRequest(id)) => {
+                            self.client_pid = Some(id);
+                            self.do_watch = false;
+                            break;
+                        }
+                        Some(EventType::SubmoduleChange) => {
+                            match repo.submodule_status(rel_path, git2::SubmoduleIgnore::None) {
+                                Ok(submod_status) => {
+                                    SUBMOD_STATUSES
+                                        .lock()
+                                        .expect("Mutex poisoned")
+                                        .entry(rel_path.to_string())
+                                        .and_modify(|st| *st = submod_status.into())
+                                        .or_insert_with(|| submod_status.into());
+                                }
+                                Err(e) => {
+                                    error!(
+                                        "Failed to get submodule status for path: {rel_path} -- {e}"
+                                    );
+                                }
+                            }
+                        }
+                        None => {} // try the next one
                     }
                 }
                 Err(e) => {
@@ -485,7 +506,6 @@ fn update_progress(client_pid: u32, progress_val: ProgressUpdate) {
 /// Returns `Err` if the client message couldn't be read, decoded, or handled.
 fn handle_client_connection(conn: Stream, buffer: &mut Vec<u8>, path: &Path) -> WatchResult<bool> {
     let mut conn = BufReader::new(conn);
-    info!("New client connection to server for {}", path.display());
 
     read_full_message(&mut conn, buffer)?;
     let (msg, _): (ClientMessage, usize) = bincode::borrow_decode_from_slice(buffer, BINCODE_CFG)?;
@@ -600,7 +620,10 @@ fn get_status_guard_with_progress<'guard>(
 const fn event_is_relevant(event: &Event) -> bool {
     matches!(
         event.kind,
-        EventKind::Remove(_) | EventKind::Access(AccessKind::Close(AccessMode::Write))
+        EventKind::Remove(_)
+            | EventKind::Access(AccessKind::Close(AccessMode::Write))
+            // This is neeeded for newly created files on Windows only...
+            | EventKind::Create(CreateKind::Any)
     )
 }
 
