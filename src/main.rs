@@ -58,6 +58,9 @@ struct Watch {
     /// The directory containing the repository's `.gitmodules` file
     #[arg(short, long)]
     pub dir: Option<PathBuf>,
+    /// Launch the watch server as a background process
+    #[arg(short, long)]
+    pub force_background: bool,
 }
 
 pub type RunResult<T> = Result<T, RunError>;
@@ -81,6 +84,8 @@ pub enum RunError {
     Home(#[from] HomeDirError),
     #[error(transparent)]
     Clap(#[from] clap::Error),
+    #[error("Failed to launch watch server as background process: {0}")]
+    IO(std::io::Error),
 }
 
 impl Reindex {
@@ -107,6 +112,21 @@ impl Status {
 impl Watch {
     fn run(self) -> RunResult<()> {
         let true_path = get_project_path(self.dir)?;
+        // HACK: Launching background processes on Windows is painful. There isn't a great way to
+        // do it, especially in a manner that works across multiple shells (e.g. cmd, git bash,
+        // powershell, etc.). To make things easy for end users, we can just spawn a new process
+        // to launch the watch server here, forwarding the arguments, and then "forget" it so the
+        // destructor is never called.
+        if self.force_background {
+            let exe_path = std::env::current_exe().map_err(RunError::IO)?;
+            let child = std::process::Command::new(exe_path)
+                .current_dir(true_path)
+                .arg("watch")
+                .spawn()
+                .map_err(RunError::IO)?;
+            std::mem::forget(child);
+            return Ok(());
+        }
         Ok(watch(true_path.as_path())?)
     }
 }
