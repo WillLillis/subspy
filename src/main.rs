@@ -28,6 +28,8 @@ enum Commands {
 }
 
 #[derive(Args)]
+// #[command(visible_alias = "re")]
+#[command(visible_aliases = ["r", "re"])]
 struct Reindex {
     /// The directory whose watcher should reindex
     #[arg(short, long)]
@@ -35,6 +37,7 @@ struct Reindex {
 }
 
 #[derive(Args)]
+#[command(visible_aliases = ["s", "st"])]
 struct Status {
     /// The directory to query `git status` for
     #[arg(short, long)]
@@ -42,6 +45,7 @@ struct Status {
 }
 
 #[derive(Args)]
+#[command(visible_aliases = ["sh", "stop"])]
 struct Shutdown {
     /// The directory to shutdown a watcher for
     #[arg(short, long)]
@@ -49,6 +53,7 @@ struct Shutdown {
 }
 
 #[derive(Args)]
+#[command(visible_aliases = ["w", "wa"])]
 struct Watch {
     /// The directory containing the repository's `.gitmodules` file
     #[arg(short, long)]
