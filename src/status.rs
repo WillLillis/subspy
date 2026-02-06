@@ -3,7 +3,7 @@ use git2::{Repository, Statuses};
 use std::path::Path;
 use thiserror::Error;
 
-use crate::{StatusSummary, connection::client::request_status, paint};
+use crate::{RepoKind, StatusSummary, connection::client::request_status, paint};
 
 pub type StatusResult<T> = Result<T, StatusError>;
 
@@ -25,19 +25,31 @@ const STAGED_HEADER: &str = "Changes to be committed:
 const UNTRACKED_HEADER: &str = "Untracked files
   (use \"git add <file>...\" to include in what will be committed)";
 
-fn unstaged_header(rm_in_workdir: bool) -> String {
+fn unstaged_header(rm_in_workdir: bool, has_submod_changes: bool) -> String {
     format!(
         "Changes not staged for commit:
   (use \"git add{} <file>...\" to update what will be committed)
-  (use \"git restore <file>...\" to discard changes in working directory)",
-        if rm_in_workdir { "/rm" } else { "" }
+  (use \"git restore <file>...\" to discard changes in working directory){}",
+        if rm_in_workdir { "/rm" } else { "" },
+        if has_submod_changes {
+            "\n  (commit or discard the untracked or modified content in submodules)"
+        } else {
+            ""
+        }
     )
 }
 
 fn current_branch_display(repo: &Repository) -> StatusResult<String> {
     let head_ref = repo.head()?;
     if !head_ref.is_branch() {
-        return Ok("detached HEAD".to_string());
+        return Ok(format!(
+            "{} {}",
+            paint(Some(AnsiColor::Red), "HEAD detached at"),
+            head_ref.target().map_or_else(
+                || "unknown".to_string(),
+                |oid| oid.to_string().chars().take(7).collect()
+            ),
+        ));
     }
     let branch_name = head_ref.shorthand().unwrap().to_string();
     Ok(format!("On branch {branch_name}"))
@@ -106,7 +118,7 @@ fn display_status(
     if let (Some(upstream_status), Some(upstream_name)) =
         (get_upstream_status(repo)?, get_upstream_ref_name(repo)?)
     {
-        println!("Your branch is {upstream_status} with '{upstream_name}'\n");
+        println!("Your branch is {upstream_status} with '{upstream_name}'.\n");
     }
 
     // Print index changes
@@ -178,6 +190,12 @@ fn display_status(
     }
     header = false;
 
+    let has_submod_changes = submodule_statuses
+        .iter()
+        .filter(|(_, st)| !st.eq(&StatusSummary::STAGED))
+        .count()
+        > 0;
+
     // Print workdir changes to tracked files
     for entry in non_submodule_statues.iter() {
         if entry.status() == git2::Status::CURRENT || entry.index_to_workdir().is_none() {
@@ -193,7 +211,7 @@ fn display_status(
         };
 
         if !header {
-            println!("{}", unstaged_header(rm_in_workdir));
+            println!("{}", unstaged_header(rm_in_workdir, has_submod_changes));
             header = true;
         }
 
@@ -228,7 +246,7 @@ fn display_status(
     {
         let istatus = submod_status.to_string();
         if !header {
-            println!("{}", unstaged_header(rm_in_workdir));
+            println!("{}", unstaged_header(rm_in_workdir, true));
             header = true;
         }
         print!(
@@ -251,6 +269,7 @@ fn display_status(
     }
     header = false;
 
+    let mut has_untracked = false;
     // Print untracked files
     for entry in non_submodule_statues
         .iter()
@@ -259,6 +278,7 @@ fn display_status(
         if !header {
             println!("{UNTRACKED_HEADER}");
             header = true;
+            has_untracked = true;
         }
         let file = entry.index_to_workdir().unwrap().old_file().path().unwrap();
         println!(
@@ -271,8 +291,17 @@ fn display_status(
         println!();
     }
 
-    if !changes_in_index && changed_in_workdir {
-        println!("no changes added to commit (use \"git add\" and/or \"git commit -a\")");
+    match (changes_in_index, changed_in_workdir, has_untracked) {
+        (false, true, _) => {
+            println!("no changes added to commit (use \"git add\" and/or \"git commit -a\")");
+        }
+        (false, false, false) => println!("nothing to commit, working tree clean"),
+        (false, false, true) => {
+            println!(
+                "nothing added to commit but untracked files present (use \"git add\" to track)"
+            );
+        }
+        _ => {}
     }
 
     Ok(())
@@ -283,7 +312,7 @@ fn display_status(
 /// # Errors
 ///
 /// Returns `Err` if statuses cannot be retrieved from the repository or watch server
-pub fn status(root_path: &Path) -> StatusResult<()> {
+pub fn status(root_path: &Path, repo_kind: RepoKind) -> StatusResult<()> {
     let repo = Repository::open(root_path)?;
 
     let mut opts = git2::StatusOptions::new();
@@ -293,7 +322,19 @@ pub fn status(root_path: &Path) -> StatusResult<()> {
         .include_ignored(false); // Skip ignored files if not needed
     let non_submodule_statuses = repo.statuses(Some(&mut opts))?;
 
-    let submodule_statuses = request_status(root_path)?;
+    let submodule_statuses = if repo_kind == RepoKind::WithSubmodules {
+        match request_status(root_path) {
+            Ok(statuses) => statuses,
+            Err(e) => {
+                eprintln!(
+                    "Failed to retrieve submodule statuses. Have you started a watch server?"
+                );
+                Err(e)?
+            }
+        }
+    } else {
+        Vec::new()
+    };
     display_status(&repo, &non_submodule_statuses, &submodule_statuses)?;
 
     Ok(())

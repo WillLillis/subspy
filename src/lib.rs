@@ -14,6 +14,13 @@ pub mod watch;
 pub const DOT_GITMODULES: &str = ".gitmodules";
 pub const DOT_GIT: &str = ".git";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RepoKind {
+    Normal,
+    WithSubmodules,
+    Submodule,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord, Hash, Encode, BorrowDecode)]
 pub struct StatusSummary(u32);
 

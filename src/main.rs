@@ -7,7 +7,7 @@ use flexi_logger::{Cleanup, Criterion, FileSpec, Logger, Naming, WriteMode};
 use thiserror::Error;
 
 use subspy::{
-    DOT_GITMODULES,
+    DOT_GIT, DOT_GITMODULES, RepoKind,
     connection::{client::request_reindex, watch_server::watch},
     reindex::ReindexError,
     shutdown::{ShutdownError, shutdown},
@@ -28,7 +28,6 @@ enum Commands {
 }
 
 #[derive(Args)]
-// #[command(visible_alias = "re")]
 #[command(visible_aliases = ["r", "re"])]
 struct Reindex {
     /// The directory whose watcher should reindex
@@ -87,49 +86,97 @@ pub enum RunError {
 
 impl Reindex {
     fn run(self) -> RunResult<()> {
-        let true_path = get_project_path(self.dir)?;
+        let (true_path, repo_kind) = get_project_path(self.dir)?;
+        if repo_kind != RepoKind::WithSubmodules {
+            Err(RunError::ProjectPath {
+                #[allow(clippy::redundant_clone)] // false positive
+                path: true_path.clone(),
+                error: io::Error::other(
+                    "Path must be inside a git repository with a .gitmodules file",
+                ),
+            })?;
+        }
         Ok(request_reindex(true_path.as_path())?)
     }
 }
 
 impl Shutdown {
     fn run(self) -> RunResult<()> {
-        let true_path = get_project_path(self.dir)?;
+        let (true_path, repo_kind) = get_project_path(self.dir)?;
+        if repo_kind != RepoKind::WithSubmodules {
+            Err(RunError::ProjectPath {
+                #[allow(clippy::redundant_clone)] // false positive
+                path: true_path.clone(),
+                error: io::Error::other(
+                    "Path must be inside a git repository with a .gitmodules file",
+                ),
+            })?;
+        }
         Ok(shutdown(true_path.as_path())?)
     }
 }
 
 impl Status {
     fn run(self) -> RunResult<()> {
-        let true_path = get_project_path(self.dir)?;
-        Ok(status(true_path.as_path())?)
+        let (true_path, repo_kind) = get_project_path(self.dir)?;
+        Ok(status(true_path.as_path(), repo_kind)?)
     }
 }
 
 impl Watch {
     fn run(self) -> RunResult<()> {
-        let true_path = get_project_path(self.dir)?;
+        let (true_path, repo_kind) = get_project_path(self.dir)?;
+        if repo_kind != RepoKind::WithSubmodules {
+            Err(RunError::ProjectPath {
+                #[allow(clippy::redundant_clone)] // false positive
+                path: true_path.clone(),
+                error: io::Error::other(
+                    "Path must be inside a git repository with a .gitmodules file",
+                ),
+            })?;
+        }
         Ok(watch(true_path.as_path())?)
     }
 }
 
 /// Uses `path` if present or uses the current working directory. Ensures the resolved path
-/// is a directory and contains a `.gitmodules` file.
-fn get_project_path(path: Option<PathBuf>) -> RunResult<PathBuf> {
+/// is a git repository or a child of one.
+///
+/// If found, returns the path to the repository. If the repository contains a `.gitmodules` file,
+/// the second element of the tuple is `true`, otherwise `false`.
+fn get_project_path(path: Option<PathBuf>) -> RunResult<(PathBuf, RepoKind)> {
     let path = path.unwrap_or_else(|| current_dir().unwrap());
-    let true_path =
-        dunce::canonicalize(&path).map_err(|error| RunError::ProjectPath { path, error })?;
-    let mut gitmodules_path = true_path.clone();
-    gitmodules_path.push(DOT_GITMODULES);
-    if !true_path.is_dir() || !gitmodules_path.exists() {
-        Err(RunError::ProjectPath {
-            #[expect(clippy::redundant_clone)] // false positive
-            path: true_path.clone(),
-            error: io::Error::other("Path must be a directory containing `.gitmodules` file"),
-        })?;
-    }
+    let true_path = dunce::canonicalize(&path).map_err(|error| RunError::ProjectPath {
+        path: path.clone(),
+        error,
+    })?;
 
-    Ok(true_path)
+    let mut current_path = true_path.as_path();
+    loop {
+        let dot_git_path = current_path.join(DOT_GIT);
+        // if dot_git_path.exists() && dot_git_path.is_dir() {
+        if dot_git_path.exists() {
+            if dot_git_path.is_file() {
+                return Ok((current_path.to_path_buf(), RepoKind::Submodule));
+            }
+            let dot_gitmodules_path = current_path.join(DOT_GITMODULES);
+            let has_gitmodules = dot_gitmodules_path.exists() && dot_gitmodules_path.is_file();
+            let repo_kind = if has_gitmodules {
+                RepoKind::WithSubmodules
+            } else {
+                RepoKind::Normal
+            };
+            return Ok((current_path.to_path_buf(), repo_kind));
+        }
+        current_path = match current_path.parent() {
+            Some(p) => p,
+            None => Err(RunError::ProjectPath {
+                #[allow(clippy::redundant_clone)] // false positive
+                path: path.clone(),
+                error: io::Error::other("Path must be inside a git repository"),
+            })?,
+        }
+    }
 }
 
 fn paint(color: Option<impl Into<Color>>, text: &str) -> String {
