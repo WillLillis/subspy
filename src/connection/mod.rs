@@ -1,7 +1,7 @@
 //! Client-server implementation
 use core::hash::{Hash as _, Hasher as _};
 use std::{
-    io::{BufRead as _, BufReader, Write as _},
+    io::{BufReader, Read, Write as _},
     path::{Path, PathBuf},
 };
 
@@ -18,9 +18,6 @@ pub mod watch_server;
 
 /// Common bincode configuration used to encode/decode messages between the client and server
 pub const BINCODE_CFG: bincode::config::Configuration = bincode::config::standard().with_no_limit();
-
-/// Delimiter used to signal the end of messages
-const MSG_DELIM: [u8; 4] = [u8::MAX, u8::MAX, u8::MAX, u8::MAX];
 
 #[derive(Clone, Debug, Eq, PartialEq, Encode, BorrowDecode)]
 pub enum ClientMessage {
@@ -41,28 +38,11 @@ pub enum ServerMessage {
 ///
 /// Returns `std::io::Error` if writing to `conn` fails
 pub fn write_full_message(conn: &mut BufReader<Stream>, msg: &[u8]) -> std::io::Result<()> {
+    let len_bytes = (msg.len() as u32).to_le_bytes();
+    conn.get_mut().write_all(&len_bytes)?;
     conn.get_mut().write_all(msg)?;
-    conn.get_mut().write_all(&MSG_DELIM)?;
 
     Ok(())
-}
-
-/// Checks whether `msg` is nonempty and ends with `MSG_DELIM`
-fn has_delimiter(msg: &[u8]) -> bool {
-    let len = msg.len();
-    if len <= MSG_DELIM.len() {
-        return false;
-    }
-    // SAFETY: The length check above guarantees these indices are in-bounds
-    let msg_end = unsafe {
-        [
-            *msg.get_unchecked(len - 4),
-            *msg.get_unchecked(len - 3),
-            *msg.get_unchecked(len - 2),
-            *msg.get_unchecked(len - 1),
-        ]
-    };
-    msg_end == MSG_DELIM
 }
 
 /// Reads from `conn` into `buffer` until the delimiter `MSG_DELIM` is found.
@@ -77,13 +57,18 @@ pub fn read_full_message(
     buffer: &mut Vec<u8>,
 ) -> std::io::Result<()> {
     buffer.clear();
-    while !has_delimiter(buffer) {
-        conn.read_until(u8::MAX, buffer)?;
-    }
 
-    for _ in 0..MSG_DELIM.len() {
-        buffer.pop();
-    }
+    let msg_len = {
+        let mut len_buf = [0u8; 4];
+        conn.read_exact(&mut len_buf)?;
+        u32::from_le_bytes(len_buf) as usize
+    };
+
+    let additional_size = msg_len.saturating_sub(buffer.capacity());
+    buffer.reserve_exact(additional_size);
+    // `buffer` length is set to 0, so resizing fills it with 0s
+    buffer.resize(msg_len, 0);
+    conn.read_exact(buffer)?;
 
     Ok(())
 }
