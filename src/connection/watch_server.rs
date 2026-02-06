@@ -1,8 +1,10 @@
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
+    fs::{self, File},
     io::BufReader,
     path::{Path, PathBuf},
     sync::{LazyLock, Mutex, MutexGuard, TryLockError},
+    time::{Duration, Instant},
 };
 
 use bincode::{BorrowDecode, Encode};
@@ -22,8 +24,11 @@ use crate::{
         write_full_message,
     },
     create_progress_bar,
-    watch::WatchResult,
+    watch::{LockFileError, WatchError, WatchResult},
 };
+
+const MAX_LOCKFILE_BACKOFF: Duration = Duration::from_millis(100);
+const LOCKFILE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The main map of the server, associating submodule relative paths (from the repository's
 /// `.gitmodules` file) to the given submodule's summarized status.
@@ -110,6 +115,56 @@ fn pid_from_event(event: &Event, filename_prefix: &str) -> Option<u32> {
     } else {
         None
     }
+}
+
+fn acquire_lock_file(path: &Path) -> WatchResult<File> {
+    info!("Acquiring lock file at path: {}", path.display());
+    let start = Instant::now();
+    let mut backoff = Duration::from_millis(1);
+
+    let lock_file = loop {
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+        {
+            Ok(f) => break f,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                if start.elapsed() >= LOCKFILE_TIMEOUT {
+                    Err(WatchError::LockFileAcquire(LockFileError::new(
+                        path.to_path_buf(),
+                        e,
+                    )))?;
+                }
+                error!("Lock file {} already exists, waiting...", path.display());
+                std::thread::sleep(backoff);
+                backoff = (backoff * 2).min(MAX_LOCKFILE_BACKOFF);
+            }
+            Err(e) => Err(WatchError::LockFileAcquire(LockFileError::new(
+                path.to_path_buf(),
+                e,
+            )))?,
+        }
+    };
+
+    info!("Acquired lock file at path: {}", path.display());
+    Ok(lock_file)
+}
+
+fn release_lock_file(path: &Path) -> WatchResult<()> {
+    info!("Releasing lock file at path: {}", path.display());
+    fs::remove_file(path)?;
+    info!("Released lock file at path: {}", path.display());
+    Ok(())
+}
+
+macro_rules! with_lock_file {
+    ($lock_path:expr, $body:block) => {{
+        let _lock_file = acquire_lock_file($lock_path)?;
+        let result = $body;
+        release_lock_file($lock_path)?;
+        result
+    }};
 }
 
 impl WatchServer {
@@ -257,7 +312,13 @@ impl WatchServer {
         repo: &Repository,
         display_progress: bool,
     ) -> WatchResult<()> {
-        let submodules = repo.submodules()?;
+        // A race condition can occur if certain git operations (i.e. rebase) are performed
+        // while the server is (re)indexing. git2's `Repository::submodules` function contains
+        // an assert for its inner call to `git_submodule_lookup`, which triggers for a non-zero
+        // return code.
+        let lock_file_path = self.root_path.join(".git").join("index.lock");
+        let submodules = with_lock_file!(&lock_file_path, { repo.submodules()? });
+
         info!("Indexing project at {}", self.root_path.display());
         let progress_bar = display_progress.then_some(create_progress_bar(
             submodules.len() as u64,
@@ -273,10 +334,18 @@ impl WatchServer {
         for (i, submod) in submodules.iter().enumerate() {
             let sub_start = std::time::Instant::now();
             let rel_path = submod.path().to_string_lossy().to_string();
+            let submod_name = submod.name().unwrap();
             let submod_path = self.root_path.clone().join(submod.path());
 
-            let status = repo
-                .submodule_status(submod.path().to_str().unwrap(), git2::SubmoduleIgnore::None)?;
+            let lock_file_path = self
+                .root_path
+                .join(".git")
+                .join("modules")
+                .join(submod_name)
+                .join("index.lock");
+            let status = with_lock_file!(&lock_file_path, {
+                repo.submodule_status(submod.path().to_str().unwrap(), git2::SubmoduleIgnore::None)?
+            });
             let converted_status: StatusSummary = status.into();
             status_guard.insert(rel_path.clone(), converted_status);
 
@@ -372,11 +441,15 @@ impl WatchServer {
         }
 
         if rel_path.eq(DOT_GITMODULES) || rel_path.eq(DOT_GIT) {
-            if event
-                .paths
-                .iter()
-                .any(|p| p.starts_with(&self.dot_git_path) || p.eq(&self.gitmodules_path))
-            {
+            if event.paths.iter().any(|p| {
+                (p.starts_with(&self.dot_git_path) || p.eq(&self.gitmodules_path))
+                    // Both git itself and subspy acquire various `index.lock` files to protect
+                    // various operations. Acquiring such a lock does _not_ mean a reindex is
+                    // necessary, it's just telling other git things "hey don't touch this right now".
+                    // If something _does_ change that requires a reindex, another file will be
+                    // modified which we will pick up on.
+                    && p.file_name().is_none_or(|name| !name.eq("index.lock"))
+            }) {
                 // if this event was triggered by a reindex request, grab
                 // the client's pid
                 pid_from_event(event, REINDEX_FILE_PREFIX)
@@ -429,7 +502,20 @@ impl WatchServer {
                             break;
                         }
                         Some(EventType::SubmoduleChange) => {
-                            match repo.submodule_status(rel_path, git2::SubmoduleIgnore::None) {
+                            let submod_name = rel_path
+                                .split(std::path::MAIN_SEPARATOR)
+                                .next_back()
+                                .unwrap_or(rel_path);
+                            let status = with_lock_file!(
+                                &self
+                                    .root_path
+                                    .join(".git")
+                                    .join("modules")
+                                    .join(submod_name)
+                                    .join("index.lock"),
+                                { repo.submodule_status(rel_path, git2::SubmoduleIgnore::None) }
+                            );
+                            match status {
                                 Ok(submod_status) => {
                                     SUBMOD_STATUSES
                                         .lock()
