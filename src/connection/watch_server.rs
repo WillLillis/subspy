@@ -333,27 +333,36 @@ impl WatchServer {
 
         for (i, submod) in submodules.iter().enumerate() {
             let sub_start = std::time::Instant::now();
-            let rel_path = submod.path().to_string_lossy().to_string();
-            let submod_name = submod.name().unwrap();
-            let submod_path = self.root_path.clone().join(submod.path());
+            let rel_submod_path = submod.path();
+            let full_submod_path = self.root_path.clone().join(rel_submod_path);
 
-            let lock_file_path = self
-                .root_path
-                .join(".git")
-                .join("modules")
-                .join(submod_name)
-                .join("index.lock");
+            // make the regular path,
+            // if it exists we're good
+            // if not, read the .git file and extract the relative path
+            let Ok(lock_file_path) = self.get_index_lock_path(rel_submod_path.to_str().unwrap())
+            else {
+                error!(
+                    "Failed to get lock file path for submodule {}, skipping...",
+                    rel_submod_path.display()
+                );
+                continue;
+            };
             let status = with_lock_file!(&lock_file_path, {
                 repo.submodule_status(submod.path().to_str().unwrap(), git2::SubmoduleIgnore::None)?
             });
             let converted_status: StatusSummary = status.into();
-            status_guard.insert(rel_path.clone(), converted_status);
+            #[cfg(target_os = "windows")]
+            let rel_submod_path_str = rel_submod_path.to_string_lossy().replace('/', "\\");
+            #[cfg(not(target_os = "windows"))]
+            let rel_submod_path_str = rel_submod_path.to_string_lossy().to_string();
+
+            status_guard.insert(rel_submod_path_str.clone(), converted_status);
 
             let (rx, debouncer) =
-                Self::place_watch(&submod_path, notify::RecursiveMode::Recursive)?;
+                Self::place_watch(&full_submod_path, notify::RecursiveMode::Recursive)?;
             self.watchers.push(WatchListItem::new(
-                rel_path,
-                submod_path.clone(),
+                rel_submod_path_str,
+                full_submod_path.clone(),
                 rx,
                 debouncer,
             ));
@@ -369,7 +378,7 @@ impl WatchServer {
             }
             info!(
                 "Indexed {} ({:?} -> {:?}) in {}ms",
-                submod_path.display(),
+                full_submod_path.display(),
                 status,
                 converted_status,
                 sub_start.elapsed().as_millis(),
@@ -474,6 +483,32 @@ impl WatchServer {
         }
     }
 
+    /// Returns the path to the `index.lock` file for a submodule
+    fn get_index_lock_path(&self, submod_rel_path: &str) -> WatchResult<PathBuf> {
+        // NOTE: There is a hypothetical bug here where if two submodules were renamed
+        // to eachother's names _and_ their `.git/modules` entries weren't updates (i.e.,
+        // only the relative path in each submodule's `.git` file), the two lock paths
+        // will be swapped. This is highly unlikely to cuase a bug in real use, and until
+        // its proven to I would prefer to not pessimize the common case with a full read
+        // and parse of the `.git` file.
+        let modules_path = self.root_path.join(".git").join("modules");
+        let alleged_submod_path = modules_path.join(submod_rel_path);
+        if alleged_submod_path.exists() {
+            return Ok(alleged_submod_path.join("index.lock"));
+        }
+
+        // The submodule was renamed at some point but its `.git` directory inside
+        // `.git/modules` wasn't updated, so we have to read the submodule's `.git`
+        // file to get the _actual_ relative path
+        let dot_git_path = self.root_path.join(submod_rel_path).join(".git");
+        let dot_git_contents = std::fs::read_to_string(dot_git_path)?;
+        assert!(dot_git_contents.starts_with("gitdir: "));
+        let actual_rel_path = dot_git_contents["gitdir: ".len()..].trim();
+        let full_submod_path =
+            dunce::canonicalize(self.root_path.join(submod_rel_path).join(actual_rel_path))?;
+        Ok(full_submod_path.join("index.lock"))
+    }
+
     /// The "meat" of the logic for the watch server. Handles incoming watcher events and updates
     /// server state accordingly. This function will only exit if a reindex is required or
     /// requested, or if an error occurs.
@@ -502,19 +537,15 @@ impl WatchServer {
                             break;
                         }
                         Some(EventType::SubmoduleChange) => {
-                            let submod_name = rel_path
-                                .split(std::path::MAIN_SEPARATOR)
-                                .next_back()
-                                .unwrap_or(rel_path);
-                            let status = with_lock_file!(
-                                &self
-                                    .root_path
-                                    .join(".git")
-                                    .join("modules")
-                                    .join(submod_name)
-                                    .join("index.lock"),
-                                { repo.submodule_status(rel_path, git2::SubmoduleIgnore::None) }
-                            );
+                            let Ok(lock_file_path) = self.get_index_lock_path(rel_path) else {
+                                error!(
+                                    "Failed to get lock file path for submodule {rel_path}, skipping status update"
+                                );
+                                continue;
+                            };
+                            let status = with_lock_file!(&lock_file_path, {
+                                repo.submodule_status(rel_path, git2::SubmoduleIgnore::None)
+                            });
                             match status {
                                 Ok(submod_status) => {
                                     SUBMOD_STATUSES
@@ -531,7 +562,7 @@ impl WatchServer {
                                 }
                             }
                         }
-                        None => {} // try the next one
+                        None => {}
                     }
                 }
                 Err(e) => {
