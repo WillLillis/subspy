@@ -22,9 +22,24 @@ any time a change is detected in one of these locations.
 ### Usage
 
 ```sh
-~/very_large_project/ > subspy watch # This process can be sent to the background
+~/very_large_project/ > subspy --help
+Usage: subspy <COMMAND>
+
+Commands:
+  reindex   Reindex a watch server [aliases: r, re]
+  shutdown  Shutdown a watch server [aliases: sh, stop]
+  status    Display the status of a watched git project [aliases: s, st]
+  watch     Start a watch server on a git project [aliases: w, wa]
+
+Options:
+  -h, --help  Print help
+
+~/very_large_project/ > subspy watch & # On Unix, start in a separate terminal on Windows
 # Work on your project as normal
 ~/very_large_project/ > subspy status
+-- top level status here --
+~/very_large_project/ > subspy status --dir some/subdirectory/
+-- other status here --
 ```
 
 ### Installation
@@ -34,7 +49,7 @@ Installing this tool requires the [Rust toolchain](https://rust-lang.org/tools/i
 ```sh
 > git clone https://github.com/WillLillis/subspy
 > cd subspy
-> cargo install --path .
+> cargo install --path . --locked
 ```
 
 #### Outrageous Anecdotal Performance Claims
