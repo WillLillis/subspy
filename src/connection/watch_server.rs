@@ -336,9 +336,6 @@ impl WatchServer {
             let rel_submod_path = submod.path();
             let full_submod_path = self.root_path.clone().join(rel_submod_path);
 
-            // make the regular path,
-            // if it exists we're good
-            // if not, read the .git file and extract the relative path
             let Ok(lock_file_path) = self.get_index_lock_path(rel_submod_path.to_str().unwrap())
             else {
                 error!(

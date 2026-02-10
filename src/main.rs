@@ -142,8 +142,7 @@ impl Watch {
 /// Uses `path` if present or uses the current working directory. Ensures the resolved path
 /// is a git repository or a child of one.
 ///
-/// If found, returns the path to the repository. If the repository contains a `.gitmodules` file,
-/// the second element of the tuple is `true`, otherwise `false`.
+/// If found, returns the path to the repository and the kind of repository.
 fn get_project_path(path: Option<PathBuf>) -> RunResult<(PathBuf, RepoKind)> {
     let path = path.unwrap_or_else(|| current_dir().unwrap());
     let true_path = dunce::canonicalize(&path).map_err(|error| RunError::ProjectPath {
@@ -154,7 +153,6 @@ fn get_project_path(path: Option<PathBuf>) -> RunResult<(PathBuf, RepoKind)> {
     let mut current_path = true_path.as_path();
     loop {
         let dot_git_path = current_path.join(DOT_GIT);
-        // if dot_git_path.exists() && dot_git_path.is_dir() {
         if dot_git_path.exists() {
             if dot_git_path.is_file() {
                 return Ok((current_path.to_path_buf(), RepoKind::Submodule));
