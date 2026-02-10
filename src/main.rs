@@ -1,9 +1,15 @@
-use std::{env::current_dir, io, path::PathBuf};
+use std::{
+    env::current_dir,
+    io,
+    path::{Path, PathBuf},
+    process,
+};
 
 use anstyle::{AnsiColor, Color, Style};
 use clap::{Args, Command, FromArgMatches as _, Subcommand};
 use etcetera::{BaseStrategy, HomeDirError};
 use flexi_logger::{Cleanup, Criterion, FileSpec, Logger, Naming, WriteMode};
+use log::error;
 use thiserror::Error;
 
 use subspy::{
@@ -12,7 +18,7 @@ use subspy::{
     reindex::ReindexError,
     shutdown::{ShutdownError, shutdown},
     status::{StatusError, status},
-    watch::WatchError,
+    watch::{WatchError, WatchResult},
 };
 
 #[derive(Subcommand)]
@@ -57,6 +63,9 @@ struct Watch {
     /// The directory containing the repository's `.gitmodules` file
     #[arg(short, long)]
     pub dir: Option<PathBuf>,
+    /// Launch the watch server as a background process
+    #[arg(long)]
+    pub daemon: bool,
 }
 
 pub type RunResult<T> = Result<T, RunError>;
@@ -135,7 +144,38 @@ impl Watch {
                 ),
             })?;
         }
-        Ok(watch(true_path.as_path())?)
+
+        if self.daemon {
+            Ok(Self::spawn_daemon(&true_path)?)
+        } else {
+            Ok(watch(true_path.as_path())?)
+        }
+    }
+
+    /// Spawns the watch server as a fully detached background process.
+    fn spawn_daemon(path: &Path) -> WatchResult<()> {
+        let exe = std::env::current_exe()?;
+        let mut cmd = process::Command::new(exe);
+        cmd.args(["watch", "--dir"])
+            .arg(path)
+            .stdin(process::Stdio::null())
+            .stdout(process::Stdio::null())
+            .stderr(process::Stdio::null());
+
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt as _;
+            // https://learn.microsoft.com/en-us/windows/win32/procthread/process-creation-flags#flags
+            // The new process does not inherit its parent's console
+            const DETACHED_PROCESS: u32 = 0x0000_0008;
+            // The new process is the root process of a new process group...If this flag is specified,
+            // CTRL+C signals will be disabled for all processes within the new process group.
+            const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+            cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+        }
+
+        cmd.spawn()?;
+        Ok(())
     }
 }
 
@@ -184,6 +224,7 @@ fn paint(color: Option<impl Into<Color>>, text: &str) -> String {
 
 pub fn main() {
     if let Err(err) = run() {
+        error!("Fatal error: {err}");
         if !err.to_string().is_empty() {
             eprintln!("{}: {err}", paint(Some(AnsiColor::Red), "Error"));
         }
@@ -215,6 +256,12 @@ fn run() -> RunResult<()> {
         .write_mode(WriteMode::BufferAndFlush)
         .start()
         .unwrap();
+
+    let default_panic_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        error!("Panic: {info}");
+        default_panic_hook(info);
+    }));
 
     match command {
         Commands::Watch(watch_options) => watch_options.run()?,
