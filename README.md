@@ -73,7 +73,6 @@ sys     0m0.000s
 
 #### Future Improvements
 
-- [ ] Parallelize the indexing of submodules (Need to do some measurements here)
 - [ ] Support some of `git status`'s flags for the `subspy status` command if reasonable
 - [ ] Sort item order of `status` command to more closely match `git status`'s
 - [ ] Flag to disable progress bar if it's problematic for some terminal emulators
