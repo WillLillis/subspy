@@ -312,6 +312,10 @@ impl WatchServer {
         repo: &Repository,
         display_progress: bool,
     ) -> WatchResult<()> {
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        use rayon::prelude::*;
+
         // A race condition can occur if certain git operations (i.e. rebase) are performed
         // while the server is (re)indexing. git2's `Repository::submodules` function contains
         // an assert for its inner call to `git_submodule_lookup`, which triggers for a non-zero
@@ -320,75 +324,96 @@ impl WatchServer {
         let submodules = with_lock_file!(&lock_file_path, { repo.submodules()? });
 
         info!("Indexing project at {}", self.root_path.display());
+        let submod_info: Vec<_> = submodules
+            .iter()
+            .filter_map(|submod| {
+                let rel_path = submod.path();
+                let git_path = rel_path.to_str().unwrap().to_string();
+
+                #[cfg(target_os = "windows")]
+                let relative_path = rel_path.to_string_lossy().replace('/', "\\");
+                #[cfg(not(target_os = "windows"))]
+                let relative_path = git_path.clone();
+
+                let full_path = self.root_path.join(rel_path);
+                let lock_path = match self.get_index_lock_path(&git_path) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        error!(
+                            "Failed to get lock file path for submodule {} - {e}, skipping...",
+                            rel_path.display()
+                        );
+                        return None;
+                    }
+                };
+
+                Some((git_path, relative_path, full_path, lock_path))
+            })
+            .collect();
+
+        let n_submodules = submod_info.len() as u32;
         let progress_bar = display_progress.then_some(create_progress_bar(
-            submodules.len() as u64,
+            u64::from(n_submodules),
             "Indexing submodules",
         ));
 
-        let mut status_guard = SUBMOD_STATUSES.lock().expect("Mutex poisoned");
         if let Some(id) = self.client_pid {
-            update_progress(id, ProgressUpdate::new(0, submodules.len() as u32));
+            update_progress(id, ProgressUpdate::new(0, n_submodules));
         }
-        status_guard.clear();
 
-        for (i, submod) in submodules.iter().enumerate() {
-            let sub_start = std::time::Instant::now();
-            let rel_submod_path = submod.path();
-            let full_submod_path = self.root_path.clone().join(rel_submod_path);
+        let completed = AtomicU32::new(0);
+        let root_path = &self.root_path;
+        let client_pid = self.client_pid;
+        let tl_repo = thread_local::ThreadLocal::new();
 
-            let Ok(lock_file_path) = self.get_index_lock_path(rel_submod_path.to_str().unwrap())
-            else {
-                error!(
-                    "Failed to get lock file path for submodule {}, skipping...",
-                    rel_submod_path.display()
+        let results: WatchResult<Vec<_>> = submod_info
+            .par_iter()
+            .map(|(git_path, relative_path, full_path, lock_path)| {
+                let sub_start = std::time::Instant::now();
+                let repo = tl_repo.get_or_try(|| Repository::open(root_path))?;
+                let status = with_lock_file!(lock_path, {
+                    repo.submodule_status(git_path, git2::SubmoduleIgnore::None)?
+                });
+                let converted_status: StatusSummary = status.into();
+
+                let count = completed.fetch_add(1, Ordering::Relaxed) + 1;
+                if let Some(id) = client_pid {
+                    update_progress(id, ProgressUpdate::new(count, n_submodules));
+                }
+                if let Some(pb) = &progress_bar {
+                    pb.inc(1);
+                }
+                info!(
+                    "Indexed {} ({:?} -> {:?}) in {}ms",
+                    full_path.display(),
+                    status,
+                    converted_status,
+                    sub_start.elapsed().as_millis(),
                 );
-                continue;
-            };
-            let status = with_lock_file!(&lock_file_path, {
-                repo.submodule_status(submod.path().to_str().unwrap(), git2::SubmoduleIgnore::None)?
-            });
-            let converted_status: StatusSummary = status.into();
-            #[cfg(target_os = "windows")]
-            let rel_submod_path_str = rel_submod_path.to_string_lossy().replace('/', "\\");
-            #[cfg(not(target_os = "windows"))]
-            let rel_submod_path_str = rel_submod_path.to_string_lossy().to_string();
 
-            status_guard.insert(rel_submod_path_str.clone(), converted_status);
+                Ok((relative_path.clone(), full_path.clone(), converted_status))
+            })
+            .collect();
+        let results = results?;
 
-            let (rx, debouncer) =
-                Self::place_watch(&full_submod_path, notify::RecursiveMode::Recursive)?;
-            self.watchers.push(WatchListItem::new(
-                rel_submod_path_str,
-                full_submod_path.clone(),
-                rx,
-                debouncer,
-            ));
-
-            if let Some(id) = self.client_pid {
-                update_progress(
-                    id,
-                    ProgressUpdate::new(i as u32 + 1, submodules.len() as u32),
-                );
-            }
-            if let Some(pb) = &progress_bar {
-                pb.inc(1);
-            }
-            info!(
-                "Indexed {} ({:?} -> {:?}) in {}ms",
-                full_submod_path.display(),
-                status,
-                converted_status,
-                sub_start.elapsed().as_millis(),
-            );
+        let mut new_statuses = BTreeMap::new();
+        for (relative_path, _, status) in &results {
+            new_statuses.insert(relative_path.clone(), *status);
         }
+
+        let mut status_guard = SUBMOD_STATUSES.lock().expect("Mutex poisoned");
+        *status_guard = new_statuses;
         drop(status_guard);
+
+        for (map_key, full_path, _) in results {
+            let (rx, debouncer) = Self::place_watch(&full_path, notify::RecursiveMode::Recursive)?;
+            self.watchers
+                .push(WatchListItem::new(map_key, full_path, rx, debouncer));
+        }
 
         self.client_pid = None;
         if let Some(pb) = &progress_bar {
             pb.finish();
-            println!(
-                "Indexing complete. If you haven't already, send this process to the background."
-            );
         }
 
         Ok(())
