@@ -4,8 +4,6 @@ use thiserror::Error;
 
 use crate::connection::client::request_shutdown;
 
-pub const SHUTDOWN_FILE_PREFIX: &str = ".subspy_shutdown_";
-
 pub type ShutdownResult<T> = Result<T, ShutdownError>;
 
 #[derive(Debug, Error)]
@@ -16,12 +14,6 @@ pub enum ShutdownError {
     BincodeDecode(#[from] bincode::error::DecodeError),
     #[error(transparent)]
     IO(#[from] std::io::Error),
-    #[error(transparent)]
-    Receive(#[from] crossbeam_channel::RecvError),
-    #[error(transparent)]
-    Watch(#[from] notify::Error),
-    #[error("Sentinel file watch encountered error(s): {0:?}")]
-    Watcher(Vec<notify::Error>),
 }
 
 /// Issues a shutdown request to the watch server for `root_path`

@@ -19,8 +19,7 @@ use notify::{
 use crate::{
     DOT_GIT, DOT_GITMODULES, StatusSummary,
     connection::{
-        BINCODE_CFG, ClientMessage, REINDEX_FILE_PREFIX, SHUTDOWN_FILE_PREFIX, ServerMessage,
-        create_listener, get_reindex_file_path, get_shutdown_file_path, read_full_message,
+        BINCODE_CFG, ClientMessage, ServerMessage, create_listener, read_full_message,
         write_full_message,
     },
     create_progress_bar,
@@ -75,7 +74,6 @@ impl WatchListItem {
 type WatchList = Vec<WatchListItem>;
 
 /// The primary state necessary to maintain a status watch over the repository at `root_path`
-#[derive(Debug)]
 struct WatchServer {
     /// Whether the server should continue to watch the repository at `root_path`
     pub do_watch: bool,
@@ -89,32 +87,23 @@ struct WatchServer {
     pub gitmodules_path: PathBuf,
     /// `root_path`/.git
     pub dot_git_path: PathBuf,
+    /// Receiver for control messages from the listener thread
+    control_rx: crossbeam_channel::Receiver<ControlMessage>,
 }
 
 /// Summarizes an event received from a watcher. Create with `get_event_type`
 #[derive(Debug, Copy, Clone)]
 enum EventType {
-    /// Client requested reindex of the entire repository
-    ReindexRequest(u32),
-    /// Client requested shutdown of the watch server
-    ShutdownRequest(u32),
     /// Something changed in `.git/` or `.gitmodules`, reindex needed
     GitOperation,
     /// A change occurred in one of the watched submodules
     SubmoduleChange,
 }
 
-fn pid_from_event(event: &Event, filename_prefix: &str) -> Option<u32> {
-    if let Some(name_path) = event.paths.iter().find(|p| {
-        p.file_name()
-            .is_some_and(|n| n.to_string_lossy().starts_with(filename_prefix))
-    }) && let Ok(id) =
-        name_path.file_name().unwrap().to_string_lossy()[filename_prefix.len()..].parse::<u32>()
-    {
-        Some(id)
-    } else {
-        None
-    }
+/// Control messages sent from the listener thread to the main event loop
+enum ControlMessage {
+    Reindex { pid: u32 },
+    Shutdown { pid: u32, conn: BufReader<Stream> },
 }
 
 fn acquire_lock_file(path: &Path) -> WatchResult<File> {
@@ -168,7 +157,7 @@ macro_rules! with_lock_file {
 }
 
 impl WatchServer {
-    pub fn new(root_path: &Path) -> Self {
+    pub fn new(root_path: &Path, control_rx: crossbeam_channel::Receiver<ControlMessage>) -> Self {
         let gitmodules_path = root_path.to_path_buf().join(DOT_GITMODULES);
         let dot_git_path = root_path.to_path_buf().join(DOT_GIT);
 
@@ -179,6 +168,7 @@ impl WatchServer {
             root_path: root_path.to_path_buf(),
             gitmodules_path,
             dot_git_path,
+            control_rx,
         }
     }
 
@@ -187,9 +177,11 @@ impl WatchServer {
     /// # Errors
     ///
     /// Returns `std::io::Error` if the thread cannot be created
-    fn spawn_listener(&self) -> std::io::Result<()> {
-        let path = self.root_path.clone();
-        let listener = create_listener(path.as_path())?;
+    fn spawn_listener(
+        &self,
+        control_tx: crossbeam_channel::Sender<ControlMessage>,
+    ) -> std::io::Result<()> {
+        let listener = create_listener(&self.root_path)?;
         std::thread::Builder::new()
             .name("subspy_listener".to_string())
             .spawn(move || {
@@ -201,7 +193,7 @@ impl WatchServer {
                         None
                     }
                 }) {
-                    if handle_client_connection(conn, &mut buffer, path.as_path())? {
+                    if handle_client_connection(conn, &mut buffer, &control_tx)? {
                         break;
                     }
                 }
@@ -282,17 +274,6 @@ impl WatchServer {
         self.watchers.push(WatchListItem::new(
             DOT_GIT,
             self.dot_git_path.clone(),
-            rx,
-            debouncer,
-        ));
-
-        let (rx, debouncer) = Self::place_watch(
-            self.root_path.as_path(),
-            notify::RecursiveMode::NonRecursive,
-        )?;
-        self.watchers.push(WatchListItem::new(
-            SHUTDOWN_FILE_PREFIX,
-            self.root_path.clone(),
             rx,
             debouncer,
         ));
@@ -427,16 +408,19 @@ impl WatchServer {
         Ok(())
     }
 
-    /// Removes the sentinel shutdown file if it exists, signaling to the client that the watch
-    /// server successfully shut down.
-    fn signal_shutdown(&self) {
-        if let Some(client_pid) = self.client_pid {
-            let shutdown_path = get_shutdown_file_path(&self.root_path, client_pid);
-            if let Err(e) = std::fs::remove_file(&shutdown_path) {
-                error!(
-                    "Failed to remove shutdown file {} -- {e}",
-                    shutdown_path.display()
-                );
+    /// Sends a shutdown acknowledgment to the client over the IPC connection.
+    fn signal_shutdown(shutdown_conn: Option<BufReader<Stream>>) {
+        if let Some(mut conn) = shutdown_conn {
+            let msg = ServerMessage::ShutdownAck;
+            match bincode::encode_to_vec(msg, BINCODE_CFG) {
+                Ok(serialized) => {
+                    if let Err(e) = write_full_message(&mut conn, &serialized) {
+                        error!("Failed to send shutdown ack -- {e}");
+                    }
+                }
+                Err(e) => {
+                    error!("Failed to encode shutdown ack -- {e}");
+                }
             }
         }
     }
@@ -446,6 +430,8 @@ impl WatchServer {
     fn watch(&mut self) -> WatchResult<()> {
         // only display the progress bar on the first indexing
         let mut display_progress = true;
+        // If a shutdown was requested, holds the requesting client's IPC connection
+        let mut shutdown_conn = None;
         loop {
             self.clear_watchers();
             if !self.do_watch {
@@ -456,10 +442,10 @@ impl WatchServer {
             self.setup(&repo, display_progress)?;
             display_progress = false;
 
-            self.handle_events(&repo)?;
+            shutdown_conn = self.handle_events(&repo)?;
         }
 
-        self.signal_shutdown();
+        Self::signal_shutdown(shutdown_conn);
 
         Ok(())
     }
@@ -481,25 +467,10 @@ impl WatchServer {
                     // modified which we will pick up on.
                     && p.file_name().is_none_or(|name| !name.eq("index.lock"))
             }) {
-                // if this event was triggered by a reindex request, grab
-                // the client's pid
-                pid_from_event(event, REINDEX_FILE_PREFIX)
-                    // otherwise it's just some git operation, trigger a reindex
-                    .map_or(Some(EventType::GitOperation), |pid| {
-                        Some(EventType::ReindexRequest(pid))
-                    })
+                Some(EventType::GitOperation)
             } else {
                 None
             }
-        } else if rel_path.eq(SHUTDOWN_FILE_PREFIX)
-            && event.paths.iter().any(|p| {
-                p.file_name().is_some_and(|n| {
-                    n.to_str()
-                        .is_some_and(|n| n.starts_with(SHUTDOWN_FILE_PREFIX))
-                })
-            })
-        {
-            pid_from_event(event, SHUTDOWN_FILE_PREFIX).map(EventType::ShutdownRequest)
         } else {
             Some(EventType::SubmoduleChange)
         }
@@ -533,31 +504,41 @@ impl WatchServer {
 
     /// The "meat" of the logic for the watch server. Handles incoming watcher events and updates
     /// server state accordingly. This function will only exit if a reindex is required or
-    /// requested, or if an error occurs.
-    fn handle_events(&mut self, repo: &Repository) -> WatchResult<()> {
+    /// requested, a shutdown is received via the control channel, or if an error occurs.
+    ///
+    /// Returns `Some(conn)` if a shutdown was requested, where `conn` is the client's IPC
+    /// connection to send the acknowledgment through.
+    fn handle_events(&mut self, repo: &Repository) -> WatchResult<Option<BufReader<Stream>>> {
         let mut sel = crossbeam_channel::Select::new();
+        // filesystem watchers
         for WatchListItem { receiver, .. } in &self.watchers {
-            sel.recv(receiver); // Register each recv op
+            sel.recv(receiver);
         }
+        // handles client requests from the listener thread
+        let control_idx = sel.recv(&self.control_rx);
 
         loop {
             let oper = sel.select(); // Blocks until any ready
             let index = oper.index(); // Which rx fired
 
+            if index == control_idx {
+                match oper.recv(&self.control_rx)? {
+                    ControlMessage::Reindex { pid } => {
+                        self.client_pid = Some(pid);
+                        return Ok(None);
+                    }
+                    ControlMessage::Shutdown { pid, conn } => {
+                        self.client_pid = Some(pid);
+                        self.do_watch = false;
+                        return Ok(Some(conn));
+                    }
+                }
+            }
             match oper.recv(&self.watchers[index].receiver)? {
                 Ok(event) => {
                     let rel_path = self.watchers[index].relative_path.as_str();
                     match self.get_event_type(&event, rel_path) {
                         Some(EventType::GitOperation) => break,
-                        Some(EventType::ReindexRequest(id)) => {
-                            self.client_pid = Some(id);
-                            break;
-                        }
-                        Some(EventType::ShutdownRequest(id)) => {
-                            self.client_pid = Some(id);
-                            self.do_watch = false;
-                            break;
-                        }
                         Some(EventType::SubmoduleChange) => {
                             let Ok(lock_file_path) = self.get_index_lock_path(rel_path) else {
                                 error!(
@@ -589,14 +570,14 @@ impl WatchServer {
                 }
                 Err(e) => {
                     error!(
-                        "Watcher error for submodule {}: {:?}",
-                        self.watchers[index].relative_path, e
+                        "Watcher error for submodule {}: {e}",
+                        self.watchers[index].relative_path
                     );
                 }
             }
         }
 
-        Ok(())
+        Ok(None)
     }
 }
 
@@ -638,22 +619,38 @@ fn update_progress(client_pid: u32, progress_val: ProgressUpdate) {
     queue.push_back(progress_val);
 }
 
-/// Handles incoming client connections. Returns whether the listener recieved a shutdown command
+/// Handles incoming client connections. Returns whether the listener received a shutdown command
 ///
 /// # Errors
 ///
 /// Returns `Err` if the client message couldn't be read, decoded, or handled.
-fn handle_client_connection(conn: Stream, buffer: &mut Vec<u8>, path: &Path) -> WatchResult<bool> {
+fn handle_client_connection(
+    conn: Stream,
+    buffer: &mut Vec<u8>,
+    control_tx: &crossbeam_channel::Sender<ControlMessage>,
+) -> WatchResult<bool> {
     let mut conn = BufReader::new(conn);
 
     read_full_message(&mut conn, buffer)?;
     let (msg, _): (ClientMessage, usize) = bincode::borrow_decode_from_slice(buffer, BINCODE_CFG)?;
 
     match msg {
-        ClientMessage::Reindex(client_pid) => handle_reindex_request(conn, path, client_pid)?,
+        ClientMessage::Reindex(client_pid) => {
+            // Trigger the main loop to reindex
+            if let Err(e) = control_tx.send(ControlMessage::Reindex { pid: client_pid }) {
+                error!("Failed to send reindex control message -- {e}");
+            }
+            // Send progress updates to the client
+            handle_reindex_request(conn, client_pid)?;
+        }
         ClientMessage::Status(client_pid) => handle_status_request(conn, client_pid)?,
         ClientMessage::Shutdown(client_pid) => {
-            handle_shutdown_request(path, client_pid);
+            if let Err(e) = control_tx.send(ControlMessage::Shutdown {
+                pid: client_pid,
+                conn,
+            }) {
+                error!("Failed to send shutdown control message -- {e}");
+            }
             return Ok(true);
         }
     }
@@ -678,30 +675,10 @@ fn handle_status_request(mut conn: BufReader<Stream>, client_pid: u32) -> WatchR
     Ok(())
 }
 
-/// Handles a client's request to shut down the watch server.
-fn handle_shutdown_request(root_dir: &Path, client_pid: u32) {
-    let shutdown_path = get_shutdown_file_path(root_dir, client_pid);
-    if let Err(e) = std::fs::write(&shutdown_path, "it's so joever") {
-        error!(
-            "Failed to write to shutdown file '{}' -- {e}",
-            shutdown_path.display()
-        );
-    }
-}
-
-/// Handles a client's request to reindex the watch server.
-fn handle_reindex_request(
-    mut conn: BufReader<Stream>,
-    root_dir: &Path,
-    client_pid: u32,
-) -> WatchResult<()> {
-    // changes to files within the `.git` directory trigger a full re-index, so we only need to
-    // create a file inside `.git` for this to work.
-    let reindex_path = get_reindex_file_path(root_dir, client_pid);
-    std::fs::write(&reindex_path, "we're so back")?;
-    // NOTE: If this file is immediately removed, the watcher doesn't pick up its creation. To get
-    // around this, the responsibility for deletion falls on the client.
-
+/// Handles a client's request to reindex the watch server. The reindex signal has already
+/// been sent to the main event loop via the control channel; this function handles sending
+/// progress updates back to the client over the IPC connection.
+fn handle_reindex_request(mut conn: BufReader<Stream>, client_pid: u32) -> WatchResult<()> {
     while !try_send_progress_update(&mut conn, client_pid)? {}
 
     _ = PROGRESS_QUEUE
@@ -776,8 +753,9 @@ const fn event_is_relevant(event: &Event) -> bool {
 ///
 /// Panics if the `SUBMOD_STATUSES` mutex is poisoned.
 pub fn watch(root_dir: &Path) -> WatchResult<()> {
-    let mut server = WatchServer::new(root_dir);
-    server.spawn_listener()?;
+    let (control_tx, control_rx) = crossbeam_channel::unbounded();
+    let mut server = WatchServer::new(root_dir, control_rx);
+    server.spawn_listener(control_tx)?;
     server.watch()?;
 
     Ok(())

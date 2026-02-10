@@ -14,8 +14,6 @@ pub enum ReindexError {
     IO(#[from] std::io::Error),
 }
 
-pub const REINDEX_FILE_PREFIX: &str = ".subspy_reindex_";
-
 /// Issues a reindex request to the watch server for `root_path`.
 ///
 /// # Errors
