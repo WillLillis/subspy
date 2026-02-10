@@ -2,7 +2,7 @@
 use core::hash::{Hash as _, Hasher as _};
 use std::{
     io::{BufReader, Read, Write as _},
-    path::{Path, PathBuf},
+    path::Path,
 };
 
 use bincode::{BorrowDecode, Encode};
@@ -11,7 +11,7 @@ use interprocess::local_socket::{
     ToFsName as _, ToNsName as _,
 };
 
-use crate::{DOT_GIT, StatusSummary, reindex::REINDEX_FILE_PREFIX, shutdown::SHUTDOWN_FILE_PREFIX};
+use crate::StatusSummary;
 
 pub mod client;
 pub mod watch_server;
@@ -30,6 +30,7 @@ pub enum ClientMessage {
 pub enum ServerMessage {
     Status(Vec<(String, StatusSummary)>),
     Indexing { curr: u32, total: u32 },
+    ShutdownAck,
 }
 
 /// Writes all of `msg` to `conn`, followed by `MSG_DELIM`
@@ -111,18 +112,4 @@ pub fn create_listener(root_dir: &Path) -> std::io::Result<Listener> {
     };
 
     Ok(listener)
-}
-
-/// Returns reindex sentinel file path for the repository at `root_dir`.
-#[must_use]
-pub fn get_reindex_file_path(root_dir: &Path, client_pid: u32) -> PathBuf {
-    let reindex_file_name = format!("{REINDEX_FILE_PREFIX}{client_pid}");
-    root_dir.to_path_buf().join(DOT_GIT).join(reindex_file_name)
-}
-
-/// Returns shutdown sentinel file path for the repository at `root_dir`.
-#[must_use]
-pub fn get_shutdown_file_path(root_dir: &Path, client_pid: u32) -> PathBuf {
-    let reindex_file_name = format!("{SHUTDOWN_FILE_PREFIX}{client_pid}");
-    root_dir.to_path_buf().join(reindex_file_name)
 }

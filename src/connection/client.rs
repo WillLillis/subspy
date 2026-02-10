@@ -2,17 +2,15 @@ use std::{io::BufReader, path::Path};
 
 use interprocess::local_socket::{Stream, traits::Stream as _};
 use log::error;
-use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher as _};
 
 use crate::{
     StatusSummary,
     connection::{
-        BINCODE_CFG, ClientMessage, ServerMessage, get_reindex_file_path, get_shutdown_file_path,
-        ipc_name, read_full_message, write_full_message,
+        BINCODE_CFG, ClientMessage, ServerMessage, ipc_name, read_full_message, write_full_message,
     },
     create_progress_bar,
     reindex::ReindexResult,
-    shutdown::{ShutdownError, ShutdownResult},
+    shutdown::ShutdownResult,
     status::StatusResult,
 };
 
@@ -52,17 +50,6 @@ pub fn request_reindex(root_path: &Path) -> ReindexResult<()> {
 
     progress_bar.finish_with_message("Reindex complete");
 
-    // NOTE: If this file is immediately removed after creation by the server,
-    // the watcher doesn't pick up its creation. To get around this, we remove
-    // the file here after we know it's already served its purpose.
-    let reindex_file_path = get_reindex_file_path(root_path, client_pid);
-    if let Err(e) = std::fs::remove_file(&reindex_file_path) {
-        error!(
-            "Failed to remove reindex sentinel file {} -- {e}",
-            reindex_file_path.display()
-        );
-    }
-
     Ok(())
 }
 
@@ -70,46 +57,30 @@ pub fn request_reindex(root_path: &Path) -> ReindexResult<()> {
 ///
 /// # Errors
 ///
-/// Returns `Err` if client-server communication fails, a watcher cannot be created
-/// on the shutdown sentinel file, or if bincode fails to encode a message.
+/// Returns `Err` if client-server communication or bincode encoding/decoding fails.
 pub fn request_shutdown(root_path: &Path) -> ShutdownResult<()> {
-    // setup a watcher for when the sentinel shutdown gets deleted
-    let (tx, rx) = crossbeam_channel::unbounded();
-    let log_full_path = root_path.to_path_buf();
-    let mut watcher = RecommendedWatcher::new(
-        move |res: Result<notify::Event, _>| {
-            if let Err(e) = tx.send(res) {
-                error!(
-                    "Watcher for {} failed to send -- {e}",
-                    log_full_path.display()
-                );
-            }
-        },
-        notify::Config::default(),
-    )?;
-    let pid = std::process::id();
-    let shutdown_file_path = get_shutdown_file_path(root_path, pid);
-    watcher.watch(root_path, RecursiveMode::NonRecursive)?;
-
     let name = ipc_name(root_path)?;
     let conn = Stream::connect(name)?;
     let mut conn = BufReader::new(conn);
+    let pid = std::process::id();
     let status_req = ClientMessage::Shutdown(pid);
     let msg = bincode::encode_to_vec(status_req, BINCODE_CFG)?;
     write_full_message(&mut conn, &msg)?;
 
-    // wait until the watch server deletes the file to signal its shutdown
-    loop {
-        let event = rx.recv()?.map_err(ShutdownError::Watch)?;
-        if matches!(event.kind, EventKind::Remove(_))
-            && event.paths.iter().any(|p| p.eq(&shutdown_file_path))
-        {
+    // Wait for the watch server to acknowledge the shutdown
+    let mut buffer = Vec::with_capacity(1024);
+    read_full_message(&mut conn, &mut buffer)?;
+    let (resp, _): (ServerMessage, usize) =
+        bincode::borrow_decode_from_slice(&buffer, BINCODE_CFG)?;
+
+    match resp {
+        ServerMessage::ShutdownAck => {
             println!(
                 "Successfully shutdown watch server for {}",
                 root_path.display()
             );
-            break;
         }
+        other => error!("Unexpected response from server during shutdown: {other:?}"),
     }
 
     Ok(())
@@ -149,6 +120,9 @@ pub fn request_status(root_path: &Path) -> StatusResult<Vec<(String, StatusSumma
             ServerMessage::Indexing { curr, total } => {
                 progress_bar.set_length(u64::from(total));
                 progress_bar.set_position(u64::from(curr));
+            }
+            ServerMessage::ShutdownAck => {
+                error!("Unexpected shutdown ack received during status request");
             }
         }
         buffer.clear();
