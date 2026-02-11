@@ -9,7 +9,7 @@ use anstyle::{AnsiColor, Color, Style};
 use clap::{Args, Command, FromArgMatches as _, Subcommand};
 use etcetera::{BaseStrategy, HomeDirError};
 use flexi_logger::{Cleanup, Criterion, FileSpec, Logger, Naming, WriteMode};
-use log::error;
+use log::{error, info};
 use thiserror::Error;
 
 use subspy::{
@@ -21,7 +21,7 @@ use subspy::{
     watch::{WatchError, WatchResult},
 };
 
-#[derive(Subcommand)]
+#[derive(Subcommand, Debug)]
 enum Commands {
     /// Reindex a watch server
     Reindex(Reindex),
@@ -33,7 +33,7 @@ enum Commands {
     Watch(Watch),
 }
 
-#[derive(Args)]
+#[derive(Args, Debug)]
 #[command(visible_aliases = ["r", "re"])]
 struct Reindex {
     /// The directory whose watcher should reindex
@@ -41,7 +41,7 @@ struct Reindex {
     pub dir: Option<PathBuf>,
 }
 
-#[derive(Args)]
+#[derive(Args, Debug)]
 #[command(visible_aliases = ["s", "st"])]
 struct Status {
     /// The directory to query `git status` for
@@ -49,7 +49,7 @@ struct Status {
     pub dir: Option<PathBuf>,
 }
 
-#[derive(Args)]
+#[derive(Args, Debug)]
 #[command(visible_aliases = ["sh", "stop"])]
 struct Shutdown {
     /// The directory to shutdown a watcher for
@@ -57,7 +57,7 @@ struct Shutdown {
     pub dir: Option<PathBuf>,
 }
 
-#[derive(Args)]
+#[derive(Args, Debug)]
 #[command(visible_aliases = ["w", "wa"])]
 struct Watch {
     /// The directory containing the repository's `.gitmodules` file
@@ -262,6 +262,7 @@ fn run() -> RunResult<()> {
         error!("Panic: {info}");
         default_panic_hook(info);
     }));
+    info!("Invoked with command: {command:#?}");
 
     match command {
         Commands::Watch(watch_options) => watch_options.run()?,

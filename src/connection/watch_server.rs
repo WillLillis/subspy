@@ -10,7 +10,7 @@ use std::{
 use bincode::{BorrowDecode, Encode};
 use git2::Repository;
 use interprocess::local_socket::{Stream, traits::ListenerExt as _};
-use log::{error, info};
+use log::{error, info, trace};
 use notify::{
     Event, EventKind, Watcher,
     event::{AccessKind, AccessMode, CreateKind},
@@ -107,7 +107,7 @@ enum ControlMessage {
 }
 
 fn acquire_lock_file(path: &Path) -> WatchResult<File> {
-    info!("Acquiring lock file at path: {}", path.display());
+    trace!("Acquiring lock file at path: {}", path.display());
     let start = Instant::now();
     let mut backoff = Duration::from_millis(1);
 
@@ -125,7 +125,7 @@ fn acquire_lock_file(path: &Path) -> WatchResult<File> {
                         e,
                     )))?;
                 }
-                error!("Lock file {} already exists, waiting...", path.display());
+                trace!("Lock file {} already exists, waiting...", path.display());
                 std::thread::sleep(backoff);
                 backoff = (backoff * 2).min(MAX_LOCKFILE_BACKOFF);
             }
@@ -136,14 +136,14 @@ fn acquire_lock_file(path: &Path) -> WatchResult<File> {
         }
     };
 
-    info!("Acquired lock file at path: {}", path.display());
+    trace!("Acquired lock file at path: {}", path.display());
     Ok(lock_file)
 }
 
 fn release_lock_file(path: &Path) -> WatchResult<()> {
-    info!("Releasing lock file at path: {}", path.display());
+    trace!("Releasing lock file at path: {}", path.display());
     fs::remove_file(path)?;
-    info!("Released lock file at path: {}", path.display());
+    trace!("Released lock file at path: {}", path.display());
     Ok(())
 }
 
@@ -245,7 +245,7 @@ impl WatchServer {
             notify::Config::default(),
         )?;
         watcher.watch(watch_path.as_ref(), mode)?;
-        info!("Placed watch: {}", watch_path.as_ref().display());
+        trace!("Placed watch: {}", watch_path.as_ref().display());
 
         Ok((rx, watcher))
     }
@@ -364,7 +364,7 @@ impl WatchServer {
                 if let Some(pb) = &progress_bar {
                     pb.inc(1);
                 }
-                info!(
+                trace!(
                     "Indexed {} ({:?} -> {:?}) in {}ms",
                     full_path.display(),
                     status,
@@ -633,6 +633,7 @@ fn handle_client_connection(
 
     read_full_message(&mut conn, buffer)?;
     let (msg, _): (ClientMessage, usize) = bincode::borrow_decode_from_slice(buffer, BINCODE_CFG)?;
+    info!("Received client message: {msg:?}");
 
     match msg {
         ClientMessage::Reindex(client_pid) => {
