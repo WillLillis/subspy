@@ -6,7 +6,7 @@ use std::{
 };
 
 use anstyle::{AnsiColor, Color, Style};
-use clap::{Args, Command, FromArgMatches as _, Subcommand};
+use clap::{Args, Command, FromArgMatches as _, Subcommand, ValueEnum};
 use etcetera::{BaseStrategy, HomeDirError};
 use flexi_logger::{Cleanup, Criterion, FileSpec, Logger, Naming, WriteMode};
 use log::{error, info};
@@ -33,12 +33,26 @@ enum Commands {
     Watch(Watch),
 }
 
+impl Commands {
+    const fn log_level(&self) -> Option<LogLevel> {
+        match self {
+            Self::Reindex(cmd) => cmd.log_level,
+            Self::Shutdown(cmd) => cmd.log_level,
+            Self::Status(cmd) => cmd.log_level,
+            Self::Watch(cmd) => cmd.log_level,
+        }
+    }
+}
+
 #[derive(Args, Debug)]
 #[command(visible_aliases = ["r", "re"])]
 struct Reindex {
     /// The directory whose watcher should reindex
     #[arg(short, long)]
     pub dir: Option<PathBuf>,
+    /// The log level to use for the requesting client
+    #[arg(short, long)]
+    pub log_level: Option<LogLevel>,
 }
 
 #[derive(Args, Debug)]
@@ -47,6 +61,9 @@ struct Status {
     /// The directory to query `git status` for
     #[arg(short, long)]
     pub dir: Option<PathBuf>,
+    /// The log level to use for the requesting client
+    #[arg(short, long)]
+    pub log_level: Option<LogLevel>,
 }
 
 #[derive(Args, Debug)]
@@ -55,6 +72,9 @@ struct Shutdown {
     /// The directory to shutdown a watcher for
     #[arg(short, long)]
     pub dir: Option<PathBuf>,
+    /// The log level to use for the requesting client
+    #[arg(short, long)]
+    pub log_level: Option<LogLevel>,
 }
 
 #[derive(Args, Debug)]
@@ -66,6 +86,9 @@ struct Watch {
     /// Launch the watch server as a background process
     #[arg(long)]
     pub daemon: bool,
+    /// The log level to use for the watch server
+    #[arg(short, long)]
+    pub log_level: Option<LogLevel>,
 }
 
 pub type RunResult<T> = Result<T, RunError>;
@@ -91,6 +114,43 @@ pub enum RunError {
     Clap(#[from] clap::Error),
     #[error("Failed to launch watch server as background process: {0}")]
     IO(std::io::Error),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum LogLevel {
+    Error,
+    Warn,
+    Info,
+    Debug,
+    Trace,
+}
+
+impl From<LogLevel> for flexi_logger::LogSpecification {
+    fn from(level: LogLevel) -> Self {
+        match level {
+            LogLevel::Error => Self::error(),
+            LogLevel::Warn => Self::warn(),
+            LogLevel::Info => Self::info(),
+            LogLevel::Debug => Self::debug(),
+            LogLevel::Trace => Self::trace(),
+        }
+    }
+}
+
+impl std::fmt::Display for LogLevel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}",
+            match self {
+                Self::Error => "error",
+                Self::Warn => "warn",
+                Self::Info => "info",
+                Self::Debug => "debug",
+                Self::Trace => "trace",
+            }
+        )
+    }
 }
 
 impl Reindex {
@@ -146,14 +206,15 @@ impl Watch {
         }
 
         if self.daemon {
-            Ok(Self::spawn_daemon(&true_path)?)
+            Ok(Self::spawn_daemon(&true_path, self.log_level)?)
         } else {
             Ok(watch(true_path.as_path())?)
         }
     }
 
     /// Spawns the watch server as a fully detached background process.
-    fn spawn_daemon(path: &Path) -> WatchResult<()> {
+    fn spawn_daemon(path: &Path, log_level: Option<LogLevel>) -> WatchResult<()> {
+        let log_level = log_level.map(|l| l.to_string());
         let exe = std::env::current_exe()?;
         let mut cmd = process::Command::new(exe);
         cmd.args(["watch", "--dir"])
@@ -161,6 +222,9 @@ impl Watch {
             .stdin(process::Stdio::null())
             .stdout(process::Stdio::null())
             .stderr(process::Stdio::null());
+        if let Some(log_level) = log_level {
+            cmd.args(["--log-level", &log_level]);
+        }
 
         #[cfg(target_os = "windows")]
         {
@@ -245,8 +309,7 @@ fn run() -> RunResult<()> {
     let mut log_file_dir = etcetera::choose_base_strategy()?.cache_dir();
     log_file_dir.push("subspy");
 
-    Logger::try_with_env_or_str("info")
-        .unwrap()
+    Logger::with(command.log_level().unwrap_or(LogLevel::Info))
         .log_to_file(FileSpec::default().directory(log_file_dir))
         .rotate(
             Criterion::Size(10 * 1024 * 1024),
