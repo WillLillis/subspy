@@ -1,6 +1,6 @@
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
-    fs::{self, File},
+    fs,
     io::BufReader,
     path::{Path, PathBuf},
     sync::{LazyLock, Mutex, MutexGuard, TryLockError},
@@ -109,54 +109,57 @@ enum ControlMessage {
     Shutdown { pid: u32, conn: BufReader<Stream> },
 }
 
-fn acquire_lock_file(path: &Path) -> WatchResult<File> {
-    trace!("Acquiring lock file at path: {}", path.display());
-    let start = Instant::now();
-    let mut backoff = Duration::from_millis(1);
+/// RAII guard that acquires a lock file on creation and removes it on drop.
+struct LockFileGuard<'a> {
+    path: &'a Path,
+}
 
-    let lock_file = loop {
-        match fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(path)
-        {
-            Ok(f) => break f,
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                if start.elapsed() >= LOCKFILE_TIMEOUT {
-                    Err(WatchError::LockFileAcquire(LockFileError::new(
-                        path.to_path_buf(),
-                        e,
-                    )))?;
+impl<'a> LockFileGuard<'a> {
+    fn acquire(path: &'a Path) -> WatchResult<Self> {
+        trace!("Acquiring lock file at path: {}", path.display());
+        let start = Instant::now();
+        let mut backoff = Duration::from_millis(1);
+
+        loop {
+            match fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(path)
+            {
+                Ok(_) => break,
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    if start.elapsed() >= LOCKFILE_TIMEOUT {
+                        Err(WatchError::LockFileAcquire(LockFileError::new(
+                            path.to_path_buf(),
+                            e,
+                        )))?;
+                    }
+                    trace!("Lock file {} already exists, waiting...", path.display());
+                    std::thread::sleep(backoff);
+                    backoff = (backoff * 2).min(MAX_LOCKFILE_BACKOFF);
                 }
-                trace!("Lock file {} already exists, waiting...", path.display());
-                std::thread::sleep(backoff);
-                backoff = (backoff * 2).min(MAX_LOCKFILE_BACKOFF);
+                Err(e) => Err(WatchError::LockFileAcquire(LockFileError::new(
+                    path.to_path_buf(),
+                    e,
+                )))?,
             }
-            Err(e) => Err(WatchError::LockFileAcquire(LockFileError::new(
-                path.to_path_buf(),
-                e,
-            )))?,
         }
-    };
 
-    trace!("Acquired lock file at path: {}", path.display());
-    Ok(lock_file)
+        trace!("Acquired lock file at path: {}", path.display());
+        Ok(Self { path })
+    }
 }
 
-fn release_lock_file(path: &Path) -> WatchResult<()> {
-    trace!("Releasing lock file at path: {}", path.display());
-    fs::remove_file(path)?;
-    trace!("Released lock file at path: {}", path.display());
-    Ok(())
-}
-
-macro_rules! with_lock_file {
-    ($lock_path:expr, $body:block) => {{
-        let _lock_file = acquire_lock_file($lock_path)?;
-        let result = $body;
-        release_lock_file($lock_path)?;
-        result
-    }};
+impl Drop for LockFileGuard<'_> {
+    fn drop(&mut self) {
+        trace!("Releasing lock file at path: {}", self.path.display());
+        if let Err(e) = fs::remove_file(self.path) {
+            error!(
+                "Failed to release lock file at {}: {e}",
+                self.path.display()
+            );
+        }
+    }
 }
 
 impl WatchServer {
@@ -307,7 +310,10 @@ impl WatchServer {
         // an assert for its inner call to `git_submodule_lookup`, which triggers for a non-zero
         // return code.
         let lock_file_path = self.root_path.join(".git").join("index.lock");
-        let submodules = with_lock_file!(&lock_file_path, { repo.submodules()? });
+        let submodules = {
+            let _lock = LockFileGuard::acquire(&lock_file_path)?;
+            repo.submodules()?
+        };
 
         info!("Indexing project at {}", self.root_path.display());
         let submod_info: Vec<_> = submodules
@@ -361,9 +367,10 @@ impl WatchServer {
                 #[cfg(target_os = "windows")]
                 let relative_path = relative_path.replace('\\', "/");
 
-                let status = with_lock_file!(&lock_path, {
+                let status = {
+                    let _lock = LockFileGuard::acquire(&lock_path)?;
                     repo.submodule_status(&relative_path, git2::SubmoduleIgnore::None)?
-                });
+                };
                 let converted_status: StatusSummary = status.into();
 
                 let count = completed.fetch_add(1, Ordering::Relaxed) + 1;
@@ -564,9 +571,10 @@ impl WatchServer {
                                         watcher.watch_path.display()
                                     )
                                 });
-                            let status = with_lock_file!(lock_file_path, {
+                            let status = {
+                                let _lock = LockFileGuard::acquire(lock_file_path)?;
                                 repo.submodule_status(rel_path, git2::SubmoduleIgnore::None)
-                            });
+                            };
                             match status {
                                 Ok(submod_status) => {
                                     let mut guard = SUBMOD_STATUSES.lock().expect("Mutex poisoned");
