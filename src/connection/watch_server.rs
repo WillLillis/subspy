@@ -3,7 +3,7 @@ use std::{
     fs,
     io::BufReader,
     path::{Path, PathBuf},
-    sync::{LazyLock, Mutex, MutexGuard, TryLockError},
+    sync::{Arc, Mutex, MutexGuard, TryLockError},
     time::{Duration, Instant},
 };
 
@@ -29,14 +29,10 @@ use crate::{
 const MAX_LOCKFILE_BACKOFF: Duration = Duration::from_millis(100);
 const LOCKFILE_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// The main map of the server, associating submodule relative paths (from the repository's
-/// `.gitmodules` file) to the given submodule's summarized status.
-static SUBMOD_STATUSES: LazyLock<Mutex<BTreeMap<String, StatusSummary>>> =
-    LazyLock::new(|| Mutex::new(BTreeMap::new()));
-
-/// Associates a given client pid with a queue of indexing progress updates.
-static PROGRESS_QUEUE: LazyLock<Mutex<HashMap<u32, VecDeque<ProgressUpdate>>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+/// Type alias for the submodule status map mutex
+type StatusMap = Mutex<BTreeMap<String, StatusSummary>>;
+/// Type alias for the progress queue mutex
+type ProgressMap = Mutex<HashMap<u32, VecDeque<ProgressUpdate>>>;
 
 /// Message receiver type for a debounced watcher
 type WatchReceiver = crossbeam_channel::Receiver<Result<notify::Event, notify::Error>>;
@@ -48,12 +44,12 @@ type ServerWatcher = notify::RecommendedWatcher;
 #[derive(Debug)]
 struct WatchListItem {
     // need to hang onto the watched path to `unwatch` later
-    pub watch_path: PathBuf,
-    pub relative_path: String,
+    watch_path: PathBuf,
+    relative_path: String,
     /// Cached path to the submodule's `index.lock` file. `None` for root watchers.
-    pub lock_file_path: Option<PathBuf>,
-    pub receiver: WatchReceiver,
-    pub watcher: ServerWatcher,
+    lock_file_path: Option<PathBuf>,
+    receiver: WatchReceiver,
+    watcher: ServerWatcher,
 }
 
 impl WatchListItem {
@@ -79,19 +75,24 @@ type WatchList = Vec<WatchListItem>;
 /// The primary state necessary to maintain a status watch over the repository at `root_path`
 struct WatchServer {
     /// Whether the server should continue to watch the repository at `root_path`
-    pub do_watch: bool,
+    do_watch: bool,
     /// The pid of the client who issued the latest reindex/shutdown request.
-    pub client_pid: Option<u32>,
+    client_pid: Option<u32>,
     /// Debounced watchers
-    pub watchers: WatchList,
+    watchers: WatchList,
     /// Root path to the repository being watched
-    pub root_path: PathBuf,
+    root_path: PathBuf,
     /// `root_path`/.gitmodules
-    pub gitmodules_path: PathBuf,
+    gitmodules_path: PathBuf,
     /// `root_path`/.git
-    pub dot_git_path: PathBuf,
+    dot_git_path: PathBuf,
     /// Receiver for control messages from the listener thread
     control_rx: crossbeam_channel::Receiver<ControlMessage>,
+    /// The main map of the server, associating submodule relative paths (from the repository's
+    /// `.gitmodules` file) to the given submodule's summarized status.
+    submod_statuses: Arc<StatusMap>,
+    /// Associates a given client pid with a queue of indexing progress updates.
+    progress_queue: Arc<ProgressMap>,
 }
 
 /// Summarizes an event received from a watcher. Create with `get_event_type`
@@ -175,6 +176,8 @@ impl WatchServer {
             gitmodules_path,
             dot_git_path,
             control_rx,
+            submod_statuses: Arc::new(Mutex::new(BTreeMap::new())),
+            progress_queue: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -188,6 +191,9 @@ impl WatchServer {
         control_tx: crossbeam_channel::Sender<ControlMessage>,
     ) -> std::io::Result<()> {
         let listener = create_listener(&self.root_path)?;
+        let statuses = Arc::clone(&self.submod_statuses);
+        let progress = Arc::clone(&self.progress_queue);
+
         std::thread::Builder::new()
             .name("subspy_listener".to_string())
             .spawn(move || {
@@ -199,7 +205,13 @@ impl WatchServer {
                         None
                     }
                 }) {
-                    if handle_client_connection(conn, &mut buffer, &control_tx)? {
+                    if handle_client_connection(
+                        conn,
+                        &mut buffer,
+                        &control_tx,
+                        &statuses,
+                        &progress,
+                    )? {
                         break;
                     }
                 }
@@ -352,12 +364,17 @@ impl WatchServer {
         ));
 
         if let Some(id) = self.client_pid {
-            update_progress(id, ProgressUpdate::new(0, n_submodules));
+            update_progress(
+                &self.progress_queue,
+                id,
+                ProgressUpdate::new(0, n_submodules),
+            );
         }
 
         let completed = AtomicU32::new(0);
         let root_path = &self.root_path;
         let client_pid = self.client_pid;
+        let progress_queue = &self.progress_queue;
         let tl_repo = thread_local::ThreadLocal::new();
 
         let results: WatchResult<Vec<_>> = submod_info
@@ -377,7 +394,7 @@ impl WatchServer {
 
                 let count = completed.fetch_add(1, Ordering::Relaxed) + 1;
                 if let Some(id) = client_pid {
-                    update_progress(id, ProgressUpdate::new(count, n_submodules));
+                    update_progress(progress_queue, id, ProgressUpdate::new(count, n_submodules));
                 }
                 if let Some(pb) = &progress_bar {
                     pb.inc(1);
@@ -408,7 +425,7 @@ impl WatchServer {
             ));
         }
 
-        let mut status_guard = SUBMOD_STATUSES.lock().expect("Mutex poisoned");
+        let mut status_guard = self.submod_statuses.lock().expect("Mutex poisoned");
         *status_guard = new_statuses;
         drop(status_guard);
 
@@ -589,7 +606,8 @@ impl WatchServer {
                             };
                             match status {
                                 Ok(submod_status) => {
-                                    let mut guard = SUBMOD_STATUSES.lock().expect("Mutex poisoned");
+                                    let mut guard =
+                                        self.submod_statuses.lock().expect("Mutex poisoned");
                                     if let Some(st) = guard.get_mut(rel_path) {
                                         *st = submod_status.into();
                                     } else {
@@ -632,27 +650,27 @@ impl ProgressUpdate {
     }
 }
 
-/// Attempts to acquire `guard`.
+/// Attempts to acquire `mutex`.
 ///
 /// # Panics
 ///
-/// Panics if `guard`'s mutex has been poisoned
-fn try_acquire<T>(guard: &'static LazyLock<Mutex<T>>) -> Option<std::sync::MutexGuard<'static, T>> {
-    match guard.try_lock() {
+/// Panics if `mutex` has been poisoned
+fn try_acquire<T>(mutex: &Mutex<T>) -> Option<MutexGuard<'_, T>> {
+    match mutex.try_lock() {
         Ok(g) => Some(g),
         Err(TryLockError::WouldBlock) => None,
         Err(TryLockError::Poisoned(_)) => panic!("Mutex poisoned"),
     }
 }
 
-/// Adds `progress_val` to the queue in `PROGRESS_QUEUE` for `client_pid`
+/// Adds `progress_val` to the queue in `progress` for `client_pid`
 ///
 /// # Panics
 ///
-/// Panics if the `PROGRESS_QUEUE` mutex has been poisoned
+/// Panics if the progress mutex has been poisoned
 #[expect(clippy::significant_drop_tightening)] // false positive???
-fn update_progress(client_pid: u32, progress_val: ProgressUpdate) {
-    let mut progress_guard = PROGRESS_QUEUE.lock().expect("Progress mutex poisoned");
+fn update_progress(progress: &ProgressMap, client_pid: u32, progress_val: ProgressUpdate) {
+    let mut progress_guard = progress.lock().expect("Progress mutex poisoned");
     let queue = progress_guard.entry(client_pid).or_default();
     queue.push_back(progress_val);
 }
@@ -666,6 +684,8 @@ fn handle_client_connection(
     conn: Stream,
     buffer: &mut Vec<u8>,
     control_tx: &crossbeam_channel::Sender<ControlMessage>,
+    statuses: &StatusMap,
+    progress: &ProgressMap,
 ) -> WatchResult<bool> {
     let mut conn = BufReader::new(conn);
 
@@ -680,9 +700,11 @@ fn handle_client_connection(
                 .send(ControlMessage::Reindex { pid: client_pid })
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::BrokenPipe, e.to_string()))?;
             // Send progress updates to the client
-            handle_reindex_request(conn, client_pid)?;
+            handle_reindex_request(conn, client_pid, progress)?;
         }
-        ClientMessage::Status(client_pid) => handle_status_request(conn, client_pid)?,
+        ClientMessage::Status(client_pid) => {
+            handle_status_request(conn, client_pid, statuses, progress)?;
+        }
         ClientMessage::Shutdown(client_pid) => {
             control_tx
                 .send(ControlMessage::Shutdown {
@@ -698,8 +720,13 @@ fn handle_client_connection(
 }
 
 /// Handles a client's request for submodule statuses.
-fn handle_status_request(mut conn: BufReader<Stream>, client_pid: u32) -> WatchResult<()> {
-    let guard = get_status_guard_with_progress(&mut conn, client_pid)?;
+fn handle_status_request(
+    mut conn: BufReader<Stream>,
+    client_pid: u32,
+    statuses: &StatusMap,
+    progress: &ProgressMap,
+) -> WatchResult<()> {
+    let guard = get_status_guard_with_progress(&mut conn, client_pid, statuses, progress)?;
 
     let mut status_out = Vec::with_capacity(guard.len());
     for (submod_path, status) in guard.iter().filter(|(_, st)| **st != StatusSummary::CLEAN) {
@@ -717,18 +744,19 @@ fn handle_status_request(mut conn: BufReader<Stream>, client_pid: u32) -> WatchR
 /// Handles a client's request to reindex the watch server. The reindex signal has already
 /// been sent to the main event loop via the control channel; this function handles sending
 /// progress updates back to the client over the IPC connection.
-fn handle_reindex_request(mut conn: BufReader<Stream>, client_pid: u32) -> WatchResult<()> {
+fn handle_reindex_request(
+    mut conn: BufReader<Stream>,
+    client_pid: u32,
+    progress: &ProgressMap,
+) -> WatchResult<()> {
     loop {
-        if try_send_progress_update(&mut conn, client_pid)? {
+        if try_send_progress_update(&mut conn, client_pid, progress)? {
             break;
         }
         std::thread::yield_now();
     }
 
-    _ = PROGRESS_QUEUE
-        .lock()
-        .expect("Mutex poisoned")
-        .remove(&client_pid);
+    _ = progress.lock().expect("Mutex poisoned").remove(&client_pid);
 
     Ok(())
 }
@@ -740,8 +768,12 @@ fn handle_reindex_request(mut conn: BufReader<Stream>, client_pid: u32) -> Watch
 /// # Errors
 ///
 /// Returns `Err` if `bincode` encoding or writing to `conn` fails
-fn try_send_progress_update(conn: &mut BufReader<Stream>, client_pid: u32) -> WatchResult<bool> {
-    let Some(mut progress_queue) = try_acquire(&PROGRESS_QUEUE) else {
+fn try_send_progress_update(
+    conn: &mut BufReader<Stream>,
+    client_pid: u32,
+    progress: &ProgressMap,
+) -> WatchResult<bool> {
+    let Some(mut progress_queue) = try_acquire(progress) else {
         return Ok(false);
     };
     let Some(queue) = progress_queue.get_mut(&client_pid) else {
@@ -759,19 +791,21 @@ fn try_send_progress_update(conn: &mut BufReader<Stream>, client_pid: u32) -> Wa
     Ok(curr == total)
 }
 
-/// Acquires the `SUBMOD_STATUSES` guard. Every time the lock cannot be acquired
+/// Acquires the `statuses` guard. Every time the lock cannot be acquired
 /// (because it is currently locked by an indexing operation in the main loop), an attempt
 /// is made to send a progress update to the client.
-fn get_status_guard_with_progress<'guard>(
+fn get_status_guard_with_progress<'a>(
     conn: &mut BufReader<Stream>,
     client_pid: u32,
-) -> WatchResult<MutexGuard<'guard, BTreeMap<String, StatusSummary>>> {
+    statuses: &'a StatusMap,
+    progress: &ProgressMap,
+) -> WatchResult<MutexGuard<'a, BTreeMap<String, StatusSummary>>> {
     loop {
-        if let Some(g) = try_acquire(&SUBMOD_STATUSES) {
+        if let Some(g) = try_acquire(statuses) {
             return Ok(g);
         }
         // TODO: Swallow errors here?
-        if !try_send_progress_update(conn, client_pid)? {
+        if !try_send_progress_update(conn, client_pid, progress)? {
             std::thread::yield_now();
         }
     }
