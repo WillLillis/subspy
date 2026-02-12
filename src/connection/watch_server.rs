@@ -411,10 +411,12 @@ impl WatchServer {
     /// Sends a shutdown acknowledgment to the client over the IPC connection.
     fn signal_shutdown(shutdown_conn: Option<BufReader<Stream>>) {
         if let Some(mut conn) = shutdown_conn {
-            let msg = ServerMessage::ShutdownAck;
-            match bincode::encode_to_vec(msg, BINCODE_CFG) {
-                Ok(serialized) => {
-                    if let Err(e) = write_full_message(&mut conn, &serialized) {
+            // Special case this constant encoding because it's known to fit in a single byte.
+            let mut buf = 0u8;
+            let buf = std::slice::from_mut(&mut buf);
+            match bincode::encode_into_slice(ServerMessage::ShutdownAck, buf, BINCODE_CFG) {
+                Ok(_) => {
+                    if let Err(e) = write_full_message(&mut conn, buf) {
                         error!("Failed to send shutdown ack -- {e}");
                     }
                 }
@@ -760,4 +762,21 @@ pub fn watch(root_dir: &Path) -> WatchResult<()> {
     server.watch()?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shutdown_ack_fits_in_single_byte() {
+        let encoded = bincode::encode_to_vec(ServerMessage::ShutdownAck, BINCODE_CFG)
+            .expect("Failed to encode ShutdownAck");
+        assert_eq!(
+            encoded.len(),
+            1,
+            "Expected ShutdownAck to encode to 1 byte, got {} bytes",
+            encoded.len(),
+        );
+    }
 }
