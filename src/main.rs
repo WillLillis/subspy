@@ -48,7 +48,7 @@ impl Commands {
 #[command(visible_aliases = ["r", "re"])]
 struct Reindex {
     /// The directory whose watcher should reindex
-    #[arg(short, long)]
+    #[arg(index = 1)]
     pub dir: Option<PathBuf>,
     /// The log level to use for the requesting client
     #[arg(short, long)]
@@ -59,7 +59,7 @@ struct Reindex {
 #[command(visible_aliases = ["s", "st"])]
 struct Status {
     /// The directory to query `git status` for
-    #[arg(short, long)]
+    #[arg(index = 1)]
     pub dir: Option<PathBuf>,
     /// The log level to use for the requesting client
     #[arg(short, long)]
@@ -70,7 +70,7 @@ struct Status {
 #[command(visible_aliases = ["sh", "stop"])]
 struct Shutdown {
     /// The directory to shutdown a watcher for
-    #[arg(short, long)]
+    #[arg(index = 1)]
     pub dir: Option<PathBuf>,
     /// The log level to use for the requesting client
     #[arg(short, long)]
@@ -81,10 +81,10 @@ struct Shutdown {
 #[command(visible_aliases = ["w", "wa"])]
 struct Watch {
     /// The directory containing the repository's `.gitmodules` file
-    #[arg(short, long)]
+    #[arg(index = 1)]
     pub dir: Option<PathBuf>,
     /// Launch the watch server as a background process
-    #[arg(long)]
+    #[arg(short, long)]
     pub daemon: bool,
     /// The log level to use for the watch server
     #[arg(short, long)]
@@ -217,7 +217,7 @@ impl Watch {
         let log_level = log_level.map(|l| l.to_string());
         let exe = std::env::current_exe()?;
         let mut cmd = process::Command::new(exe);
-        cmd.args(["watch", "--dir"])
+        cmd.arg("watch")
             .arg(path)
             .stdin(process::Stdio::null())
             .stdout(process::Stdio::null())
