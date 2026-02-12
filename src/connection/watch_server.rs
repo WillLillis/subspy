@@ -514,9 +514,19 @@ impl WatchServer {
         // `.git/modules` wasn't updated, so we have to read the submodule's `.git`
         // file to get the _actual_ relative path
         let dot_git_path = self.root_path.join(submod_rel_path).join(".git");
-        let dot_git_contents = std::fs::read_to_string(dot_git_path)?;
-        assert!(dot_git_contents.starts_with("gitdir: "));
-        let actual_rel_path = dot_git_contents["gitdir: ".len()..].trim();
+        let dot_git_contents = std::fs::read_to_string(&dot_git_path)?;
+        let actual_rel_path = dot_git_contents
+            .strip_prefix("gitdir: ")
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "Expected {} to start with \"gitdir: \"",
+                        dot_git_path.display()
+                    ),
+                )
+            })?
+            .trim();
         let full_submod_path =
             dunce::canonicalize(self.root_path.join(submod_rel_path).join(actual_rel_path))?;
         Ok(full_submod_path.join("index.lock"))
