@@ -57,17 +57,16 @@ struct WatchListItem {
 }
 
 impl WatchListItem {
-    #[expect(clippy::needless_pass_by_value)]
-    fn new(
-        rel_path: impl ToString,
+    const fn new(
+        relative_path: String,
         watch_path: PathBuf,
         lock_file_path: Option<PathBuf>,
         receiver: WatchReceiver,
         watcher: ServerWatcher,
     ) -> Self {
         Self {
-            relative_path: rel_path.to_string(),
             watch_path,
+            relative_path,
             lock_file_path,
             receiver,
             watcher,
@@ -265,7 +264,7 @@ impl WatchServer {
             notify::RecursiveMode::NonRecursive,
         )?;
         self.watchers.push(WatchListItem::new(
-            DOT_GITMODULES,
+            DOT_GITMODULES.to_owned(),
             self.root_path.clone(),
             None,
             rx,
@@ -277,7 +276,7 @@ impl WatchServer {
             notify::RecursiveMode::Recursive,
         )?;
         self.watchers.push(WatchListItem::new(
-            DOT_GIT,
+            DOT_GIT.to_owned(),
             self.dot_git_path.clone(),
             None,
             rx,
@@ -315,15 +314,15 @@ impl WatchServer {
             .iter()
             .filter_map(|submod| {
                 let rel_path = submod.path();
-                let git_path = rel_path.to_str().unwrap().to_string();
+                let git_path_str = rel_path.to_str().unwrap();
 
                 #[cfg(target_os = "windows")]
                 let relative_path = rel_path.to_string_lossy().replace('/', "\\");
                 #[cfg(not(target_os = "windows"))]
-                let relative_path = git_path.clone();
+                let relative_path = git_path_str.to_owned();
 
                 let full_path = self.root_path.join(rel_path);
-                let lock_path = match self.get_index_lock_path(&git_path) {
+                let lock_path = match self.get_index_lock_path(git_path_str) {
                     Ok(p) => p,
                     Err(e) => {
                         error!(
@@ -334,7 +333,7 @@ impl WatchServer {
                     }
                 };
 
-                Some((git_path, relative_path, full_path, lock_path))
+                Some((relative_path, full_path, lock_path))
             })
             .collect();
 
@@ -355,11 +354,12 @@ impl WatchServer {
 
         let results: WatchResult<Vec<_>> = submod_info
             .into_par_iter()
-            .map(|(git_path, relative_path, full_path, lock_path)| {
+            .map(|(relative_path, full_path, lock_path)| {
                 let sub_start = std::time::Instant::now();
                 let repo = tl_repo.get_or_try(|| Repository::open(root_path))?;
+
                 let status = with_lock_file!(&lock_path, {
-                    repo.submodule_status(&git_path, git2::SubmoduleIgnore::None)?
+                    repo.submodule_status(&relative_path, git2::SubmoduleIgnore::None)?
                 });
                 let converted_status: StatusSummary = status.into();
 
