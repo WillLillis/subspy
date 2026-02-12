@@ -676,20 +676,20 @@ fn handle_client_connection(
     match msg {
         ClientMessage::Reindex(client_pid) => {
             // Trigger the main loop to reindex
-            if let Err(e) = control_tx.send(ControlMessage::Reindex { pid: client_pid }) {
-                error!("Failed to send reindex control message -- {e}");
-            }
+            control_tx
+                .send(ControlMessage::Reindex { pid: client_pid })
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::BrokenPipe, e.to_string()))?;
             // Send progress updates to the client
             handle_reindex_request(conn, client_pid)?;
         }
         ClientMessage::Status(client_pid) => handle_status_request(conn, client_pid)?,
         ClientMessage::Shutdown(client_pid) => {
-            if let Err(e) = control_tx.send(ControlMessage::Shutdown {
-                pid: client_pid,
-                conn,
-            }) {
-                error!("Failed to send shutdown control message -- {e}");
-            }
+            control_tx
+                .send(ControlMessage::Shutdown {
+                    pid: client_pid,
+                    conn,
+                })
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::BrokenPipe, e.to_string()))?;
             return Ok(true);
         }
     }
