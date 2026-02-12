@@ -50,21 +50,24 @@ struct WatchListItem {
     // need to hang onto the watched path to `unwatch` later
     pub watch_path: PathBuf,
     pub relative_path: String,
+    /// Cached path to the submodule's `index.lock` file. `None` for root watchers.
+    pub lock_file_path: Option<PathBuf>,
     pub receiver: WatchReceiver,
     pub watcher: ServerWatcher,
 }
 
 impl WatchListItem {
-    #[expect(clippy::needless_pass_by_value)]
-    fn new(
-        rel_path: impl ToString,
+    const fn new(
+        relative_path: String,
         watch_path: PathBuf,
+        lock_file_path: Option<PathBuf>,
         receiver: WatchReceiver,
         watcher: ServerWatcher,
     ) -> Self {
         Self {
-            relative_path: rel_path.to_string(),
             watch_path,
+            relative_path,
+            lock_file_path,
             receiver,
             watcher,
         }
@@ -261,8 +264,9 @@ impl WatchServer {
             notify::RecursiveMode::NonRecursive,
         )?;
         self.watchers.push(WatchListItem::new(
-            DOT_GITMODULES,
+            DOT_GITMODULES.to_owned(),
             self.root_path.clone(),
+            None,
             rx,
             debouncer,
         ));
@@ -272,8 +276,9 @@ impl WatchServer {
             notify::RecursiveMode::Recursive,
         )?;
         self.watchers.push(WatchListItem::new(
-            DOT_GIT,
+            DOT_GIT.to_owned(),
             self.dot_git_path.clone(),
+            None,
             rx,
             debouncer,
         ));
@@ -309,15 +314,15 @@ impl WatchServer {
             .iter()
             .filter_map(|submod| {
                 let rel_path = submod.path();
-                let git_path = rel_path.to_str().unwrap().to_string();
+                let git_path_str = rel_path.to_str().unwrap();
 
                 #[cfg(target_os = "windows")]
                 let relative_path = rel_path.to_string_lossy().replace('/', "\\");
                 #[cfg(not(target_os = "windows"))]
-                let relative_path = git_path.clone();
+                let relative_path = git_path_str.to_owned();
 
                 let full_path = self.root_path.join(rel_path);
-                let lock_path = match self.get_index_lock_path(&git_path) {
+                let lock_path = match self.get_index_lock_path(git_path_str) {
                     Ok(p) => p,
                     Err(e) => {
                         error!(
@@ -328,7 +333,7 @@ impl WatchServer {
                     }
                 };
 
-                Some((git_path, relative_path, full_path, lock_path))
+                Some((relative_path, full_path, lock_path))
             })
             .collect();
 
@@ -348,12 +353,16 @@ impl WatchServer {
         let tl_repo = thread_local::ThreadLocal::new();
 
         let results: WatchResult<Vec<_>> = submod_info
-            .par_iter()
-            .map(|(git_path, relative_path, full_path, lock_path)| {
+            .into_par_iter()
+            .map(|(relative_path, full_path, lock_path)| {
                 let sub_start = std::time::Instant::now();
                 let repo = tl_repo.get_or_try(|| Repository::open(root_path))?;
-                let status = with_lock_file!(lock_path, {
-                    repo.submodule_status(git_path, git2::SubmoduleIgnore::None)?
+
+                #[cfg(target_os = "windows")]
+                let relative_path = relative_path.replace('\\', "/");
+
+                let status = with_lock_file!(&lock_path, {
+                    repo.submodule_status(&relative_path, git2::SubmoduleIgnore::None)?
                 });
                 let converted_status: StatusSummary = status.into();
 
@@ -372,25 +381,27 @@ impl WatchServer {
                     sub_start.elapsed().as_millis(),
                 );
 
-                Ok((relative_path.clone(), full_path.clone(), converted_status))
+                Ok((relative_path, full_path, lock_path, converted_status))
             })
             .collect();
         let results = results?;
 
         let mut new_statuses = BTreeMap::new();
-        for (relative_path, _, status) in &results {
-            new_statuses.insert(relative_path.clone(), *status);
+        for (relative_path, full_path, lock_path, status) in results {
+            new_statuses.insert(relative_path.clone(), status);
+            let (rx, debouncer) = Self::place_watch(&full_path, notify::RecursiveMode::Recursive)?;
+            self.watchers.push(WatchListItem::new(
+                relative_path,
+                full_path,
+                Some(lock_path),
+                rx,
+                debouncer,
+            ));
         }
 
         let mut status_guard = SUBMOD_STATUSES.lock().expect("Mutex poisoned");
         *status_guard = new_statuses;
         drop(status_guard);
-
-        for (map_key, full_path, _) in results {
-            let (rx, debouncer) = Self::place_watch(&full_path, notify::RecursiveMode::Recursive)?;
-            self.watchers
-                .push(WatchListItem::new(map_key, full_path, rx, debouncer));
-        }
 
         self.client_pid = None;
         if let Some(pb) = &progress_bar {
@@ -520,8 +531,8 @@ impl WatchServer {
         let control_idx = sel.recv(&self.control_rx);
 
         loop {
-            let oper = sel.select(); // Blocks until any ready
-            let index = oper.index(); // Which rx fired
+            let oper = sel.select();
+            let index = oper.index();
 
             if index == control_idx {
                 match oper.recv(&self.control_rx)? {
@@ -542,23 +553,28 @@ impl WatchServer {
                     match self.get_event_type(&event, rel_path) {
                         Some(EventType::GitOperation) => break,
                         Some(EventType::SubmoduleChange) => {
-                            let Ok(lock_file_path) = self.get_index_lock_path(rel_path) else {
-                                error!(
-                                    "Failed to get lock file path for submodule {rel_path}, skipping status update"
-                                );
-                                continue;
-                            };
-                            let status = with_lock_file!(&lock_file_path, {
+                            let watcher = &self.watchers[index];
+                            let lock_file_path =
+                                watcher.lock_file_path.as_ref().unwrap_or_else(|| {
+                                    panic!(
+                                        "`SubmoduleChange` event for watcher with \
+                                         no cached lock file path\n\
+                                         \x20 -- watcher path: {}\n\
+                                         \x20 -- event: {event:#?}",
+                                        watcher.watch_path.display()
+                                    )
+                                });
+                            let status = with_lock_file!(lock_file_path, {
                                 repo.submodule_status(rel_path, git2::SubmoduleIgnore::None)
                             });
                             match status {
                                 Ok(submod_status) => {
-                                    SUBMOD_STATUSES
-                                        .lock()
-                                        .expect("Mutex poisoned")
-                                        .entry(rel_path.to_string())
-                                        .and_modify(|st| *st = submod_status.into())
-                                        .or_insert_with(|| submod_status.into());
+                                    let mut guard = SUBMOD_STATUSES.lock().expect("Mutex poisoned");
+                                    if let Some(st) = guard.get_mut(rel_path) {
+                                        *st = submod_status.into();
+                                    } else {
+                                        guard.insert(rel_path.to_string(), submod_status.into());
+                                    }
                                 }
                                 Err(e) => {
                                     error!(
@@ -682,7 +698,12 @@ fn handle_status_request(mut conn: BufReader<Stream>, client_pid: u32) -> WatchR
 /// been sent to the main event loop via the control channel; this function handles sending
 /// progress updates back to the client over the IPC connection.
 fn handle_reindex_request(mut conn: BufReader<Stream>, client_pid: u32) -> WatchResult<()> {
-    while !try_send_progress_update(&mut conn, client_pid)? {}
+    loop {
+        if try_send_progress_update(&mut conn, client_pid)? {
+            break;
+        }
+        std::thread::yield_now();
+    }
 
     _ = PROGRESS_QUEUE
         .lock()
@@ -730,7 +751,9 @@ fn get_status_guard_with_progress<'guard>(
             return Ok(g);
         }
         // TODO: Swallow errors here?
-        try_send_progress_update(conn, client_pid)?;
+        if !try_send_progress_update(conn, client_pid)? {
+            std::thread::yield_now();
+        }
     }
 }
 
