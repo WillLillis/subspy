@@ -320,7 +320,9 @@ impl WatchServer {
             .iter()
             .filter_map(|submod| {
                 let rel_path = submod.path();
-                let git_path_str = rel_path.to_str().unwrap();
+                let git_path_str = rel_path
+                    .to_str()
+                    .expect("Submodule path contains invalid UTF-8");
 
                 #[cfg(target_os = "windows")]
                 let relative_path = rel_path.to_string_lossy().replace('/', "\\");
