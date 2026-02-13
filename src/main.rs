@@ -288,7 +288,7 @@ fn paint(color: Option<impl Into<Color>>, text: &str) -> String {
 
 pub fn main() {
     if let Err(err) = run() {
-        error!("Fatal error: {err}");
+        error!("Fatal: {err}");
         if !err.to_string().is_empty() {
             eprintln!("{}: {err}", paint(Some(AnsiColor::Red), "Error"));
         }

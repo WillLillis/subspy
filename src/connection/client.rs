@@ -26,8 +26,9 @@ pub fn request_reindex(root_path: &Path) -> ReindexResult<()> {
     let mut conn = BufReader::new(conn);
     let client_pid = std::process::id();
     let status_req = ClientMessage::Reindex(client_pid);
-    let msg = bincode::encode_to_vec(status_req, BINCODE_CFG)?;
-    write_full_message(&mut conn, &msg)?;
+    let mut msg = [0; 6]; // statically determined an upper bound of 4 bytes
+    let msg_len = bincode::encode_into_slice(&status_req, &mut msg, BINCODE_CFG)?;
+    write_full_message(&mut conn, &msg[..msg_len])?;
 
     let progress_bar = create_progress_bar(0, "Reindexing in progress...");
     let mut buffer = Vec::with_capacity(1024);
@@ -64,8 +65,9 @@ pub fn request_shutdown(root_path: &Path) -> ShutdownResult<()> {
     let mut conn = BufReader::new(conn);
     let pid = std::process::id();
     let status_req = ClientMessage::Shutdown(pid);
-    let msg = bincode::encode_to_vec(status_req, BINCODE_CFG)?;
-    write_full_message(&mut conn, &msg)?;
+    let mut msg = [0; 6]; // statically determined an upper bound of 6 bytes
+    let msg_len = bincode::encode_into_slice(&status_req, &mut msg, BINCODE_CFG)?;
+    write_full_message(&mut conn, &msg[..msg_len])?;
 
     // Wait for the watch server to acknowledge the shutdown
     let mut buffer = Vec::with_capacity(1024);
@@ -101,8 +103,9 @@ pub fn request_status(root_path: &Path) -> StatusResult<Vec<(String, StatusSumma
     let conn = Stream::connect(name)?;
     let mut conn = BufReader::new(conn);
     let status_req = ClientMessage::Status(std::process::id());
-    let req_msg = bincode::encode_to_vec(status_req, BINCODE_CFG)?;
-    write_full_message(&mut conn, &req_msg)?;
+    let mut req_msg = [0; 6]; // statically determined an upper bound of 6 bytes
+    let req_msg_len = bincode::encode_into_slice(&status_req, &mut req_msg, BINCODE_CFG)?;
+    write_full_message(&mut conn, &req_msg[..req_msg_len])?;
 
     let progress_bar = create_progress_bar(0, "Indexing in progress...");
     // TODO: Get some impirical data on the actual buffer size we need

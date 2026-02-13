@@ -448,7 +448,7 @@ impl WatchServer {
     /// Sends a shutdown acknowledgment to the client over the IPC connection.
     fn signal_shutdown(shutdown_conn: Option<BufReader<Stream>>) {
         if let Some(mut conn) = shutdown_conn {
-            // Special case this constant encoding because it's known to fit in a single byte.
+            // Statically determined an upper bound of 1 byte
             let mut buf = 0u8;
             let buf = std::slice::from_mut(&mut buf);
             match bincode::encode_into_slice(ServerMessage::ShutdownAck, buf, BINCODE_CFG) {
@@ -785,8 +785,9 @@ fn try_send_progress_update(
     drop(progress_queue);
 
     let progress = ServerMessage::Indexing { curr, total };
-    let progress_msg = bincode::encode_to_vec(progress, BINCODE_CFG)?;
-    write_full_message(conn, &progress_msg)?;
+    let mut progress_msg = [0; 10]; // statically determined an upper bound of 10 bytes
+    let progress_msg_len = bincode::encode_into_slice(progress, &mut progress_msg, BINCODE_CFG)?;
+    write_full_message(conn, &progress_msg[..progress_msg_len])?;
 
     Ok(curr == total)
 }
@@ -804,7 +805,6 @@ fn get_status_guard_with_progress<'a>(
         if let Some(g) = try_acquire(statuses) {
             return Ok(g);
         }
-        // TODO: Swallow errors here?
         if !try_send_progress_update(conn, client_pid, progress)? {
             std::thread::yield_now();
         }
