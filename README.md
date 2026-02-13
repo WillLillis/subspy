@@ -17,7 +17,8 @@ There are a few potential workarounds you should try before using this tool, inc
 
 SubSpy provides a solution to this issue by placing recursive filesystem watches on your repository's `.git` folder, `.gitmodules`
 file, and all submodule directories. The status for all submodules is cached by an initial indexing operation and updated
-any time a change is detected in one of these locations.
+any time a change is detected in one of these locations. For sufficiently many submodules, `subspy status` is usually
+100-200x faster than `git status`.
 
 ### Usage
 
@@ -34,17 +35,19 @@ Commands:
 Options:
   -h, --help  Print help
 
-~/very_large_project/ > subspy watch & # On Unix, start in a separate terminal on Windows
+~/very_large_project/ > subspy watch --daemon # Or start normally in another terminal w/o --daemon
 # Work on your project as normal
 ~/very_large_project/ > subspy status
 -- top level status here --
-~/very_large_project/ > subspy status --dir some/subdirectory/
+~/very_large_project/ > subspy status some/subdirectory/
 -- other status here --
+~/very_large_project/ > subspy stop # Shutdown the watch server
 ```
 
 ### Installation
 
-Installing this tool requires the [Rust toolchain](https://rust-lang.org/tools/install/).
+Installing subspy requires the [Rust toolchain](https://rust-lang.org/tools/install/).
+Note that the project's current Minimum Supported Rust Version (MSRV) is 1.87.0.
 
 ```sh
 > git clone https://github.com/WillLillis/subspy
@@ -73,8 +76,13 @@ sys     0m0.000s
 
 #### Future Improvements
 
-- [ ] Support some of `git status`'s flags for the `subspy status` command if reasonable
-- [ ] Sort item order of `status` command to more closely match `git status`'s
-- [ ] Flag to disable progress bar if it's problematic for some terminal emulators
 - [ ] Tests
 - [ ] crates.io releases if desired
+
+#### Known Issues
+
+- If a submodule is a repo containing submodules itself, sometimes running certain git commands (i.e.
+`git submodule update --init --recursive`) may fail because it can't acquire necessary `index.lock`
+file. Re-running the command should resolve the issue.
+- While in the middle of an interactive rebase, `subspy status` currently doesn't display all of the
+information that `git status` does. This will be fixed in the future.
