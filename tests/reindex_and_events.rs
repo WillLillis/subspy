@@ -49,11 +49,7 @@ fn reindex_reflects_changes() {
     server.shutdown().expect("Shutdown should succeed");
 }
 
-/// Adding a submodule while the server is running is not yet supported —
-/// the server's filesystem watchers and lock file protocol can conflict
-/// with git2's submodule clone operations.
 #[test]
-#[ignore = "adding submodules while the server is running is not yet supported"]
 fn reindex_picks_up_new_submodule() {
     let mut repo = TestRepo::new();
     repo.add_submodule("sub1");
@@ -188,11 +184,7 @@ fn file_deletion_detected() {
     server.shutdown().expect("Shutdown should succeed");
 }
 
-/// Adding a submodule while the server is running is not yet supported —
-/// the server's filesystem watchers and lock file protocol can conflict
-/// with git2's submodule clone operations.
 #[test]
-#[ignore = "adding submodules while the server is running is not yet supported"]
 fn gitmodules_change_triggers_reindex() {
     let mut repo = TestRepo::new();
     repo.add_submodule("sub1");

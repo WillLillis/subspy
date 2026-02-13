@@ -29,6 +29,12 @@ use crate::{
 const MAX_LOCKFILE_BACKOFF: Duration = Duration::from_millis(100);
 const LOCKFILE_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// How long to wait after the last `GitOperation` event before triggering a reindex.
+/// Multi-step git operations (e.g. `git submodule add`, rebase) produce a burst of events
+/// in `.git/` and `.gitmodules`. Debouncing coalesces these into a single reindex after the
+/// operation completes, avoiding lock contention with the in-progress git operation.
+const REINDEX_DEBOUNCE: Duration = Duration::from_secs(1);
+
 /// Type alias for the submodule status map mutex
 type StatusMap = Mutex<BTreeMap<String, StatusSummary>>;
 /// Type alias for the progress queue mutex
@@ -566,8 +572,21 @@ impl WatchServer {
         // handles client requests from the listener thread
         let control_idx = sel.recv(&self.control_rx);
 
+        // When set, a `GitOperation` event has been received and we are waiting
+        // for filesystem activity to settle before triggering a reindex.
+        let mut reindex_deadline: Option<Instant> = None;
+
         loop {
-            let oper = sel.select();
+            let oper = if let Some(deadline) = reindex_deadline {
+                match sel.select_deadline(deadline) {
+                    Ok(oper) => oper,
+                    // Debounce expired — no new events arrived, proceed with reindex
+                    Err(_) => break,
+                }
+            } else {
+                sel.select()
+            };
+
             let index = oper.index();
 
             if index == control_idx {
@@ -587,7 +606,12 @@ impl WatchServer {
                 Ok(event) => {
                     let rel_path = self.watchers[index].relative_path.as_str();
                     match self.get_event_type(&event, rel_path) {
-                        Some(EventType::GitOperation) => break,
+                        Some(EventType::GitOperation) => {
+                            if reindex_deadline.is_none() {
+                                info!("Git operation detected, debouncing reindex");
+                            }
+                            reindex_deadline = Some(Instant::now() + REINDEX_DEBOUNCE);
+                        }
                         Some(EventType::SubmoduleChange) => {
                             let watcher = &self.watchers[index];
                             let lock_file_path =
