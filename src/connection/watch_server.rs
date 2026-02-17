@@ -29,11 +29,11 @@ use crate::{
 const MAX_LOCKFILE_BACKOFF: Duration = Duration::from_millis(100);
 const LOCKFILE_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// How long to wait after the last `GitOperation` event before triggering a reindex.
-/// Multi-step git operations (e.g. `git submodule add`, rebase) produce a burst of events
-/// in `.git/` and `.gitmodules`. Debouncing coalesces these into a single reindex after the
-/// operation completes, avoiding lock contention with the in-progress git operation.
-const REINDEX_DEBOUNCE: Duration = Duration::from_secs(1);
+/// How long to wait after the last event during a detected submodule init before
+/// triggering a reindex. `git submodule add` produces a burst of events under
+/// `.git/modules/<name>/` and `.gitmodules`; this settling period avoids lock
+/// contention with the in-progress git operation.
+const SUBMODULE_INIT_SETTLE: Duration = Duration::from_secs(1);
 
 /// Type alias for the submodule status map mutex
 type StatusMap = Mutex<BTreeMap<String, StatusSummary>>;
@@ -92,6 +92,8 @@ struct WatchServer {
     gitmodules_path: PathBuf,
     /// `root_path`/.git
     dot_git_path: PathBuf,
+    /// `root_path`/.git/modules — cached for submodule init detection
+    modules_path: PathBuf,
     /// Receiver for control messages from the listener thread
     control_rx: crossbeam_channel::Receiver<ControlMessage>,
     /// The main map of the server, associating submodule relative paths (from the repository's
@@ -106,6 +108,10 @@ struct WatchServer {
 enum EventType {
     /// Something changed in `.git/` or `.gitmodules`, reindex needed
     GitOperation,
+    /// Activity detected under `.git/modules/<name>/` for a submodule that isn't
+    /// currently being watched — indicates a `git submodule add` (or similar
+    /// multi-step init) is in progress.
+    SubmoduleInit,
     /// A change occurred in one of the watched submodules
     SubmoduleChange,
 }
@@ -173,6 +179,7 @@ impl WatchServer {
     pub fn new(root_path: &Path, control_rx: crossbeam_channel::Receiver<ControlMessage>) -> Self {
         let gitmodules_path = root_path.to_path_buf().join(DOT_GITMODULES);
         let dot_git_path = root_path.to_path_buf().join(DOT_GIT);
+        let modules_path = dot_git_path.join("modules");
 
         Self {
             do_watch: true,
@@ -181,6 +188,7 @@ impl WatchServer {
             root_path: root_path.to_path_buf(),
             gitmodules_path,
             dot_git_path,
+            modules_path,
             control_rx,
             submod_statuses: Arc::new(Mutex::new(BTreeMap::new())),
             progress_queue: Arc::new(Mutex::new(HashMap::new())),
@@ -503,6 +511,26 @@ impl WatchServer {
         }
 
         if rel_path.eq(DOT_GITMODULES) || rel_path.eq(DOT_GIT) {
+            // Check for activity under `.git/modules/<name>/` where `<name>` isn't
+            // currently tracked — this indicates a submodule init/clone in progress.
+            let is_submod_init = event.paths.iter().any(|p| {
+                let Ok(suffix) = p.strip_prefix(&self.modules_path) else {
+                    return false;
+                };
+                let Some(first) = suffix.components().next() else {
+                    return false;
+                };
+                let name = first.as_os_str().to_string_lossy();
+                !self
+                    .watchers
+                    .iter()
+                    .any(|w| w.relative_path == name.as_ref())
+            });
+
+            if is_submod_init {
+                return Some(EventType::SubmoduleInit);
+            }
+
             if event.paths.iter().any(|p| {
                 (p.starts_with(&self.dot_git_path) || p.eq(&self.gitmodules_path))
                     // Both git itself and subspy acquire various `index.lock` files to protect
@@ -572,15 +600,16 @@ impl WatchServer {
         // handles client requests from the listener thread
         let control_idx = sel.recv(&self.control_rx);
 
-        // When set, a `GitOperation` event has been received and we are waiting
-        // for filesystem activity to settle before triggering a reindex.
-        let mut reindex_deadline: Option<Instant> = None;
+        // When set, a submodule init has been detected (new directory under
+        // `.git/modules/`) and we're waiting for the multi-step operation to
+        // settle before triggering a reindex.
+        let mut init_deadline: Option<Instant> = None;
 
         loop {
-            let oper = if let Some(deadline) = reindex_deadline {
+            let oper = if let Some(deadline) = init_deadline {
                 match sel.select_deadline(deadline) {
                     Ok(oper) => oper,
-                    // Debounce expired — no new events arrived, proceed with reindex
+                    // Init activity settled — proceed with reindex
                     Err(_) => break,
                 }
             } else {
@@ -606,11 +635,21 @@ impl WatchServer {
                 Ok(event) => {
                     let rel_path = self.watchers[index].relative_path.as_str();
                     match self.get_event_type(&event, rel_path) {
-                        Some(EventType::GitOperation) => {
-                            if reindex_deadline.is_none() {
-                                info!("Git operation detected, debouncing reindex");
+                        Some(EventType::SubmoduleInit) => {
+                            if init_deadline.is_none() {
+                                info!("Submodule init detected, deferring reindex");
                             }
-                            reindex_deadline = Some(Instant::now() + REINDEX_DEBOUNCE);
+                            init_deadline = Some(Instant::now() + SUBMODULE_INIT_SETTLE);
+                        }
+                        Some(EventType::GitOperation) => {
+                            if init_deadline.is_some() {
+                                // Part of the ongoing submodule init (e.g.
+                                // .gitmodules update) — keep deferring.
+                                init_deadline = Some(Instant::now() + SUBMODULE_INIT_SETTLE);
+                            } else {
+                                // No init in progress — reindex immediately.
+                                break;
+                            }
                         }
                         Some(EventType::SubmoduleChange) => {
                             let watcher = &self.watchers[index];
