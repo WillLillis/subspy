@@ -34,7 +34,7 @@ type StatusMap = Mutex<BTreeMap<String, StatusSummary>>;
 /// Type alias for the progress queue mutex
 type ProgressMap = Mutex<HashMap<u32, VecDeque<ProgressUpdate>>>;
 
-/// Message receiver type for a debounced watcher
+/// Message receiver type for a watcher
 type WatchReceiver = crossbeam_channel::Receiver<Result<notify::Event, notify::Error>>;
 
 /// Watcher type alias
@@ -78,7 +78,7 @@ struct WatchServer {
     do_watch: bool,
     /// The pid of the client who issued the latest reindex/shutdown request.
     client_pid: Option<u32>,
-    /// Debounced watchers
+    /// Filesystem watchers
     watchers: WatchList,
     /// Root path to the repository being watched
     root_path: PathBuf,
@@ -239,12 +239,12 @@ impl WatchServer {
         }
     }
 
-    /// Places a debounced watch of type `mode` on `watch_path`. The watcher created is stored in
+    /// Places a watcher of type `mode` on `watch_path`. The watcher created is stored in
     /// `self.watchers` along with `rel_path`. Returns the watcher and its transmitter.
     ///
     /// # Errors
     ///
-    /// Returns `notify::Error` if the debouncer or watch cannot be created
+    /// Returns `notify::Error` if the watcher cannot be created
     fn place_watch(
         watch_path: impl AsRef<Path>,
         mode: notify::RecursiveMode,
@@ -268,13 +268,13 @@ impl WatchServer {
         Ok((rx, watcher))
     }
 
-    /// Places debounced watchers on the root path independent of the given repository's submodules
+    /// Places watchers on the root path independent of the given repository's submodules
     ///
     /// # Errors
     ///
-    /// Returns `notify::Error` if any debouncers or watchers cannot be created
+    /// Returns `notify::Error` if any watchers cannot be created
     fn place_root_watches(&mut self) -> notify::Result<()> {
-        let (rx, debouncer) = Self::place_watch(
+        let (rx, watcher) = Self::place_watch(
             self.root_path.as_path(),
             notify::RecursiveMode::NonRecursive,
         )?;
@@ -283,10 +283,10 @@ impl WatchServer {
             self.root_path.clone(),
             None,
             rx,
-            debouncer,
+            watcher,
         ));
 
-        let (rx, debouncer) = Self::place_watch(
+        let (rx, watcher) = Self::place_watch(
             self.dot_git_path.as_path(),
             notify::RecursiveMode::Recursive,
         )?;
@@ -295,19 +295,19 @@ impl WatchServer {
             self.dot_git_path.clone(),
             None,
             rx,
-            debouncer,
+            watcher,
         ));
 
         Ok(())
     }
 
-    /// Gathers the status for all submodules within the given repository, places debounced watches on their
-    /// directories, and places those watchers in `self.watchers`.
+    /// Gathers the status for all submodules within the given repository, places watchers
+    /// on their directories, and places those watchers in `self.watchers`.
     ///
     /// # Errors
     ///
-    /// Returns `notify::Error` if any debouncers or watchers cannot be created, or `git2::Error`
-    /// if any git operation fails.
+    /// Returns `notify::Error` if any watchers cannot be created, or `git2::Error` if any
+    /// git operation fails.
     fn populate_status_map(
         &mut self,
         repo: &Repository,
@@ -415,13 +415,13 @@ impl WatchServer {
         let mut new_statuses = BTreeMap::new();
         for (relative_path, full_path, lock_path, status) in results {
             new_statuses.insert(relative_path.clone(), status);
-            let (rx, debouncer) = Self::place_watch(&full_path, notify::RecursiveMode::Recursive)?;
+            let (rx, watcher) = Self::place_watch(&full_path, notify::RecursiveMode::Recursive)?;
             self.watchers.push(WatchListItem::new(
                 relative_path,
                 full_path,
                 Some(lock_path),
                 rx,
-                debouncer,
+                watcher,
             ));
         }
 
@@ -489,8 +489,7 @@ impl WatchServer {
         Ok(())
     }
 
-    /// Converts a debounced watcher's event and relative path to a relevant `EventType`,
-    /// if possible
+    /// Converts a watcher's event and relative path to a relevant `EventType`, if possible
     fn get_event_type(&self, event: &Event, rel_path: &str) -> Option<EventType> {
         if !event_is_relevant(event) {
             return None;
