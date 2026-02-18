@@ -670,7 +670,10 @@ fn try_acquire<T>(mutex: &Mutex<T>) -> Option<MutexGuard<'_, T>> {
 #[expect(clippy::significant_drop_tightening)] // false positive???
 fn update_progress(progress: &ProgressMap, client_pid: u32, progress_val: ProgressUpdate) {
     let mut progress_guard = progress.lock().expect("Progress mutex poisoned");
-    let queue = progress_guard.entry(client_pid).or_default();
+    let queue = progress_guard.entry(client_pid).or_insert_with(|| {
+        let ProgressUpdate { total: cap, .. } = progress_val;
+        VecDeque::with_capacity(cap as usize + 1)
+    });
     queue.push_back(progress_val);
 }
 
