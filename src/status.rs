@@ -109,6 +109,7 @@ fn display_status(
     repo: &Repository,
     non_submodule_statues: &Statuses<'_>,
     submodule_statuses: &[(String, StatusSummary)],
+    new_submodule_paths: &[String],
 ) -> StatusResult<()> {
     let mut header = false;
     let mut rm_in_workdir = false;
@@ -164,6 +165,17 @@ fn display_status(
                 );
             }
         }
+    }
+
+    for path in new_submodule_paths {
+        if !header {
+            println!("{STAGED_HEADER}");
+            header = true;
+        }
+        println!(
+            "{}",
+            paint(Some(AnsiColor::Green), &format!("\tnew file:   {path}"))
+        );
     }
 
     for (submod_path, _) in submodule_statuses
@@ -320,6 +332,31 @@ pub fn status(root_path: &Path, repo_kind: RepoKind) -> StatusResult<()> {
         .include_ignored(false); // Skip ignored files if not needed
     let non_submodule_statuses = repo.statuses(Some(&mut opts))?;
 
+    // `exclude_submodules` also filters out newly-staged gitlinks (INDEX_NEW submodules), so we
+    // detect those separately by scanning the index for gitlink entries absent from HEAD.
+    let head_tree = repo.head().ok().and_then(|h| h.peel_to_tree().ok());
+    let index = repo.index()?;
+    let new_submodule_paths: Vec<String> = index
+        .iter()
+        .filter(|entry| {
+            // `FileMode::Commit` is the gitlink mode used for submodule entries. Note that
+            // `FileMode::Commit as u32` gives the enum discriminant (6), not the mode value,
+            // so the `From` impl must be used.
+            entry.mode == u32::from(git2::FileMode::Commit)
+                && head_tree.as_ref().is_none_or(|t| {
+                    std::str::from_utf8(&entry.path).is_ok_and(|p| {
+                        matches!(
+                            t.get_path(Path::new(p)),
+                            // New submodules are staged but not in the HEAD commit yet, so looking
+                            // them up should return `NotFound`.
+                            Err(e) if e.code() == git2::ErrorCode::NotFound
+                        )
+                    })
+                })
+        })
+        .filter_map(|entry| String::from_utf8(entry.path).ok())
+        .collect();
+
     let submodule_statuses = if repo_kind == RepoKind::WithSubmodules {
         match request_status(root_path) {
             Ok(statuses) => statuses,
@@ -333,7 +370,12 @@ pub fn status(root_path: &Path, repo_kind: RepoKind) -> StatusResult<()> {
     } else {
         Vec::new()
     };
-    display_status(&repo, &non_submodule_statuses, &submodule_statuses)?;
+    display_status(
+        &repo,
+        &non_submodule_statuses,
+        &submodule_statuses,
+        &new_submodule_paths,
+    )?;
 
     Ok(())
 }
