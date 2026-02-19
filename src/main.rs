@@ -8,7 +8,7 @@ use std::{
 use anstyle::{AnsiColor, Color, Style};
 use clap::{Args, Command, FromArgMatches as _, Subcommand, ValueEnum};
 use etcetera::{BaseStrategy, HomeDirError};
-use flexi_logger::{Cleanup, Criterion, FileSpec, Logger, Naming, WriteMode};
+use flexi_logger::{FileSpec, Logger, WriteMode};
 use log::{error, info};
 use thiserror::Error;
 
@@ -285,8 +285,10 @@ pub fn main() {
         if !err.to_string().is_empty() {
             eprintln!("{}: {err}", paint(Some(AnsiColor::Red), "Error"));
         }
+        log::logger().flush();
         std::process::exit(1);
     }
+    log::logger().flush();
 }
 
 fn run() -> RunResult<()> {
@@ -304,11 +306,6 @@ fn run() -> RunResult<()> {
 
     Logger::with(command.log_level().unwrap_or(LogLevel::Info))
         .log_to_file(FileSpec::default().directory(log_file_dir))
-        .rotate(
-            Criterion::Size(10 * 1024 * 1024),
-            Naming::Numbers,
-            Cleanup::KeepLogFiles(5),
-        )
         .write_mode(WriteMode::BufferAndFlush)
         .start()
         .unwrap();
@@ -316,6 +313,7 @@ fn run() -> RunResult<()> {
     let default_panic_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         error!("Panic: {info}");
+        log::logger().flush();
         default_panic_hook(info);
     }));
     info!("Invoked with command: {command:#?}");
