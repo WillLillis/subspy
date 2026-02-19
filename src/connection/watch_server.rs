@@ -31,6 +31,7 @@ const LOCKFILE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Type alias for the submodule status map mutex
 type StatusMap = Mutex<BTreeMap<String, StatusSummary>>;
+
 /// Type alias for the progress queue mutex
 type ProgressMap = Mutex<HashMap<u32, VecDeque<ProgressUpdate>>>;
 
@@ -86,6 +87,8 @@ struct WatchServer {
     gitmodules_path: PathBuf,
     /// `root_path`/.git
     dot_git_path: PathBuf,
+    /// `root_path`/.git/modules
+    submod_modules_path: PathBuf,
     /// Receiver for control messages from the listener thread
     control_rx: crossbeam_channel::Receiver<ControlMessage>,
     /// The main map of the server, associating submodule relative paths (from the repository's
@@ -99,9 +102,11 @@ struct WatchServer {
 #[derive(Debug, Copy, Clone)]
 enum EventType {
     /// Something changed in `.git/` or `.gitmodules`, reindex needed
-    GitOperation,
-    /// A change occurred in one of the watched submodules
+    RootGitOperation,
+    /// A change occurred in one of the watched submodules's source
     SubmoduleChange,
+    /// A change occurred in oen of the watched submodule's `.git/` subdirectory
+    SubmoduleGitOperation,
 }
 
 /// Control messages sent from the listener thread to the main event loop
@@ -167,6 +172,7 @@ impl WatchServer {
     pub fn new(root_path: &Path, control_rx: crossbeam_channel::Receiver<ControlMessage>) -> Self {
         let gitmodules_path = root_path.to_path_buf().join(DOT_GITMODULES);
         let dot_git_path = root_path.to_path_buf().join(DOT_GIT);
+        let submod_modules_path = root_path.to_path_buf().join(DOT_GIT).join("modules");
 
         Self {
             do_watch: true,
@@ -175,6 +181,7 @@ impl WatchServer {
             root_path: root_path.to_path_buf(),
             gitmodules_path,
             dot_git_path,
+            submod_modules_path,
             control_rx,
             submod_statuses: Arc::new(Mutex::new(BTreeMap::new())),
             progress_queue: Arc::new(Mutex::new(HashMap::new())),
@@ -275,8 +282,8 @@ impl WatchServer {
     /// Returns `notify::Error` if any watchers cannot be created
     fn place_root_watches(&mut self) -> notify::Result<()> {
         let (rx, watcher) = Self::place_watch(
-            self.root_path.as_path(),
-            notify::RecursiveMode::NonRecursive,
+            self.gitmodules_path.as_path(),
+            notify::RecursiveMode::NonRecursive, // ignored
         )?;
         self.watchers.push(WatchListItem::new(
             DOT_GITMODULES.to_owned(),
@@ -495,20 +502,32 @@ impl WatchServer {
             return None;
         }
 
-        if rel_path.eq(DOT_GITMODULES) || rel_path.eq(DOT_GIT) {
-            if event.paths.iter().any(|p| {
-                (p.starts_with(&self.dot_git_path) || p.eq(&self.gitmodules_path))
-                    // Both git itself and subspy acquire various `index.lock` files to protect
-                    // various operations. Acquiring such a lock does _not_ mean a reindex is
-                    // necessary, it's just telling other git things "hey don't touch this right now".
-                    // If something _does_ change that requires a reindex, another file will be
-                    // modified which we will pick up on.
-                    && p.file_name().is_none_or(|name| !name.eq("index.lock"))
-            }) {
-                Some(EventType::GitOperation)
+        // Both git itself and subspy acquire various `.lock` files to protect certain
+        // operations. Acquiring such a lock does _not_ mean a reindex is necessary,
+        // it's just telling other git things "hey don't touch this right now". If
+        // something _does_ change that requires a reindex, another file will be
+        // modified which we will pick up on.
+        let is_not_lock_path =
+            |p: &Path| -> bool { p.extension().is_none_or(|ext| !ext.eq("lock")) };
+
+        if rel_path.eq(DOT_GIT) {
+            if event
+                .paths
+                .iter()
+                .any(|p| p.starts_with(&self.submod_modules_path))
+            {
+                if event.paths.iter().any(|p| is_not_lock_path(p)) {
+                    Some(EventType::SubmoduleGitOperation)
+                } else {
+                    None
+                }
+            } else if event.paths.iter().any(|p| is_not_lock_path(p)) {
+                Some(EventType::RootGitOperation)
             } else {
                 None
             }
+        } else if rel_path.eq(DOT_GITMODULES) {
+            Some(EventType::RootGitOperation)
         } else {
             Some(EventType::SubmoduleChange)
         }
@@ -550,6 +569,36 @@ impl WatchServer {
         Ok(full_submod_path.join("index.lock"))
     }
 
+    fn update_submod_status(&self, repo: &Repository, index: usize) -> WatchResult<()> {
+        let watcher = &self.watchers[index];
+        let lock_file_path = watcher.lock_file_path.as_ref().unwrap_or_else(|| {
+            panic!(
+                "`SubmoduleChange` event for watcher with no cached lock file path\n -- watcher path: {}",
+                watcher.watch_path.display()
+            );
+        });
+        let rel_path = self.watchers[index].relative_path.as_str();
+        let status = {
+            let _lock = LockFileGuard::acquire(lock_file_path)?;
+            repo.submodule_status(rel_path, git2::SubmoduleIgnore::None)
+        };
+        match status {
+            Ok(submod_status) => {
+                let mut guard = self.submod_statuses.lock().expect("Mutex poisoned");
+                if let Some(st) = guard.get_mut(rel_path) {
+                    *st = submod_status.into();
+                } else {
+                    guard.insert(rel_path.to_string(), submod_status.into());
+                }
+            }
+            Err(e) => {
+                error!("Failed to get submodule status for path: {rel_path} -- {e}");
+            }
+        }
+
+        Ok(())
+    }
+
     /// The "meat" of the logic for the watch server. Handles incoming watcher events and updates
     /// server state accordingly. This function will only exit if a reindex is required or
     /// requested, a shutdown is received via the control channel, or if an error occurs.
@@ -586,37 +635,25 @@ impl WatchServer {
                 Ok(event) => {
                     let rel_path = self.watchers[index].relative_path.as_str();
                     match self.get_event_type(&event, rel_path) {
-                        Some(EventType::GitOperation) => break,
+                        Some(EventType::RootGitOperation) => break,
                         Some(EventType::SubmoduleChange) => {
-                            let watcher = &self.watchers[index];
-                            let lock_file_path =
-                                watcher.lock_file_path.as_ref().unwrap_or_else(|| {
-                                    panic!(
-                                        "`SubmoduleChange` event for watcher with \
-                                         no cached lock file path\n\
-                                         \x20 -- watcher path: {}\n\
-                                         \x20 -- event: {event:#?}",
-                                        watcher.watch_path.display()
-                                    )
-                                });
-                            let status = {
-                                let _lock = LockFileGuard::acquire(lock_file_path)?;
-                                repo.submodule_status(rel_path, git2::SubmoduleIgnore::None)
-                            };
-                            match status {
-                                Ok(submod_status) => {
-                                    let mut guard =
-                                        self.submod_statuses.lock().expect("Mutex poisoned");
-                                    if let Some(st) = guard.get_mut(rel_path) {
-                                        *st = submod_status.into();
-                                    } else {
-                                        guard.insert(rel_path.to_string(), submod_status.into());
-                                    }
-                                }
-                                Err(e) => {
-                                    error!(
-                                        "Failed to get submodule status for path: {rel_path} -- {e}"
-                                    );
+                            self.update_submod_status(repo, index)?;
+                        }
+                        Some(EventType::SubmoduleGitOperation) => {
+                            for (i, watcher) in self.watchers.iter().enumerate() {
+                                // TODO: This is a hot loop, we may want to unwrap_unchecked here
+                                let Some(submod_modules_path) =
+                                    watcher.lock_file_path.as_ref().and_then(|p| p.parent())
+                                else {
+                                    continue;
+                                };
+                                if event
+                                    .paths
+                                    .iter()
+                                    .any(|p| p.starts_with(submod_modules_path))
+                                {
+                                    self.update_submod_status(repo, i)?;
+                                    break;
                                 }
                             }
                         }
