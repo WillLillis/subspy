@@ -112,8 +112,19 @@ pub enum RunError {
     Home(#[from] HomeDirError),
     #[error(transparent)]
     Clap(#[from] clap::Error),
-    #[error("Failed to launch watch server as background process: {0}")]
-    IO(std::io::Error),
+}
+
+impl RunError {
+    /// Returns `RunError::ProjectPath`, indicating `path` does not point to a non-recursive (not
+    /// a submodule of a submodule) git repository with submodules.
+    fn server_path(path: PathBuf) -> Self {
+        Self::ProjectPath {
+            path,
+            error: io::Error::other(
+                "Path must be inside a non-recursive git repository with a .gitmodules file",
+            ),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -157,13 +168,7 @@ impl Reindex {
     fn run(self) -> RunResult<()> {
         let (true_path, repo_kind) = get_project_path(self.dir)?;
         if repo_kind != RepoKind::WithSubmodules {
-            Err(RunError::ProjectPath {
-                #[allow(clippy::redundant_clone)] // false positive
-                path: true_path.clone(),
-                error: io::Error::other(
-                    "Path must be inside a git repository with a .gitmodules file",
-                ),
-            })?;
+            return Err(RunError::server_path(true_path));
         }
         Ok(request_reindex(true_path.as_path())?)
     }
@@ -173,13 +178,7 @@ impl Shutdown {
     fn run(self) -> RunResult<()> {
         let (true_path, repo_kind) = get_project_path(self.dir)?;
         if repo_kind != RepoKind::WithSubmodules {
-            Err(RunError::ProjectPath {
-                #[allow(clippy::redundant_clone)] // false positive
-                path: true_path.clone(),
-                error: io::Error::other(
-                    "Path must be inside a git repository with a .gitmodules file",
-                ),
-            })?;
+            return Err(RunError::server_path(true_path));
         }
         Ok(shutdown(true_path.as_path())?)
     }
@@ -196,13 +195,7 @@ impl Watch {
     fn run(self) -> RunResult<()> {
         let (true_path, repo_kind) = get_project_path(self.dir)?;
         if repo_kind != RepoKind::WithSubmodules {
-            Err(RunError::ProjectPath {
-                #[allow(clippy::redundant_clone)] // false positive
-                path: true_path.clone(),
-                error: io::Error::other(
-                    "Path must be inside a git repository with a .gitmodules file",
-                ),
-            })?;
+            return Err(RunError::server_path(true_path));
         }
 
         if self.daemon {
