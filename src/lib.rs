@@ -16,8 +16,12 @@ pub const DOT_GIT: &str = ".git";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RepoKind {
+    /// A git repository with "just" a `.git` folder.
     Normal,
+    /// A git repository with a `.git` folder and a `.gitmodules` file.
     WithSubmodules,
+    /// A git repository with a `.git` _file_ pointing to a parent `.git`
+    /// subdirectory. May or may not have submodules of its own.
     Submodule,
 }
 

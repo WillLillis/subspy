@@ -327,9 +327,15 @@ pub fn status(root_path: &Path, repo_kind: RepoKind) -> StatusResult<()> {
 
     let mut opts = git2::StatusOptions::new();
     opts.include_untracked(true)
-        .recurse_untracked_dirs(false) // not needed?
-        .exclude_submodules(true)
-        .include_ignored(false); // Skip ignored files if not needed
+        .recurse_untracked_dirs(false)
+        .include_ignored(false);
+
+    // Ignore submodules _only_ if we are the top level, in which case submodule statuses
+    // are provided by the watch server.
+    if repo_kind == RepoKind::WithSubmodules {
+        opts.exclude_submodules(true);
+    }
+
     let non_submodule_statuses = repo.statuses(Some(&mut opts))?;
 
     // `exclude_submodules` also filters out newly-staged gitlinks (INDEX_NEW submodules), so we
