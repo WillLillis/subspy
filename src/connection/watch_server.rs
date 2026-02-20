@@ -625,9 +625,10 @@ impl WatchServer {
                 }
                 Err(e) => {
                     error!(
-                        "Watcher error for submodule {}: {e}",
+                        "Watcher error for submodule {}: {e}\nReindexing to reset watchers...",
                         self.watchers[index].relative_path
                     );
+                    break;
                 }
             }
         }
