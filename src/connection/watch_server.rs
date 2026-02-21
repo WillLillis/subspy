@@ -77,24 +77,24 @@ type WatchList = Vec<WatchListItem>;
 struct WatchServer {
     /// Whether the server should continue to watch the repository at `root_path`
     do_watch: bool,
-    /// The pid of the client who issued the latest reindex/shutdown request.
+    /// The pid of the client who issued the latest request.
     client_pid: Option<u32>,
     /// Filesystem watchers
     watchers: WatchList,
 
-    // NOTE: Common paths are pre-computed and stored here to avoid `PathBuf` heap allocs in hot
-    // loops
+    // NOTE: Commonly used paths are pre-computed and stored here to avoid redundant heap allocs
+    // in hot loops
     /// Root path to the repository being watched
     root_path: PathBuf,
     /// `<root_path>/.git/index`
     root_index: PathBuf,
-    /// `root_path`/.gitmodules
+    /// `<root_path>/.gitmodules`
     gitmodules_path: PathBuf,
-    /// `root_path`/.git
+    /// `<root_path>/.git`
     dot_git_path: PathBuf,
-    /// `root_path`/.git/modules
+    /// `<root_path>/.git/modules`
     modules_path: PathBuf,
-    /// `root_path`/.git/index.lock
+    /// `<root_path>/.git/index.lock`
     root_lock_path: PathBuf,
 
     /// Receiver for control messages from the listener thread
@@ -348,7 +348,7 @@ impl WatchServer {
         info!("Indexing project at {}", self.root_path.display());
         let submod_info: Vec<_> = submodules
             .iter()
-            .filter_map(|submod| {
+            .map(|submod| {
                 let rel_path = submod.path();
                 let git_path_str = rel_path
                     .to_str()
@@ -360,18 +360,8 @@ impl WatchServer {
                 let relative_path = git_path_str.to_owned();
 
                 let full_path = self.root_path.join(rel_path);
-                let lock_path = match self.get_index_lock_path(git_path_str) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        error!(
-                            "Failed to get lock file path for submodule {} - {e}, skipping...",
-                            rel_path.display()
-                        );
-                        return None;
-                    }
-                };
 
-                Some((relative_path, full_path, lock_path))
+                (relative_path, full_path)
             })
             .collect();
 
@@ -397,9 +387,22 @@ impl WatchServer {
 
         let results: WatchResult<Vec<_>> = submod_info
             .into_par_iter()
-            .map(|(relative_path, full_path, lock_path)| {
+            .map(|(relative_path, full_path)| {
                 let sub_start = std::time::Instant::now();
                 let repo = tl_repo.get_or_try(|| Repository::open(root_path))?;
+
+                // TODO: What should we do if we can't acquire the lock file? Have some sentinel
+                // status to indicate that the status couldn't be grabbed? Could suggest removing
+                // the lock file + reindexing
+                let lock_path = match self.get_index_lock_path(&relative_path) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        error!(
+                            "Failed to get lock file path for submodule {relative_path} - {e}, skipping...",
+                        );
+                        Err(e)?
+                    }
+                };
 
                 #[cfg(target_os = "windows")]
                 let relative_path = relative_path.replace('\\', "/");
