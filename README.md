@@ -81,8 +81,5 @@ sys     0m0.000s
 
 #### Known Issues
 
-- If a submodule is a repo containing submodules itself, sometimes running certain git commands (i.e.
-`git submodule update --init --recursive`) may fail because it can't acquire necessary `index.lock`
-file. Re-running the command should resolve the issue.
-- While in the middle of an interactive rebase, `subspy status` currently doesn't display all of the
-information that `git status` does. This will be fixed in the future.
+- A clearer error display to the user would be helpful if a submodule's status cannot be fetched due to a "stuck" `index.lock`
+file

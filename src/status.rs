@@ -1,6 +1,6 @@
 use anstyle::AnsiColor;
 use git2::{Repository, Statuses};
-use std::path::Path;
+use std::{fs, path::Path};
 use thiserror::Error;
 
 use crate::{RepoKind, StatusSummary, connection::client::request_status, paint};
@@ -22,7 +22,7 @@ pub enum StatusError {
 const STAGED_HEADER: &str = "Changes to be committed:
   (use \"git restore --staged <file>...\" to unstage)";
 
-const UNTRACKED_HEADER: &str = "Untracked files
+const UNTRACKED_HEADER: &str = "Untracked files:
   (use \"git add <file>...\" to include in what will be committed)";
 
 fn unstaged_header(rm_in_workdir: bool, has_submod_changes: bool) -> String {
@@ -37,6 +37,213 @@ fn unstaged_header(rm_in_workdir: bool, has_submod_changes: bool) -> String {
             ""
         }
     )
+}
+
+struct RebaseInfo {
+    onto_short: String,
+    head_name: String,
+    done_ops: Vec<String>,
+    total_done: usize,
+    remaining_ops: Vec<String>,
+    total_remaining: usize,
+    is_interactive: bool,
+    is_editing: bool,
+}
+
+/// Parses lines from a rebase todo/done file, skipping blanks and comments, and shortening
+/// any 40-char hex hash in the second field to 7 chars (matching git's status display format).
+fn parse_rebase_lines(content: &str) -> Vec<String> {
+    content
+        .lines()
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(|line| {
+            let mut parts = line.splitn(3, ' ');
+            let Some(cmd) = parts.next() else {
+                return line.to_string();
+            };
+            let Some(hash_or_arg) = parts.next() else {
+                return line.to_string();
+            };
+            if hash_or_arg.len() >= 40 && hash_or_arg.chars().all(|c| c.is_ascii_hexdigit()) {
+                let short = &hash_or_arg[..7];
+                parts.next().map_or_else(
+                    || format!("{cmd} {short}"),
+                    |rest| format!("{cmd} {short} {rest}"),
+                )
+            } else {
+                line.to_string()
+            }
+        })
+        .collect()
+}
+
+fn get_rebase_info(repo: &Repository) -> StatusResult<Option<RebaseInfo>> {
+    // Use git2 for state detection; `open_rebase()` is not used because libgit2 does not
+    // support opening interactive rebases started by the git command-line.
+    let state = repo.state();
+    let is_interactive = state == git2::RepositoryState::RebaseInteractive;
+    if !is_interactive && state != git2::RepositoryState::RebaseMerge {
+        return Ok(None);
+    }
+
+    let rebase_merge = repo.path().join("rebase-merge");
+    if !rebase_merge.is_dir() {
+        return Ok(None);
+    }
+
+    let onto_raw = fs::read_to_string(rebase_merge.join("onto")).unwrap_or_default();
+    let onto_short: String = onto_raw.trim().chars().take(7).collect();
+    if onto_short.is_empty() {
+        return Ok(None);
+    }
+
+    let head_name_raw = fs::read_to_string(rebase_merge.join("head-name")).unwrap_or_default();
+    let head_name = head_name_raw
+        .trim()
+        .strip_prefix("refs/heads/")
+        .unwrap_or_else(|| head_name_raw.trim())
+        .to_string();
+
+    let done_raw = fs::read_to_string(rebase_merge.join("done")).unwrap_or_default();
+    let all_done = parse_rebase_lines(&done_raw);
+    let total_done = all_done.len();
+    // Show last 2 done ops to match git's display limit
+    let done_ops: Vec<String> = all_done.into_iter().rev().take(2).rev().collect();
+
+    let todo_raw = fs::read_to_string(rebase_merge.join("git-rebase-todo")).unwrap_or_default();
+    let all_remaining = parse_rebase_lines(&todo_raw);
+    let total_remaining = all_remaining.len();
+    // Show next 2 remaining ops to match git's display limit
+    let remaining_ops: Vec<String> = all_remaining.into_iter().take(2).collect();
+
+    // Editing mode: the `amend` file is written by git after successfully applying an
+    // 'edit' operation. Use git2's index API to confirm there are no unresolved conflicts.
+    let is_editing = rebase_merge.join("amend").exists() && !repo.index()?.has_conflicts();
+
+    Ok(Some(RebaseInfo {
+        onto_short,
+        head_name,
+        done_ops,
+        total_done,
+        remaining_ops,
+        total_remaining,
+        is_interactive,
+        is_editing,
+    }))
+}
+
+fn print_rebase_header(info: &RebaseInfo) {
+    let label = if info.is_interactive {
+        "interactive rebase"
+    } else {
+        "rebase"
+    };
+    println!(
+        "{} {}",
+        paint(Some(AnsiColor::Red), &format!("{label} in progress; onto")),
+        info.onto_short
+    );
+
+    if info.total_done > 0 {
+        let shown = info.done_ops.len();
+        if shown == 1 {
+            println!("Last command done ({} command done):", info.total_done);
+        } else {
+            println!(
+                "Last {shown} commands done ({} commands done):",
+                info.total_done
+            );
+        }
+        for cmd in &info.done_ops {
+            println!("   {cmd}");
+        }
+    }
+
+    if info.total_remaining == 0 {
+        println!("No commands remaining.");
+    } else {
+        let shown = info.remaining_ops.len();
+        if shown == 1 {
+            println!(
+                "Next command to do ({} remaining command):",
+                info.total_remaining
+            );
+        } else {
+            println!(
+                "Next {shown} commands to do ({} remaining commands):",
+                info.total_remaining
+            );
+        }
+        for cmd in &info.remaining_ops {
+            println!("   {cmd}");
+        }
+        println!("  (use \"git rebase --edit-todo\" to view and edit)");
+    }
+
+    if info.is_editing {
+        println!(
+            "You are currently editing a commit while rebasing branch '{}' on '{}'.",
+            info.head_name, info.onto_short
+        );
+        println!("  (use \"git commit --amend\" to amend the current commit)");
+        println!("  (use \"git rebase --continue\" once you are satisfied with your changes)");
+    } else {
+        println!(
+            "You are currently rebasing branch '{}' on '{}'.",
+            info.head_name, info.onto_short
+        );
+        println!("  (fix conflicts and then run \"git rebase --continue\")");
+        println!("  (use \"git rebase --skip\" to skip this patch)");
+        println!("  (use \"git rebase --abort\" to check out the original branch)");
+    }
+    println!();
+}
+
+/// Prints the "Unmerged paths:" section for any conflicts in the index.
+/// Returns `true` if there were conflicts.
+fn print_unmerged_paths(repo: &Repository) -> StatusResult<bool> {
+    let index = repo.index()?;
+    if !index.has_conflicts() {
+        return Ok(false);
+    }
+
+    println!("Unmerged paths:");
+    println!("  (use \"git restore --staged <file>...\" to unstage)");
+    println!("  (use \"git add <file>...\" to mark resolution)");
+
+    for conflict in index.conflicts()? {
+        let conflict = conflict?;
+        let path = conflict
+            .our
+            .as_ref()
+            .or(conflict.their.as_ref())
+            .or(conflict.ancestor.as_ref())
+            .and_then(|e| std::str::from_utf8(&e.path).ok())
+            .unwrap_or("<unknown path>");
+
+        // Padded to 17 chars to match git's column alignment
+        #[allow(clippy::match_same_arms)]
+        let type_str = match (
+            conflict.ancestor.is_some(),
+            conflict.our.is_some(),
+            conflict.their.is_some(),
+        ) {
+            (true, true, true) => "both modified:   ",
+            (false, true, true) => "both added:      ",
+            (true, false, true) => "deleted by us:   ",
+            (true, true, false) => "deleted by them: ",
+            (true, false, false) => "both deleted:    ",
+            (false, true, false) => "added by us:     ",
+            (false, false, true) => "added by them:   ",
+            (false, false, false) => "both modified:   ",
+        };
+        println!(
+            "{}",
+            paint(Some(AnsiColor::Red), &format!("\t{type_str}{path}"))
+        );
+    }
+    println!();
+    Ok(true)
 }
 
 fn current_branch_display(repo: &Repository) -> StatusResult<String> {
@@ -115,11 +322,17 @@ fn display_status(
     let mut rm_in_workdir = false;
     let mut changes_in_index = false;
     let mut changed_in_workdir = false;
-    println!("{}", current_branch_display(repo)?);
-    if let (Some(upstream_status), Some(upstream_name)) =
-        (get_upstream_status(repo)?, get_upstream_ref_name(repo)?)
-    {
-        println!("Your branch is {upstream_status} with '{upstream_name}'.\n");
+    #[allow(clippy::single_match_else)]
+    match get_rebase_info(repo)? {
+        Some(ref info) => print_rebase_header(info),
+        None => {
+            println!("{}", current_branch_display(repo)?);
+            if let (Some(upstream_status), Some(upstream_name)) =
+                (get_upstream_status(repo)?, get_upstream_ref_name(repo)?)
+            {
+                println!("Your branch is {upstream_status} with '{upstream_name}'.\n");
+            }
+        }
     }
 
     // Print index changes
@@ -201,6 +414,8 @@ fn display_status(
     }
     header = false;
 
+    let has_conflicts = print_unmerged_paths(repo)?;
+
     let has_submod_changes = submodule_statuses
         .iter()
         .filter(|(_, st)| !st.eq(&StatusSummary::STAGED))
@@ -210,6 +425,10 @@ fn display_status(
     // Print workdir changes to tracked files
     for entry in non_submodule_statues.iter() {
         if entry.status() == git2::Status::CURRENT || entry.index_to_workdir().is_none() {
+            continue;
+        }
+        // Conflicted files are shown in the unmerged paths section above
+        if entry.status().contains(git2::Status::CONFLICTED) {
             continue;
         }
 
@@ -301,7 +520,11 @@ fn display_status(
         println!();
     }
 
-    match (changes_in_index, changed_in_workdir, has_untracked) {
+    match (
+        changes_in_index,
+        changed_in_workdir || has_conflicts,
+        has_untracked,
+    ) {
         (false, true, _) => {
             println!("no changes added to commit (use \"git add\" and/or \"git commit -a\")");
         }
