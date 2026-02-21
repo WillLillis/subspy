@@ -246,6 +246,186 @@ fn print_unmerged_paths(repo: &Repository) -> StatusResult<bool> {
     Ok(true)
 }
 
+fn print_normal_header(repo: &Repository) -> StatusResult<()> {
+    println!("{}", current_branch_display(repo)?);
+    if let (Some(upstream_status), Some(upstream_name)) =
+        (get_upstream_status(repo)?, get_upstream_ref_name(repo)?)
+    {
+        println!("Your branch is {upstream_status} with '{upstream_name}'.\n");
+    }
+    Ok(())
+}
+
+fn print_staged_changes(
+    non_submod: &Statuses<'_>,
+    submodule_statuses: &[(String, StatusSummary)],
+    new_submodule_paths: &[String],
+) -> bool {
+    let mut header = false;
+
+    for entry in non_submod.iter().filter(|e| e.status() != git2::Status::CURRENT) {
+        let istatus = match entry.status() {
+            s if s.contains(git2::Status::INDEX_NEW) => "new file: ",
+            s if s.contains(git2::Status::INDEX_MODIFIED) => "modified: ",
+            s if s.contains(git2::Status::INDEX_DELETED) => "deleted: ",
+            s if s.contains(git2::Status::INDEX_RENAMED) => "renamed: ",
+            s if s.contains(git2::Status::INDEX_TYPECHANGE) => "typechange:",
+            _ => continue,
+        };
+        if !header {
+            println!("{STAGED_HEADER}");
+            header = true;
+        }
+        let old_path = entry.head_to_index().unwrap().old_file().path();
+        let new_path = entry.head_to_index().unwrap().new_file().path();
+        match (old_path, new_path) {
+            (Some(old), Some(new)) if old != new => println!(
+                "{}",
+                paint(
+                    Some(AnsiColor::Green),
+                    &format!("\t{istatus}  {} -> {}", old.display(), new.display()),
+                )
+            ),
+            (old, new) => println!(
+                "{}",
+                paint(
+                    Some(AnsiColor::Green),
+                    &format!("\t{istatus}  {}", old.or(new).unwrap().display()),
+                )
+            ),
+        }
+    }
+
+    for path in new_submodule_paths {
+        if !header {
+            println!("{STAGED_HEADER}");
+            header = true;
+        }
+        println!("{}", paint(Some(AnsiColor::Green), &format!("\tnew file:   {path}")));
+    }
+
+    for (submod_path, _) in submodule_statuses
+        .iter()
+        .filter(|(_, st)| st.contains(StatusSummary::STAGED))
+    {
+        if !header {
+            println!("{STAGED_HEADER}");
+            header = true;
+        }
+        println!(
+            "{}",
+            paint(Some(AnsiColor::Green), &format!("\tmodified:   {submod_path}"))
+        );
+    }
+
+    if header {
+        println!();
+    }
+    header
+}
+
+fn print_unstaged_changes(
+    non_submod: &Statuses<'_>,
+    submodule_statuses: &[(String, StatusSummary)],
+    rm_in_workdir: bool,
+) -> bool {
+    let has_submod_changes = submodule_statuses
+        .iter()
+        .any(|(_, st)| !st.eq(&StatusSummary::STAGED));
+    let mut header = false;
+
+    for entry in non_submod.iter() {
+        if entry.status() == git2::Status::CURRENT || entry.index_to_workdir().is_none() {
+            continue;
+        }
+        if entry.status().contains(git2::Status::CONFLICTED) {
+            continue;
+        }
+        let istatus = match entry.status() {
+            s if s.contains(git2::Status::WT_MODIFIED) => "modified: ",
+            s if s.contains(git2::Status::WT_DELETED) => "deleted: ",
+            s if s.contains(git2::Status::WT_RENAMED) => "renamed: ",
+            s if s.contains(git2::Status::WT_TYPECHANGE) => "typechange:",
+            _ => continue,
+        };
+        if !header {
+            println!("{}", unstaged_header(rm_in_workdir, has_submod_changes));
+            header = true;
+        }
+        let old_path = entry.index_to_workdir().unwrap().old_file().path();
+        let new_path = entry.index_to_workdir().unwrap().new_file().path();
+        match (old_path, new_path) {
+            (Some(old), Some(new)) if old != new => println!(
+                "{}",
+                paint(
+                    Some(AnsiColor::Red),
+                    &format!("\t{istatus}  {} -> {}", old.display(), new.display()),
+                )
+            ),
+            (old, new) => println!(
+                "{}",
+                paint(
+                    Some(AnsiColor::Red),
+                    &format!("\t{istatus}  {}", old.or(new).unwrap().display()),
+                )
+            ),
+        }
+    }
+
+    for (submod_path, submod_status) in submodule_statuses
+        .iter()
+        .filter(|(_, st)| !st.eq(&StatusSummary::STAGED))
+    {
+        if !header {
+            println!("{}", unstaged_header(rm_in_workdir, true));
+            header = true;
+        }
+        let istatus = submod_status.to_string();
+        print!("{}", paint(Some(AnsiColor::Red), &format!("\tmodified:   {submod_path}")));
+        if istatus.is_empty() {
+            println!();
+        } else {
+            println!(" {istatus}");
+        }
+    }
+
+    if header {
+        println!();
+    }
+    header
+}
+
+fn print_untracked_files(non_submod: &Statuses<'_>) -> bool {
+    let mut header = false;
+    for entry in non_submod.iter().filter(|e| e.status() == git2::Status::WT_NEW) {
+        if !header {
+            println!("{UNTRACKED_HEADER}");
+            header = true;
+        }
+        let file = entry.index_to_workdir().unwrap().old_file().path().unwrap();
+        println!("\t{}", paint(Some(AnsiColor::Red), &format!("{}", file.display())));
+    }
+    if header {
+        println!();
+    }
+    header
+}
+
+fn print_summary(changes_in_index: bool, changed_in_workdir: bool, has_untracked: bool) {
+    match (changes_in_index, changed_in_workdir, has_untracked) {
+        (false, true, _) => {
+            println!("no changes added to commit (use \"git add\" and/or \"git commit -a\")");
+        }
+        (false, false, false) => println!("nothing to commit, working tree clean"),
+        (false, false, true) => {
+            println!(
+                "nothing added to commit but untracked files present (use \"git add\" to track)"
+            );
+        }
+        _ => {}
+    }
+}
+
 fn current_branch_display(repo: &Repository) -> StatusResult<String> {
     let head_ref = repo.head()?;
     if !head_ref.is_branch() {
@@ -311,231 +491,29 @@ fn get_upstream_status(repo: &Repository) -> StatusResult<Option<String>> {
 }
 
 // Adapted from https://github.com/rust-lang/git2-rs/blob/master/examples/status.rs
-#[expect(clippy::too_many_lines)]
 fn display_status(
     repo: &Repository,
     non_submodule_statues: &Statuses<'_>,
     submodule_statuses: &[(String, StatusSummary)],
     new_submodule_paths: &[String],
 ) -> StatusResult<()> {
-    let mut header = false;
-    let mut rm_in_workdir = false;
-    let mut changes_in_index = false;
-    let mut changed_in_workdir = false;
-    #[allow(clippy::single_match_else)]
     match get_rebase_info(repo)? {
         Some(ref info) => print_rebase_header(info),
-        None => {
-            println!("{}", current_branch_display(repo)?);
-            if let (Some(upstream_status), Some(upstream_name)) =
-                (get_upstream_status(repo)?, get_upstream_ref_name(repo)?)
-            {
-                println!("Your branch is {upstream_status} with '{upstream_name}'.\n");
-            }
-        }
+        None => print_normal_header(repo)?,
     }
 
-    // Print index changes
-    for entry in non_submodule_statues
+    let rm_in_workdir = non_submodule_statues
         .iter()
-        .filter(|e| e.status() != git2::Status::CURRENT)
-    {
-        if entry.status().contains(git2::Status::WT_DELETED) {
-            rm_in_workdir = true;
-        }
-        let istatus = match entry.status() {
-            s if s.contains(git2::Status::INDEX_NEW) => "new file: ",
-            s if s.contains(git2::Status::INDEX_MODIFIED) => "modified: ",
-            s if s.contains(git2::Status::INDEX_DELETED) => "deleted: ",
-            s if s.contains(git2::Status::INDEX_RENAMED) => "renamed: ",
-            s if s.contains(git2::Status::INDEX_TYPECHANGE) => "typechange:",
-            _ => continue,
-        };
-        if !header {
-            println!("{STAGED_HEADER}");
-            header = true;
-        }
+        .any(|e| e.status().contains(git2::Status::WT_DELETED));
 
-        let old_path = entry.head_to_index().unwrap().old_file().path();
-        let new_path = entry.head_to_index().unwrap().new_file().path();
-        match (old_path, new_path) {
-            (Some(old), Some(new)) if old != new => {
-                println!(
-                    "{}",
-                    paint(
-                        Some(AnsiColor::Green),
-                        &format!("\t{}  {} -> {}", istatus, old.display(), new.display()),
-                    )
-                );
-            }
-            (old, new) => {
-                println!(
-                    "{}",
-                    paint(
-                        Some(AnsiColor::Green),
-                        &format!("\t{}  {}", istatus, old.or(new).unwrap().display()),
-                    )
-                );
-            }
-        }
-    }
-
-    for path in new_submodule_paths {
-        if !header {
-            println!("{STAGED_HEADER}");
-            header = true;
-        }
-        println!(
-            "{}",
-            paint(Some(AnsiColor::Green), &format!("\tnew file:   {path}"))
-        );
-    }
-
-    for (submod_path, _) in submodule_statuses
-        .iter()
-        .filter(|(_, st)| st.contains(StatusSummary::STAGED))
-    {
-        if !header {
-            println!("{STAGED_HEADER}");
-            header = true;
-        }
-        println!(
-            "{}",
-            paint(
-                Some(AnsiColor::Green),
-                &format!("\tmodified:   {submod_path}")
-            )
-        );
-    }
-
-    if header {
-        changes_in_index = true;
-        println!();
-    }
-    header = false;
-
+    let changes_in_index =
+        print_staged_changes(non_submodule_statues, submodule_statuses, new_submodule_paths);
     let has_conflicts = print_unmerged_paths(repo)?;
+    let changed_in_workdir =
+        print_unstaged_changes(non_submodule_statues, submodule_statuses, rm_in_workdir);
+    let has_untracked = print_untracked_files(non_submodule_statues);
 
-    let has_submod_changes = submodule_statuses
-        .iter()
-        .filter(|(_, st)| !st.eq(&StatusSummary::STAGED))
-        .count()
-        > 0;
-
-    // Print workdir changes to tracked files
-    for entry in non_submodule_statues.iter() {
-        if entry.status() == git2::Status::CURRENT || entry.index_to_workdir().is_none() {
-            continue;
-        }
-        // Conflicted files are shown in the unmerged paths section above
-        if entry.status().contains(git2::Status::CONFLICTED) {
-            continue;
-        }
-
-        let istatus = match entry.status() {
-            s if s.contains(git2::Status::WT_MODIFIED) => "modified: ",
-            s if s.contains(git2::Status::WT_DELETED) => "deleted: ",
-            s if s.contains(git2::Status::WT_RENAMED) => "renamed: ",
-            s if s.contains(git2::Status::WT_TYPECHANGE) => "typechange:",
-            _ => continue,
-        };
-
-        if !header {
-            println!("{}", unstaged_header(rm_in_workdir, has_submod_changes));
-            header = true;
-        }
-
-        let old_path = entry.index_to_workdir().unwrap().old_file().path();
-        let new_path = entry.index_to_workdir().unwrap().new_file().path();
-        match (old_path, new_path) {
-            (Some(old), Some(new)) if old != new => {
-                println!(
-                    "{}",
-                    paint(
-                        Some(AnsiColor::Red),
-                        &format!("\t{}  {} -> {}", istatus, old.display(), new.display()),
-                    )
-                );
-            }
-            (old, new) => {
-                println!(
-                    "{}",
-                    paint(
-                        Some(AnsiColor::Red),
-                        &format!("\t{}  {}", istatus, old.or(new).unwrap().display()),
-                    )
-                );
-            }
-        }
-    }
-
-    for (submod_path, submod_status) in submodule_statuses
-        .iter()
-        .filter(|(_, st)| !st.eq(&StatusSummary::STAGED))
-    {
-        let istatus = submod_status.to_string();
-        if !header {
-            println!("{}", unstaged_header(rm_in_workdir, true));
-            header = true;
-        }
-        print!(
-            "{}",
-            paint(
-                Some(AnsiColor::Red),
-                &format!("\tmodified:   {submod_path}")
-            )
-        );
-        if istatus.is_empty() {
-            println!();
-        } else {
-            println!(" {istatus}");
-        }
-    }
-
-    if header {
-        changed_in_workdir = true;
-        println!();
-    }
-    header = false;
-
-    let mut has_untracked = false;
-    // Print untracked files
-    for entry in non_submodule_statues
-        .iter()
-        .filter(|e| e.status() == git2::Status::WT_NEW)
-    {
-        if !header {
-            println!("{UNTRACKED_HEADER}");
-            header = true;
-            has_untracked = true;
-        }
-        let file = entry.index_to_workdir().unwrap().old_file().path().unwrap();
-        println!(
-            "\t{}",
-            paint(Some(AnsiColor::Red), &format!("{}", file.display()))
-        );
-    }
-
-    if header {
-        println!();
-    }
-
-    match (
-        changes_in_index,
-        changed_in_workdir || has_conflicts,
-        has_untracked,
-    ) {
-        (false, true, _) => {
-            println!("no changes added to commit (use \"git add\" and/or \"git commit -a\")");
-        }
-        (false, false, false) => println!("nothing to commit, working tree clean"),
-        (false, false, true) => {
-            println!(
-                "nothing added to commit but untracked files present (use \"git add\" to track)"
-            );
-        }
-        _ => {}
-    }
+    print_summary(changes_in_index, changed_in_workdir || has_conflicts, has_untracked);
 
     Ok(())
 }
