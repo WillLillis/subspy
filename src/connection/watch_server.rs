@@ -81,6 +81,9 @@ struct WatchServer {
     client_pid: Option<u32>,
     /// Filesystem watchers
     watchers: WatchList,
+
+    // NOTE: Common paths are pre-computed and stored here to avoid `PathBuf` heap allocs in hot
+    // loops
     /// Root path to the repository being watched
     root_path: PathBuf,
     /// `<root_path>/.git/index`
@@ -90,7 +93,10 @@ struct WatchServer {
     /// `root_path`/.git
     dot_git_path: PathBuf,
     /// `root_path`/.git/modules
-    submod_modules_path: PathBuf,
+    modules_path: PathBuf,
+    /// `root_path`/.git/index.lock
+    root_lock_path: PathBuf,
+
     /// Receiver for control messages from the listener thread
     control_rx: crossbeam_channel::Receiver<ControlMessage>,
     /// The main map of the server, associating submodule relative paths (from the repository's
@@ -172,10 +178,11 @@ impl Drop for LockFileGuard<'_> {
 
 impl WatchServer {
     pub fn new(root_path: &Path, control_rx: crossbeam_channel::Receiver<ControlMessage>) -> Self {
-        let gitmodules_path = root_path.to_path_buf().join(DOT_GITMODULES);
-        let dot_git_path = root_path.to_path_buf().join(DOT_GIT);
-        let root_index = root_path.to_path_buf().join(DOT_GIT).join("index");
-        let submod_modules_path = root_path.to_path_buf().join(DOT_GIT).join("modules");
+        let gitmodules_path = root_path.join(DOT_GITMODULES);
+        let dot_git_path = root_path.join(DOT_GIT);
+        let root_index = root_path.join(DOT_GIT).join("index");
+        let modules_path = root_path.join(".git").join("modules");
+        let root_lock_path = root_path.join(".git").join("index.lock");
 
         Self {
             do_watch: true,
@@ -185,7 +192,8 @@ impl WatchServer {
             root_index,
             gitmodules_path,
             dot_git_path,
-            submod_modules_path,
+            modules_path,
+            root_lock_path,
             control_rx,
             submod_statuses: Arc::new(Mutex::new(BTreeMap::new())),
             progress_queue: Arc::new(Mutex::new(HashMap::new())),
@@ -332,9 +340,8 @@ impl WatchServer {
         // while the server is (re)indexing. git2's `Repository::submodules` function contains
         // an assert for its inner call to `git_submodule_lookup`, which triggers for a non-zero
         // return code.
-        let lock_file_path = self.root_path.join(".git").join("index.lock");
         let submodules = {
-            let _lock = LockFileGuard::acquire(&lock_file_path)?;
+            let _lock = LockFileGuard::acquire(&self.root_lock_path)?;
             repo.submodules()?
         };
 
@@ -520,7 +527,7 @@ impl WatchServer {
             if event
                 .paths
                 .iter()
-                .any(|p| p.starts_with(&self.submod_modules_path))
+                .any(|p| p.starts_with(&self.modules_path))
             {
                 if event.paths.iter().any(|p| is_index_file(p)) {
                     Some(EventType::SubmoduleGitOperation)
@@ -547,8 +554,7 @@ impl WatchServer {
         // will be swapped. This is highly unlikely to cuase a bug in real use, and until
         // its proven to I would prefer to not pessimize the common case with a full read
         // and parse of the `.git` file.
-        let modules_path = self.root_path.join(".git").join("modules");
-        let alleged_submod_path = modules_path.join(submod_rel_path);
+        let alleged_submod_path = self.modules_path.join(submod_rel_path);
         if alleged_submod_path.exists() {
             return Ok(alleged_submod_path.join("index.lock"));
         }
