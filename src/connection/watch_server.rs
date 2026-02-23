@@ -176,6 +176,32 @@ impl Drop for LockFileGuard<'_> {
     }
 }
 
+/// Returns the converted `StatusSummary` status for the submodule at `relative_path` guarded by
+/// `lock_path`. If the lock file at `lock_path` cannot be acquired, returns
+/// `Ok(StatusSummary::LOCK_FAILURE)`.
+fn get_submod_status(
+    repo: &Repository,
+    relative_path: &str,
+    lock_path: &Path,
+) -> WatchResult<StatusSummary> {
+    let status: StatusSummary = match LockFileGuard::acquire(lock_path) {
+        Ok(_lock) => repo
+            .submodule_status(relative_path, git2::SubmoduleIgnore::None)?
+            .into(),
+        Err(WatchError::LockFileAcquire(_)) => {
+            // Pass failures to acquire the relevant `index.lock` file as pseudo
+            // statuses so they can be displayed to the user to resolve.
+            error!(
+                "Failed to acquire lock file `{}` before retrieving status",
+                lock_path.display()
+            );
+            StatusSummary::LOCK_FAILURE
+        }
+        Err(e) => Err(e)?,
+    };
+    Ok(status)
+}
+
 impl WatchServer {
     pub fn new(root_path: &Path, control_rx: crossbeam_channel::Receiver<ControlMessage>) -> Self {
         let gitmodules_path = root_path.join(DOT_GITMODULES);
@@ -391,9 +417,6 @@ impl WatchServer {
                 let sub_start = std::time::Instant::now();
                 let repo = tl_repo.get_or_try(|| Repository::open(root_path))?;
 
-                // TODO: What should we do if we can't acquire the lock file? Have some sentinel
-                // status to indicate that the status couldn't be grabbed? Could suggest removing
-                // the lock file + reindexing
                 let lock_path = match self.get_index_lock_path(&relative_path) {
                     Ok(p) => p,
                     Err(e) => {
@@ -407,11 +430,7 @@ impl WatchServer {
                 #[cfg(target_os = "windows")]
                 let relative_path = relative_path.replace('\\', "/");
 
-                let status = {
-                    let _lock = LockFileGuard::acquire(&lock_path)?;
-                    repo.submodule_status(&relative_path, git2::SubmoduleIgnore::None)?
-                };
-                let converted_status: StatusSummary = status.into();
+                let status = get_submod_status(repo, &relative_path, &lock_path)?;
 
                 let count = completed.fetch_add(1, Ordering::Relaxed) + 1;
                 if let Some(id) = client_pid {
@@ -421,14 +440,13 @@ impl WatchServer {
                     pb.inc(1);
                 }
                 trace!(
-                    "Indexed {} ({:?} -> {:?}) in {}ms",
+                    "Indexed {} ({:?}) in {}ms",
                     full_path.display(),
                     status,
-                    converted_status,
                     sub_start.elapsed().as_millis(),
                 );
 
-                Ok((relative_path, full_path, lock_path, converted_status))
+                Ok((relative_path, full_path, lock_path, status))
             })
             .collect();
         let results = results?;
@@ -593,21 +611,19 @@ impl WatchServer {
             );
         });
         let rel_path = self.watchers[index].relative_path.as_str();
-        let status = {
-            let _lock = LockFileGuard::acquire(lock_file_path)?;
-            repo.submodule_status(rel_path, git2::SubmoduleIgnore::None)
-        };
+        let status = get_submod_status(repo, rel_path, lock_file_path);
         match status {
             Ok(submod_status) => {
                 let mut guard = self.submod_statuses.lock().expect("Mutex poisoned");
                 if let Some(st) = guard.get_mut(rel_path) {
-                    *st = submod_status.into();
+                    *st = submod_status;
                 } else {
-                    guard.insert(rel_path.to_string(), submod_status.into());
+                    guard.insert(rel_path.to_string(), submod_status);
                 }
             }
             Err(e) => {
                 error!("Failed to get submodule status for path: {rel_path} -- {e}");
+                Err(e)?;
             }
         }
 
@@ -656,7 +672,6 @@ impl WatchServer {
                         }
                         Some(EventType::SubmoduleGitOperation) => {
                             for (i, watcher) in self.watchers.iter().enumerate() {
-                                // TODO: This is a hot loop, we may want to unwrap_unchecked here
                                 let Some(submod_modules_path) =
                                     watcher.lock_file_path.as_ref().and_then(|p| p.parent())
                                 else {
