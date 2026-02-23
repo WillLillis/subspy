@@ -83,6 +83,8 @@ struct WatchServer {
     watchers: WatchList,
     /// Root path to the repository being watched
     root_path: PathBuf,
+    /// `<root_path>/.git/index`
+    root_index: PathBuf,
     /// `root_path`/.gitmodules
     gitmodules_path: PathBuf,
     /// `root_path`/.git
@@ -172,6 +174,7 @@ impl WatchServer {
     pub fn new(root_path: &Path, control_rx: crossbeam_channel::Receiver<ControlMessage>) -> Self {
         let gitmodules_path = root_path.to_path_buf().join(DOT_GITMODULES);
         let dot_git_path = root_path.to_path_buf().join(DOT_GIT);
+        let root_index = root_path.to_path_buf().join(DOT_GIT).join("index");
         let submod_modules_path = root_path.to_path_buf().join(DOT_GIT).join("modules");
 
         Self {
@@ -179,6 +182,7 @@ impl WatchServer {
             client_pid: None,
             watchers: Vec::new(),
             root_path: root_path.to_path_buf(),
+            root_index,
             gitmodules_path,
             dot_git_path,
             submod_modules_path,
@@ -502,26 +506,28 @@ impl WatchServer {
             return None;
         }
 
-        // Both git itself and subspy acquire various `.lock` files to protect certain
-        // operations. Acquiring such a lock does _not_ mean a reindex is necessary,
-        // it's just telling other git things "hey don't touch this right now". If
-        // something _does_ change that requires a reindex, another file will be
-        // modified which we will pick up on.
-        let is_not_lock_path =
-            |p: &Path| -> bool { p.extension().is_none_or(|ext| !ext.eq("lock")) };
+        let is_index_file = |p: &Path| -> bool {
+            p.is_file()
+                && p.file_name().is_some_and(|name| name.eq("index"))
+                && p.parent().is_some_and(|parent| {
+                    parent.is_dir() && parent.file_name().is_some_and(|p_name| p_name.eq(".git"))
+                })
+        };
 
+        // TODO: Separate watches, only `.git/modules/, `.git/index`, and then
+        // the submodules (include this in the perf branch)
         if rel_path.eq(DOT_GIT) {
             if event
                 .paths
                 .iter()
                 .any(|p| p.starts_with(&self.submod_modules_path))
             {
-                if event.paths.iter().any(|p| is_not_lock_path(p)) {
+                if event.paths.iter().any(|p| is_index_file(p)) {
                     Some(EventType::SubmoduleGitOperation)
                 } else {
                     None
                 }
-            } else if event.paths.iter().any(|p| is_not_lock_path(p)) {
+            } else if event.paths.iter().any(|p| p.eq(&self.root_index)) {
                 Some(EventType::RootGitOperation)
             } else {
                 None
