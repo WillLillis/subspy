@@ -36,6 +36,7 @@ bitflags! {
         const UNTRACKED_CONTENT = 0b0010;
         const NEW_COMMITS       = 0b0100;
         const STAGED            = 0b1000;
+        const LOCK_FAILURE      = 1 << 31;
     }
 }
 

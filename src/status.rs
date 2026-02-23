@@ -25,6 +25,13 @@ const STAGED_HEADER: &str = "Changes to be committed:
 const UNTRACKED_HEADER: &str = "Untracked files:
   (use \"git add <file>...\" to include in what will be committed)";
 
+const LOCK_FILE_ERROR_FOOTER: &str =
+    "Another git/subspy process seems to be running in this repository, e.g.
+an editor opened by 'git commit'. Please make sure all processes
+are terminated then try `subspy reindex`. If it still fails, a git/subspy
+process may have crashed in this repository earlier:
+remove the file manually, `subspy reindex`, and retry to continue.";
+
 fn unstaged_header(rm_in_workdir: bool, has_submod_changes: bool) -> String {
     format!(
         "Changes not staged for commit:
@@ -310,10 +317,9 @@ fn print_staged_changes(
         );
     }
 
-    for (submod_path, _) in submodule_statuses
-        .iter()
-        .filter(|(_, st)| st.contains(StatusSummary::STAGED))
-    {
+    for (submod_path, _) in submodule_statuses.iter().filter(|(_, st)| {
+        st.contains(StatusSummary::STAGED) && !st.eq(&StatusSummary::LOCK_FAILURE)
+    }) {
         if !header {
             println!("{STAGED_HEADER}");
             header = true;
@@ -383,7 +389,7 @@ fn print_unstaged_changes(
 
     for (submod_path, submod_status) in submodule_statuses
         .iter()
-        .filter(|(_, st)| !st.eq(&StatusSummary::STAGED))
+        .filter(|(_, st)| !st.eq(&StatusSummary::STAGED) && !st.eq(&StatusSummary::LOCK_FAILURE))
     {
         if !header {
             println!("{}", unstaged_header(rm_in_workdir, true));
@@ -444,6 +450,23 @@ fn print_summary(changes_in_index: bool, changed_in_workdir: bool, has_untracked
             );
         }
         _ => {}
+    }
+}
+
+fn print_lock_file_errors(submodule_statuses: &[(String, StatusSummary)]) {
+    let mut footer = false;
+    for (submod_path, _) in submodule_statuses
+        .iter()
+        .filter(|(_, st)| st.eq(&StatusSummary::LOCK_FAILURE))
+    {
+        if !footer {
+            println!();
+        }
+        footer = true;
+        println!("error: Unable to create index.lock file for '{submod_path}': File exists.");
+    }
+    if footer {
+        println!("\n{LOCK_FILE_ERROR_FOOTER}");
     }
 }
 
@@ -542,6 +565,8 @@ fn display_status(
         changed_in_workdir || has_conflicts,
         has_untracked,
     );
+
+    print_lock_file_errors(submodule_statuses);
 
     Ok(())
 }
