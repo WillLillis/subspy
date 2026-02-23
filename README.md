@@ -78,8 +78,6 @@ sys     0m0.000s
 
 - [ ] Tests
 - [ ] crates.io releases if desired
+- [ ] Threadpool or similar for the watch server's main event loop
 
 #### Known Issues
-
-- A clearer error display to the user would be helpful if a submodule's status cannot be fetched due to a "stuck" `index.lock`
-file
