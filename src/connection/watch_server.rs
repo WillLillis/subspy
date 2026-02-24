@@ -27,7 +27,7 @@ use crate::{
 };
 
 const MAX_LOCKFILE_BACKOFF: Duration = Duration::from_millis(100);
-const LOCKFILE_TIMEOUT: Duration = Duration::from_secs(30);
+const LOCKFILE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Type alias for the submodule status map mutex
 type StatusMap = Mutex<BTreeMap<String, StatusSummary>>;
