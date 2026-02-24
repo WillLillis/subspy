@@ -87,13 +87,13 @@ struct WatchServer {
     /// Root path to the repository being watched
     root_path: PathBuf,
     /// `<root_path>/.git/index`
-    root_index: PathBuf,
+    root_index_path: PathBuf,
     /// `<root_path>/.gitmodules`
-    gitmodules_path: PathBuf,
+    root_gitmodules_path: PathBuf,
     /// `<root_path>/.git`
-    dot_git_path: PathBuf,
+    root_git_path: PathBuf,
     /// `<root_path>/.git/modules`
-    modules_path: PathBuf,
+    root_modules_path: PathBuf,
     /// `<root_path>/.git/index.lock`
     root_lock_path: PathBuf,
 
@@ -204,21 +204,21 @@ fn get_submod_status(
 
 impl WatchServer {
     pub fn new(root_path: &Path, control_rx: crossbeam_channel::Receiver<ControlMessage>) -> Self {
-        let gitmodules_path = root_path.join(DOT_GITMODULES);
-        let dot_git_path = root_path.join(DOT_GIT);
-        let root_index = root_path.join(DOT_GIT).join("index");
-        let modules_path = root_path.join(".git").join("modules");
-        let root_lock_path = root_path.join(".git").join("index.lock");
+        let root_index_path = root_path.join(DOT_GIT).join("index");
+        let root_gitmodules_path = root_path.join(DOT_GITMODULES);
+        let root_git_path = root_path.join(DOT_GIT);
+        let root_modules_path = root_path.join(DOT_GIT).join("modules");
+        let root_lock_path = root_path.join(DOT_GIT).join("index.lock");
 
         Self {
             do_watch: true,
             client_pid: None,
             watchers: Vec::new(),
             root_path: root_path.to_path_buf(),
-            root_index,
-            gitmodules_path,
-            dot_git_path,
-            modules_path,
+            root_index_path,
+            root_gitmodules_path,
+            root_git_path,
+            root_modules_path,
             root_lock_path,
             control_rx,
             submod_statuses: Arc::new(Mutex::new(BTreeMap::new())),
@@ -320,7 +320,7 @@ impl WatchServer {
     /// Returns `notify::Error` if any watchers cannot be created
     fn place_root_watches(&mut self) -> notify::Result<()> {
         let (rx, watcher) = Self::place_watch(
-            self.gitmodules_path.as_path(),
+            self.root_gitmodules_path.as_path(),
             notify::RecursiveMode::NonRecursive, // ignored
         )?;
         self.watchers.push(WatchListItem::new(
@@ -332,12 +332,12 @@ impl WatchServer {
         ));
 
         let (rx, watcher) = Self::place_watch(
-            self.dot_git_path.as_path(),
+            self.root_git_path.as_path(),
             notify::RecursiveMode::Recursive,
         )?;
         self.watchers.push(WatchListItem::new(
             DOT_GIT.to_owned(),
-            self.dot_git_path.clone(),
+            self.root_git_path.clone(),
             None,
             rx,
             watcher,
@@ -548,14 +548,14 @@ impl WatchServer {
             if event
                 .paths
                 .iter()
-                .any(|p| p.starts_with(&self.modules_path))
+                .any(|p| p.starts_with(&self.root_modules_path))
             {
                 if event.paths.iter().any(|p| is_index_file(p)) {
                     Some(EventType::SubmoduleGitOperation)
                 } else {
                     None
                 }
-            } else if event.paths.iter().any(|p| p.eq(&self.root_index)) {
+            } else if event.paths.iter().any(|p| p.eq(&self.root_index_path)) {
                 Some(EventType::RootGitOperation)
             } else {
                 None
@@ -575,7 +575,7 @@ impl WatchServer {
         // will be swapped. This is highly unlikely to cuase a bug in real use, and until
         // its proven to I would prefer to not pessimize the common case with a full read
         // and parse of the `.git` file.
-        let alleged_submod_path = self.modules_path.join(submod_rel_path);
+        let alleged_submod_path = self.root_modules_path.join(submod_rel_path);
         if alleged_submod_path.exists() {
             return Ok(alleged_submod_path.join("index.lock"));
         }
