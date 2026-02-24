@@ -538,7 +538,7 @@ impl WatchServer {
             p.is_file()
                 && p.file_name().is_some_and(|name| name.eq("index"))
                 && p.parent().is_some_and(|parent| {
-                    parent.is_dir() && parent.file_name().is_some_and(|p_name| p_name.eq(".git"))
+                    parent.is_dir() && parent.file_name().is_some_and(|p_name| p_name.eq(DOT_GIT))
                 })
         };
 
@@ -583,7 +583,7 @@ impl WatchServer {
         // The submodule was renamed at some point but its `.git` directory inside
         // `.git/modules` wasn't updated, so we have to read the submodule's `.git`
         // file to get the _actual_ relative path
-        let dot_git_path = self.root_path.join(submod_rel_path).join(".git");
+        let dot_git_path = self.root_path.join(submod_rel_path).join(DOT_GIT);
         let dot_git_contents = std::fs::read_to_string(&dot_git_path)?;
         let actual_rel_path = dot_git_contents
             .strip_prefix("gitdir: ")
