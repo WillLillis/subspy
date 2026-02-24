@@ -1,9 +1,12 @@
 use std::{
-    collections::{BTreeMap, HashMap, VecDeque},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     fs,
     io::BufReader,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, MutexGuard, TryLockError},
+    sync::{
+        Arc, Condvar, Mutex, MutexGuard, TryLockError,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -129,7 +132,7 @@ struct LockFileGuard<'a> {
 }
 
 impl<'a> LockFileGuard<'a> {
-    fn acquire(path: &'a Path) -> WatchResult<Self> {
+    fn acquire(path: &'a Path, cancel: Option<&AtomicBool>) -> WatchResult<Self> {
         trace!("Acquiring lock file at path: {}", path.display());
         let start = Instant::now();
         let mut backoff = Duration::from_millis(1);
@@ -142,7 +145,9 @@ impl<'a> LockFileGuard<'a> {
             {
                 Ok(_) => break,
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                    if start.elapsed() >= LOCKFILE_TIMEOUT {
+                    if start.elapsed() >= LOCKFILE_TIMEOUT
+                        || cancel.is_some_and(|c| c.load(Ordering::Relaxed))
+                    {
                         Err(WatchError::LockFileAcquire(LockFileError::new(
                             path.to_path_buf(),
                             e,
@@ -176,6 +181,36 @@ impl Drop for LockFileGuard<'_> {
     }
 }
 
+/// Tracks which submodule watcher indices have in-flight rayon tasks, and which received
+/// new events while already being processed (needing a re-check after the current task).
+struct InFlightTracker {
+    /// Watcher indices currently being processed by rayon tasks
+    processing: HashSet<usize>,
+    /// Watcher indices that received new events while already in-flight
+    dirty: HashSet<usize>,
+}
+
+impl InFlightTracker {
+    fn new() -> Self {
+        Self {
+            processing: HashSet::new(),
+            dirty: HashSet::new(),
+        }
+    }
+}
+
+/// Signals cancellation to all in-flight rayon tasks, then blocks until they have
+/// all completed, using the `Condvar` to avoid busy-waiting.
+fn wait_for_in_flight(state: &(Mutex<InFlightTracker>, Condvar), cancel: &AtomicBool) {
+    cancel.store(true, Ordering::Relaxed);
+    let (mutex, condvar) = state;
+    let mut guard = mutex.lock().expect("InFlightTracker mutex poisoned");
+    while !guard.processing.is_empty() {
+        guard = condvar.wait(guard).expect("InFlightTracker mutex poisoned");
+    }
+    drop(guard);
+}
+
 /// Returns the converted `StatusSummary` status for the submodule at `relative_path` guarded by
 /// `lock_path`. If the lock file at `lock_path` cannot be acquired, returns
 /// `Ok(StatusSummary::LOCK_FAILURE)`.
@@ -183,8 +218,9 @@ fn get_submod_status(
     repo: &Repository,
     relative_path: &str,
     lock_path: &Path,
+    cancel: Option<&AtomicBool>,
 ) -> WatchResult<StatusSummary> {
-    let status: StatusSummary = match LockFileGuard::acquire(lock_path) {
+    let status: StatusSummary = match LockFileGuard::acquire(lock_path, cancel) {
         Ok(_lock) => repo
             .submodule_status(relative_path, git2::SubmoduleIgnore::None)?
             .into(),
@@ -367,7 +403,7 @@ impl WatchServer {
         // an assert for its inner call to `git_submodule_lookup`, which triggers for a non-zero
         // return code.
         let submodules = {
-            let _lock = LockFileGuard::acquire(&self.root_lock_path)?;
+            let _lock = LockFileGuard::acquire(&self.root_lock_path, None)?;
             repo.submodules()?
         };
 
@@ -430,7 +466,7 @@ impl WatchServer {
                 #[cfg(target_os = "windows")]
                 let relative_path = relative_path.replace('\\', "/");
 
-                let status = get_submod_status(repo, &relative_path, &lock_path)?;
+                let status = get_submod_status(repo, &relative_path, &lock_path, None)?;
 
                 let count = completed.fetch_add(1, Ordering::Relaxed) + 1;
                 if let Some(id) = client_pid {
@@ -520,7 +556,7 @@ impl WatchServer {
             self.setup(&repo, display_progress)?;
             display_progress = false;
 
-            shutdown_conn = self.handle_events(&repo)?;
+            shutdown_conn = self.handle_events()?;
         }
 
         Self::signal_shutdown(shutdown_conn);
@@ -602,32 +638,94 @@ impl WatchServer {
         Ok(full_submod_path.join("index.lock"))
     }
 
-    fn update_submod_status(&self, repo: &Repository, index: usize) -> WatchResult<()> {
-        let watcher = &self.watchers[index];
-        let lock_file_path = watcher.lock_file_path.as_ref().unwrap_or_else(|| {
-            panic!(
-                "`SubmoduleChange` event for watcher with no cached lock file path\n -- watcher path: {}",
-                watcher.watch_path.display()
-            );
-        });
-        let rel_path = self.watchers[index].relative_path.as_str();
-        let status = get_submod_status(repo, rel_path, lock_file_path);
-        match status {
-            Ok(submod_status) => {
-                let mut guard = self.submod_statuses.lock().expect("Mutex poisoned");
-                if let Some(st) = guard.get_mut(rel_path) {
-                    *st = submod_status;
-                } else {
-                    guard.insert(rel_path.to_string(), submod_status);
-                }
+    /// Attempts to spawn a rayon task to update the status of the submodule at watcher `index`.
+    ///
+    /// If the submodule is already being processed, marks it as dirty so the in-flight task
+    /// will re-check after completing. Otherwise, inserts into the processing set and spawns
+    /// a rayon task that loops until no more dirty events are pending.
+    fn try_spawn_submod_update(
+        &self,
+        index: usize,
+        in_flight: &Arc<(Mutex<InFlightTracker>, Condvar)>,
+        cancel: &Arc<AtomicBool>,
+        tl_repo: &Arc<thread_local::ThreadLocal<Repository>>,
+    ) {
+        {
+            let mut tracker = in_flight.0.lock().expect("InFlightTracker mutex poisoned");
+            if tracker.processing.contains(&index) {
+                tracker.dirty.insert(index);
+                return;
             }
-            Err(e) => {
-                error!("Failed to get submodule status for path: {rel_path} -- {e}");
-                Err(e)?;
-            }
+            tracker.processing.insert(index);
         }
 
-        Ok(())
+        let watcher = &self.watchers[index];
+        let relative_path = watcher.relative_path.clone();
+        let lock_file_path = watcher.lock_file_path.as_ref().unwrap_or_else(|| {
+            panic!(
+                "Submodule event for watcher with no cached lock file path\n -- watcher path: {}",
+                watcher.watch_path.display()
+            );
+        }).clone();
+
+        let in_flight = Arc::clone(in_flight);
+        let cancel = Arc::clone(cancel);
+        let statuses = Arc::clone(&self.submod_statuses);
+        let tl_repo = Arc::clone(tl_repo);
+        let root_path = self.root_path.clone();
+
+        rayon::spawn(move || {
+            let repo = match tl_repo.get_or_try(|| Repository::open(&root_path)) {
+                Ok(r) => r,
+                Err(e) => {
+                    error!("Failed to open repository for submodule update: {e}");
+                    let (mutex, condvar) = &*in_flight;
+                    mutex
+                        .lock()
+                        .expect("InFlightTracker mutex poisoned")
+                        .processing
+                        .remove(&index);
+                    condvar.notify_one();
+                    return;
+                }
+            };
+
+            loop {
+                if cancel.load(Ordering::Relaxed) {
+                    break;
+                }
+
+                match get_submod_status(repo, &relative_path, &lock_file_path, Some(&cancel)) {
+                    Ok(submod_status) => {
+                        let mut guard = statuses.lock().expect("StatusMap mutex poisoned");
+                        if let Some(st) = guard.get_mut(relative_path.as_str()) {
+                            *st = submod_status;
+                        } else {
+                            guard.insert(relative_path.clone(), submod_status);
+                        }
+                    }
+                    Err(e) => {
+                        // No need to log errors for cancelled requests
+                        if !cancel.load(Ordering::Relaxed) {
+                            error!(
+                                "Failed to get submodule status for path: {relative_path} -- {e}",
+                            );
+                        }
+                    }
+                }
+
+                let (mutex, condvar) = &*in_flight;
+                let mut tracker = mutex.lock().expect("InFlightTracker mutex poisoned");
+                if tracker.dirty.remove(&index) {
+                    // Another event arrived while we were processing, so we re-check
+                    continue;
+                }
+                tracker.processing.remove(&index);
+                drop(tracker);
+                condvar.notify_one();
+                break;
+            }
+        });
     }
 
     /// The "meat" of the logic for the watch server. Handles incoming watcher events and updates
@@ -636,7 +734,7 @@ impl WatchServer {
     ///
     /// Returns `Some(conn)` if a shutdown was requested, where `conn` is the client's IPC
     /// connection to send the acknowledgment through.
-    fn handle_events(&mut self, repo: &Repository) -> WatchResult<Option<BufReader<Stream>>> {
+    fn handle_events(&mut self) -> WatchResult<Option<BufReader<Stream>>> {
         let mut sel = crossbeam_channel::Select::new();
         // filesystem watchers
         for WatchListItem { receiver, .. } in &self.watchers {
@@ -644,6 +742,13 @@ impl WatchServer {
         }
         // handles client requests from the listener thread
         let control_idx = sel.recv(&self.control_rx);
+
+        // Shared state for parallel submodule status updates
+        let in_flight: Arc<(Mutex<InFlightTracker>, Condvar)> =
+            Arc::new((Mutex::new(InFlightTracker::new()), Condvar::new()));
+        let cancel = Arc::new(AtomicBool::new(false));
+        let tl_repo: Arc<thread_local::ThreadLocal<Repository>> =
+            Arc::new(thread_local::ThreadLocal::new());
 
         loop {
             let oper = sel.select();
@@ -653,11 +758,13 @@ impl WatchServer {
                 match oper.recv(&self.control_rx)? {
                     ControlMessage::Reindex { pid } => {
                         self.client_pid = Some(pid);
+                        wait_for_in_flight(&in_flight, &cancel);
                         return Ok(None);
                     }
                     ControlMessage::Shutdown { pid, conn } => {
                         self.client_pid = Some(pid);
                         self.do_watch = false;
+                        wait_for_in_flight(&in_flight, &cancel);
                         return Ok(Some(conn));
                     }
                 }
@@ -666,9 +773,12 @@ impl WatchServer {
                 Ok(event) => {
                     let rel_path = self.watchers[index].relative_path.as_str();
                     match self.get_event_type(&event, rel_path) {
-                        Some(EventType::RootGitOperation) => break,
+                        Some(EventType::RootGitOperation) => {
+                            wait_for_in_flight(&in_flight, &cancel);
+                            break;
+                        }
                         Some(EventType::SubmoduleChange) => {
-                            self.update_submod_status(repo, index)?;
+                            self.try_spawn_submod_update(index, &in_flight, &cancel, &tl_repo);
                         }
                         Some(EventType::SubmoduleGitOperation) => {
                             for (i, watcher) in self.watchers.iter().enumerate() {
@@ -682,7 +792,7 @@ impl WatchServer {
                                     .iter()
                                     .any(|p| p.starts_with(submod_modules_path))
                                 {
-                                    self.update_submod_status(repo, i)?;
+                                    self.try_spawn_submod_update(i, &in_flight, &cancel, &tl_repo);
                                     break;
                                 }
                             }
@@ -695,6 +805,7 @@ impl WatchServer {
                         "Watcher error for submodule {}: {e}\nReindexing to reset watchers...",
                         self.watchers[index].relative_path
                     );
+                    wait_for_in_flight(&in_flight, &cancel);
                     break;
                 }
             }

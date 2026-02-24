@@ -78,6 +78,5 @@ sys     0m0.000s
 
 - [ ] Tests
 - [ ] crates.io releases if desired
-- [ ] Threadpool or similar for the watch server's main event loop
 
 #### Known Issues
