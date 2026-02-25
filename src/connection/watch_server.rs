@@ -573,12 +573,19 @@ impl WatchServer {
             return None;
         }
 
-        let is_index_file = |p: &Path| -> bool {
+        // NOTE: There's an interesting edge case here. In _theory_, all we need to do is respond
+        // to changes to `.git/index`. However, when a new commit/branch is checked ou, the files
+        // within the repo are modified _before_ `.git/HEAD` is, and `.git/index` is modified
+        // sometime before `HEAD` as well. This leads to a race condition where the watch server
+        // re-indexes a submodule after `.git/index` (or one of the actual source files) was
+        // modified, only sees the modified files (and _not_ the changed `HEAD`, since it hasn't
+        // been updated yet), and "correctly" gets the status from `git2` as "modified content" when
+        // in reality it should be "new commits". By also triggering on modifications to
+        // `.git/HEAD`, we avoid this race condition and get the correct status eventually.
+        let is_index_or_head_file = |p: &Path| -> bool {
             p.is_file()
-                && p.file_name().is_some_and(|name| name.eq("index"))
-                && p.parent().is_some_and(|parent| {
-                    parent.is_dir() && parent.file_name().is_some_and(|p_name| p_name.eq(DOT_GIT))
-                })
+                && p.file_name()
+                    .is_some_and(|name| name.eq("index") || name.eq("HEAD"))
         };
 
         // TODO: Separate watches, only `.git/modules/, `.git/index`, and then
@@ -589,7 +596,7 @@ impl WatchServer {
                 .iter()
                 .any(|p| p.starts_with(&self.root_modules_path))
             {
-                if event.paths.iter().any(|p| is_index_file(p)) {
+                if event.paths.iter().any(|p| is_index_or_head_file(p)) {
                     Some(EventType::SubmoduleGitOperation)
                 } else {
                     None
