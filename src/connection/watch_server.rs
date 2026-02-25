@@ -132,8 +132,10 @@ struct LockFileGuard<'a> {
 }
 
 impl<'a> LockFileGuard<'a> {
+    /// Attempts to acquire the lock file, retrying with exponential backoff up to
+    /// `LOCKFILE_TIMEOUT`. Used for initial indexing where we must wait for any
+    /// in-progress git operations to finish.
     fn acquire(path: &'a Path, cancel: Option<&AtomicBool>) -> WatchResult<Self> {
-        trace!("Acquiring lock file at path: {}", path.display());
         let start = Instant::now();
         let mut backoff = Duration::from_millis(1);
 
@@ -153,7 +155,6 @@ impl<'a> LockFileGuard<'a> {
                             e,
                         )))?;
                     }
-                    trace!("Lock file {} already exists, waiting...", path.display());
                     std::thread::sleep(backoff);
                     backoff = (backoff * 2).min(MAX_LOCKFILE_BACKOFF);
                 }
@@ -164,14 +165,29 @@ impl<'a> LockFileGuard<'a> {
             }
         }
 
-        trace!("Acquired lock file at path: {}", path.display());
         Ok(Self { path })
+    }
+
+    /// Attempts to acquire the lock file without retrying. Returns
+    /// `Err(WatchError::LockFileAcquire)` immediately if the lock file already exists.
+    /// Used in the event loop path to avoid holding the lock while git needs it.
+    fn try_acquire(path: &'a Path) -> WatchResult<Self> {
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+        {
+            Ok(_) => Ok(Self { path }),
+            Err(e) => Err(WatchError::LockFileAcquire(LockFileError::new(
+                path.to_path_buf(),
+                e,
+            )))?,
+        }
     }
 }
 
 impl Drop for LockFileGuard<'_> {
     fn drop(&mut self) {
-        trace!("Releasing lock file at path: {}", self.path.display());
         if let Err(e) = fs::remove_file(self.path) {
             error!(
                 "Failed to release lock file at {}: {e}",
@@ -214,13 +230,22 @@ fn wait_for_in_flight(state: &(Mutex<InFlightTracker>, Condvar), cancel: &Atomic
 /// Returns the converted `StatusSummary` status for the submodule at `relative_path` guarded by
 /// `lock_path`. If the lock file at `lock_path` cannot be acquired, returns
 /// `Ok(StatusSummary::LOCK_FAILURE)`.
+///
+/// When `blocking` is true, retries lock acquisition with exponential backoff (used during
+/// initial indexing). When false, fails immediately if the lock is held (used in the event
+/// loop to avoid blocking git operations).
 fn get_submod_status(
     repo: &Repository,
     relative_path: &str,
     lock_path: &Path,
+    blocking: bool,
     cancel: Option<&AtomicBool>,
 ) -> WatchResult<StatusSummary> {
-    let lock = LockFileGuard::acquire(lock_path, cancel);
+    let lock = if blocking {
+        LockFileGuard::acquire(lock_path, cancel)
+    } else {
+        LockFileGuard::try_acquire(lock_path)
+    };
     let status: StatusSummary = match lock {
         Ok(ref _lock) => repo
             .submodule_status(relative_path, git2::SubmoduleIgnore::None)?
@@ -469,7 +494,7 @@ impl WatchServer {
                 #[cfg(target_os = "windows")]
                 let relative_path = relative_path.replace('\\', "/");
 
-                let status = get_submod_status(repo, &relative_path, &lock_path, None)?;
+                let status = get_submod_status(repo, &relative_path, &lock_path, true, None)?;
 
                 let count = completed.fetch_add(1, Ordering::Relaxed) + 1;
                 if let Some(id) = client_pid {
@@ -705,7 +730,7 @@ impl WatchServer {
                     break;
                 }
 
-                match get_submod_status(repo, &relative_path, &lock_file_path, Some(&cancel)) {
+                match get_submod_status(repo, &relative_path, &lock_file_path, false, None) {
                     Ok(submod_status) => {
                         let mut guard = statuses.lock().expect("StatusMap mutex poisoned");
                         if let Some(st) = guard.get_mut(relative_path.as_str()) {
