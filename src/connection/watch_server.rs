@@ -220,8 +220,9 @@ fn get_submod_status(
     lock_path: &Path,
     cancel: Option<&AtomicBool>,
 ) -> WatchResult<StatusSummary> {
-    let status: StatusSummary = match LockFileGuard::acquire(lock_path, cancel) {
-        Ok(_lock) => repo
+    let lock = LockFileGuard::acquire(lock_path, cancel);
+    let status: StatusSummary = match lock {
+        Ok(ref _lock) => repo
             .submodule_status(relative_path, git2::SubmoduleIgnore::None)?
             .into(),
         Err(WatchError::LockFileAcquire(_)) => {
@@ -233,8 +234,10 @@ fn get_submod_status(
             );
             StatusSummary::LOCK_FAILURE
         }
-        Err(e) => Err(e)?,
+        Err(e) => return Err(e)?,
     };
+    // Explicitly drop `lock` as soon as possible, rather than at some point after the return
+    drop(lock);
     Ok(status)
 }
 
