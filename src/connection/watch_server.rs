@@ -16,7 +16,7 @@ use interprocess::local_socket::{Stream, traits::ListenerExt as _};
 use log::{error, info, trace};
 use notify::{
     Event, EventKind, Watcher,
-    event::{AccessKind, AccessMode, CreateKind},
+    event::{AccessKind, AccessMode},
 };
 
 use crate::{
@@ -86,6 +86,8 @@ struct WatchServer {
     watchers: WatchList,
     /// Which submodules to skip indexing
     skip_set: HashSet<String>,
+    /// Whether a rebase is in progress in the root repository
+    root_rebasing: bool,
 
     // NOTE: Commonly used paths are pre-computed and stored here to avoid redundant heap allocs
     // in hot loops
@@ -287,6 +289,7 @@ impl WatchServer {
             client_pid: None,
             watchers: Vec::new(),
             skip_set: HashSet::new(),
+            root_rebasing: false,
             root_path: root_path.to_path_buf(),
             root_index_path,
             root_gitmodules_path,
@@ -444,6 +447,8 @@ impl WatchServer {
             let _lock = LockFileGuard::acquire(&self.root_lock_path, None)?;
             repo.submodules()?
         };
+
+        self.root_rebasing = self.root_git_path.join("rebase-merge").exists();
 
         info!("Indexing project at {}", self.root_path.display());
         let submod_info: Vec<_> = submodules
@@ -637,26 +642,43 @@ impl WatchServer {
             && Self::has_rebase_marker_path(&event.paths, &self.root_modules_path)
     }
 
+    #[inline]
+    fn is_root_rebase_start_event(&self, event: &Event) -> bool {
+        matches!(event.kind, EventKind::Create(_))
+            && Self::has_rebase_marker_path(&event.paths, &self.root_git_path)
+    }
+
+    #[inline]
+    fn is_root_rebase_end_event(&self, event: &Event) -> bool {
+        matches!(event.kind, EventKind::Remove(_))
+            && Self::has_rebase_marker_path(&event.paths, &self.root_git_path)
+    }
+
+    // NOTE: There's an interesting edge case here. In _theory_, all we need to do is respond
+    // to changes to `.git/index`. However, when a new commit/branch is checked ou, the files
+    // within the repo are modified _before_ `.git/HEAD` is, and `.git/index` is modified
+    // sometime before `HEAD` as well. This leads to a race condition where the watch server
+    // re-indexes a submodule after `.git/index` (or one of the actual source files) was
+    // modified, only sees the modified files (and _not_ the changed `HEAD`, since it hasn't
+    // been updated yet), and "correctly" gets the status from `git2` as "modified content" when
+    // in reality it should be "new commits". By also triggering on modifications to
+    // `.git/HEAD`, we mitigate this race condition and get the correct status eventually.
+    #[inline]
+    fn is_index_or_head_path(p: &Path) -> bool {
+        // NOTE: We don't check if `p.is_file()` here, as git sometimes deletes `index` before
+        // renaming `index.lock`->`index`. If it doesn't exist at the time of the check, we'll get
+        // an "incorrect" false. We _could_ check via the metadata and handle errors that way, but
+        // in reality this should be just fine.
+        !p.is_dir()
+            && p.file_name()
+                .is_some_and(|name| name.eq("index") || name.eq("HEAD"))
+    }
+
     /// Converts a watcher's event and relative path to a relevant `EventType`, if possible
     fn get_event_type(&self, event: &Event, rel_path: &str) -> Option<EventType> {
         if !event_is_relevant(event) {
             return None;
         }
-
-        // NOTE: There's an interesting edge case here. In _theory_, all we need to do is respond
-        // to changes to `.git/index`. However, when a new commit/branch is checked ou, the files
-        // within the repo are modified _before_ `.git/HEAD` is, and `.git/index` is modified
-        // sometime before `HEAD` as well. This leads to a race condition where the watch server
-        // re-indexes a submodule after `.git/index` (or one of the actual source files) was
-        // modified, only sees the modified files (and _not_ the changed `HEAD`, since it hasn't
-        // been updated yet), and "correctly" gets the status from `git2` as "modified content" when
-        // in reality it should be "new commits". By also triggering on modifications to
-        // `.git/HEAD`, we avoid this race condition and get the correct status eventually.
-        let is_index_or_head_file = |p: &Path| -> bool {
-            p.is_file()
-                && p.file_name()
-                    .is_some_and(|name| name.eq("index") || name.eq("HEAD"))
-        };
 
         if rel_path.eq(DOT_GIT) {
             if event
@@ -664,7 +686,7 @@ impl WatchServer {
                 .iter()
                 .any(|p| p.starts_with(&self.root_modules_path))
             {
-                if event.paths.iter().any(|p| is_index_or_head_file(p)) {
+                if event.paths.iter().any(|p| Self::is_index_or_head_path(p)) {
                     Some(EventType::SubmoduleGitOperation)
                 } else if self.is_submod_rebase_start_event(event) {
                     Some(EventType::SubmoduleRebaseStart)
@@ -674,8 +696,27 @@ impl WatchServer {
                     None
                 }
             } else if event.paths.iter().any(|p| p.eq(&self.root_index_path)) {
-                Some(EventType::RootGitOperation)
-                // TODO: Handle root operations
+                // HACK: When `git rebase ...` is issued, git will begin by acquiring `index.lock`,
+                // gathering some information about the current index (looking at all of the repo's
+                // submodules, why isn't the index considered up to date at this point?), writing
+                // the new `index` contents to `index.lock`, _deleting_ `index`, and renaming
+                // `index.lock` to `index`. Immediately after, the `.git/rebase-merge` directory is
+                // created, signaling the start of a rebase. Because these `index` operations happen
+                // before we can detect the rebase, they trigger a root reindex and cause the rebase
+                // to fail because git fails to acquire the `index.lock` file (why release it in the
+                // first place?). As a workaround, we simply ignore these events and trigger a root
+                // reindex after the rebase is completed. If git applies this pattern for other
+                // operations that I haven't tested, we may be in trouble. So far though, this
+                // approach seems to be ok.
+                if matches!(event.kind, EventKind::Remove(_)) {
+                    None
+                } else {
+                    Some(EventType::RootGitOperation)
+                }
+            } else if self.is_root_rebase_start_event(event) {
+                Some(EventType::RootRebaseStart)
+            } else if self.is_root_rebase_end_event(event) {
+                Some(EventType::RootRebaseEnd)
             } else {
                 None
             }
@@ -866,7 +907,17 @@ impl WatchServer {
                     let rel_path = self.watchers[index].relative_path.as_str();
                     match self.get_event_type(&event, rel_path) {
                         Some(EventType::RootGitOperation) => {
+                            if !self.root_rebasing {
+                                wait_for_in_flight(&in_flight);
+                                break;
+                            }
+                        }
+                        Some(EventType::RootRebaseStart) => {
+                            self.root_rebasing = true;
+                        }
+                        Some(EventType::RootRebaseEnd) => {
                             wait_for_in_flight(&in_flight);
+                            self.root_rebasing = false;
                             break;
                         }
                         Some(EventType::SubmoduleChange) => {
@@ -939,7 +990,6 @@ impl WatchServer {
                                 }
                             }
                         }
-                        Some(_) => {}
                         None => {}
                     }
                 }
@@ -1142,8 +1192,7 @@ const fn event_is_relevant(event: &Event) -> bool {
         event.kind,
         EventKind::Remove(_)
             | EventKind::Access(AccessKind::Close(AccessMode::Write))
-            // This is neeeded for newly created files on Windows only...
-            | EventKind::Create(CreateKind::Any)
+            | EventKind::Create(_)
     )
 }
 
