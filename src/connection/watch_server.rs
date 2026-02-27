@@ -29,6 +29,9 @@ use crate::{
     watch::{LockFileError, WatchError, WatchResult},
 };
 
+/// `.git/` and `.gitmodules`
+const ROOT_WATCHER_COUNT: usize = 2;
+
 const MAX_LOCKFILE_BACKOFF: Duration = Duration::from_millis(100);
 const LOCKFILE_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -349,7 +352,7 @@ impl WatchServer {
             mut watcher,
             watch_path,
             ..
-        } in self.watchers.drain(..)
+        } in self.watchers.drain(ROOT_WATCHER_COUNT..)
         {
             if let Err(e) = watcher.unwatch(&watch_path) {
                 error!(
@@ -419,6 +422,7 @@ impl WatchServer {
             watcher,
         ));
 
+        debug_assert_eq!(self.watchers.len(), ROOT_WATCHER_COUNT);
         Ok(())
     }
 
@@ -567,14 +571,6 @@ impl WatchServer {
         Ok(())
     }
 
-    /// Sets up watchers and populates the status map
-    fn setup(&mut self, repo: &Repository, display_progress: bool) -> WatchResult<()> {
-        self.place_root_watches()?;
-        self.populate_status_map(repo, display_progress)?;
-
-        Ok(())
-    }
-
     /// Sends a shutdown acknowledgment to the client over the IPC connection.
     fn signal_shutdown(shutdown_conn: Option<BufReader<Stream>>) {
         if let Some(mut conn) = shutdown_conn {
@@ -601,6 +597,7 @@ impl WatchServer {
         let mut display_progress = true;
         // If a shutdown was requested, holds the requesting client's IPC connection
         let mut shutdown_conn = None;
+        self.place_root_watches()?;
         loop {
             self.clear_watchers();
             if !self.do_watch {
@@ -608,7 +605,7 @@ impl WatchServer {
             }
 
             let repo = Repository::open(&self.root_path)?;
-            self.setup(&repo, display_progress)?;
+            self.populate_status_map(&repo, display_progress)?;
             display_progress = false;
 
             shutdown_conn = self.handle_events()?;
