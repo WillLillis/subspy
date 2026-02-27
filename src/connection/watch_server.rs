@@ -84,6 +84,8 @@ struct WatchServer {
     client_pid: Option<u32>,
     /// Filesystem watchers
     watchers: WatchList,
+    /// Which submodules to skip indexing
+    skip_set: HashSet<String>,
 
     // NOTE: Commonly used paths are pre-computed and stored here to avoid redundant heap allocs
     // in hot loops
@@ -118,6 +120,14 @@ enum EventType {
     SubmoduleChange,
     /// A change occurred in oen of the watched submodule's `.git/` subdirectory
     SubmoduleGitOperation,
+    /// A rebase started within a submodule
+    SubmoduleRebaseStart,
+    /// A rebase ended within a submodule
+    SubmoduleRebaseEnd,
+    /// A rebase started within the root repository
+    RootRebaseStart,
+    /// A rebase ended within the root repository
+    RootRebaseEnd,
 }
 
 /// Control messages sent from the listener thread to the main event loop
@@ -253,6 +263,7 @@ impl WatchServer {
             do_watch: true,
             client_pid: None,
             watchers: Vec::new(),
+            skip_set: HashSet::new(),
             root_path: root_path.to_path_buf(),
             root_index_path,
             root_gitmodules_path,
@@ -392,6 +403,7 @@ impl WatchServer {
     ///
     /// Returns `notify::Error` if any watchers cannot be created, or `git2::Error` if any
     /// git operation fails.
+    #[allow(clippy::too_many_lines)]
     fn populate_status_map(
         &mut self,
         repo: &Repository,
@@ -465,11 +477,20 @@ impl WatchServer {
                         Err(e)?
                     }
                 };
+                // This is definitely a race condition, and is not meant to catch "active" rebases
+                // while the status map is being populated. Instead, the intention is for "stalled"
+                // rebases (i.e. that has hit a conflict that must be manually resolved) so that we
+                // can properly skip updateing this submodule until its rebase has been completed.
+                let is_in_rebase = lock_path.parent().unwrap().join("rebase-merge").exists();
 
                 #[cfg(target_os = "windows")]
                 let relative_path = relative_path.replace('\\', "/");
 
-                let status = get_submod_status(repo, &relative_path, &lock_path, None)?;
+                let status = if is_in_rebase {
+                    StatusSummary::NEW_COMMITS
+                } else {
+                    get_submod_status(repo, &relative_path, &lock_path, None)?
+                };
 
                 let count = completed.fetch_add(1, Ordering::Relaxed) + 1;
                 if let Some(id) = client_pid {
@@ -485,15 +506,18 @@ impl WatchServer {
                     sub_start.elapsed().as_millis(),
                 );
 
-                Ok((relative_path, full_path, lock_path, status))
+                Ok((relative_path, full_path, lock_path, status, is_in_rebase))
             })
             .collect();
         let results = results?;
 
         let mut new_statuses = BTreeMap::new();
-        for (relative_path, full_path, lock_path, status) in results {
+        for (relative_path, full_path, lock_path, status, is_in_rebase) in results {
             new_statuses.insert(relative_path.clone(), status);
             let (rx, watcher) = Self::place_watch(&full_path, notify::RecursiveMode::Recursive)?;
+            if is_in_rebase {
+                self.skip_set.insert(relative_path.clone());
+            }
             self.watchers.push(WatchListItem::new(
                 relative_path,
                 full_path,
@@ -567,6 +591,29 @@ impl WatchServer {
         Ok(())
     }
 
+    /// Helper to determine whether `paths` contains the `rebase-merge` path as
+    /// a child of `prefix`
+    #[inline]
+    fn has_rebase_marker_path(paths: &[PathBuf], prefix: &Path) -> bool {
+        paths
+            .iter()
+            .any(|p| p.starts_with(prefix) && p.file_name().is_some_and(|n| n.eq("rebase-merge")))
+    }
+
+    #[inline]
+    fn is_submod_rebase_start_event(&self, event: &Event) -> bool {
+        // NOTE: We could add an additional check here that the `rebase-merge` path is a directory,
+        // but git shouldn't create a file with that name so it's fine
+        matches!(event.kind, EventKind::Create(_))
+            && Self::has_rebase_marker_path(&event.paths, &self.root_modules_path)
+    }
+
+    #[inline]
+    fn is_submod_rebase_end_event(&self, event: &Event) -> bool {
+        matches!(event.kind, EventKind::Remove(_))
+            && Self::has_rebase_marker_path(&event.paths, &self.root_modules_path)
+    }
+
     /// Converts a watcher's event and relative path to a relevant `EventType`, if possible
     fn get_event_type(&self, event: &Event, rel_path: &str) -> Option<EventType> {
         if !event_is_relevant(event) {
@@ -588,8 +635,6 @@ impl WatchServer {
                     .is_some_and(|name| name.eq("index") || name.eq("HEAD"))
         };
 
-        // TODO: Separate watches, only `.git/modules/, `.git/index`, and then
-        // the submodules (include this in the perf branch)
         if rel_path.eq(DOT_GIT) {
             if event
                 .paths
@@ -598,11 +643,16 @@ impl WatchServer {
             {
                 if event.paths.iter().any(|p| is_index_or_head_file(p)) {
                     Some(EventType::SubmoduleGitOperation)
+                } else if self.is_submod_rebase_start_event(event) {
+                    Some(EventType::SubmoduleRebaseStart)
+                } else if self.is_submod_rebase_end_event(event) {
+                    Some(EventType::SubmoduleRebaseEnd)
                 } else {
                     None
                 }
             } else if event.paths.iter().any(|p| p.eq(&self.root_index_path)) {
                 Some(EventType::RootGitOperation)
+                // TODO: Handle root operations
             } else {
                 None
             }
@@ -744,6 +794,7 @@ impl WatchServer {
     ///
     /// Returns `Some(conn)` if a shutdown was requested, where `conn` is the client's IPC
     /// connection to send the acknowledgment through.
+    #[allow(clippy::too_many_lines)]
     fn handle_events(&mut self) -> WatchResult<Option<BufReader<Stream>>> {
         let mut sel = crossbeam_channel::Select::new();
         // filesystem watchers
@@ -788,7 +839,9 @@ impl WatchServer {
                             break;
                         }
                         Some(EventType::SubmoduleChange) => {
-                            self.try_spawn_submod_update(index, &in_flight, &cancel, &tl_repo);
+                            if !self.skip_set.contains(rel_path) {
+                                self.try_spawn_submod_update(index, &in_flight, &cancel, &tl_repo);
+                            }
                         }
                         Some(EventType::SubmoduleGitOperation) => {
                             for (i, watcher) in self.watchers.iter().enumerate() {
@@ -802,11 +855,61 @@ impl WatchServer {
                                     .iter()
                                     .any(|p| p.starts_with(submod_modules_path))
                                 {
+                                    if !self.skip_set.contains(&watcher.relative_path) {
+                                        self.try_spawn_submod_update(
+                                            i, &in_flight, &cancel, &tl_repo,
+                                        );
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                        // Rebases generate an incredible volume of events, and during such an
+                        // operation git continually acquires and releases `index.lock`. This,
+                        // paired with the changes to the submodule's source files leads to too much
+                        // contention for `index.lock`, which leads to the rebase failing partway
+                        // through when git fails to acquire `index.lock`. Instead, we pause
+                        // updating the relevant submodule until the rebase is completed.
+                        Some(EventType::SubmoduleRebaseStart) => {
+                            for watcher in &self.watchers {
+                                let Some(submod_modules_path) =
+                                    watcher.lock_file_path.as_ref().and_then(|p| p.parent())
+                                else {
+                                    continue;
+                                };
+                                if event
+                                    .paths
+                                    .iter()
+                                    .any(|p| p.starts_with(submod_modules_path))
+                                {
+                                    self.skip_set.insert(watcher.relative_path.clone());
+                                    self.submod_statuses.lock().expect("Mutex poisoned").insert(
+                                        watcher.relative_path.clone(),
+                                        StatusSummary::NEW_COMMITS,
+                                    );
+                                    break;
+                                }
+                            }
+                        }
+                        Some(EventType::SubmoduleRebaseEnd) => {
+                            for (i, watcher) in self.watchers.iter().enumerate() {
+                                let Some(submod_modules_path) =
+                                    watcher.lock_file_path.as_ref().and_then(|p| p.parent())
+                                else {
+                                    continue;
+                                };
+                                if event
+                                    .paths
+                                    .iter()
+                                    .any(|p| p.starts_with(submod_modules_path))
+                                {
+                                    self.skip_set.remove(&watcher.relative_path);
                                     self.try_spawn_submod_update(i, &in_flight, &cancel, &tl_repo);
                                     break;
                                 }
                             }
                         }
+                        Some(_) => {}
                         None => {}
                     }
                 }
