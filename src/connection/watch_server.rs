@@ -404,7 +404,7 @@ impl WatchServer {
         )?;
         self.watchers.push(WatchListItem::new(
             DOT_GITMODULES.to_owned(),
-            self.root_path.clone(),
+            self.root_gitmodules_path.clone(),
             None,
             rx,
             watcher,
