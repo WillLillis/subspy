@@ -16,7 +16,7 @@ use interprocess::local_socket::{Stream, traits::ListenerExt as _};
 use log::{error, info, trace};
 use notify::{
     Event, EventKind, Watcher,
-    event::{AccessKind, AccessMode},
+    event::{AccessKind, AccessMode, ModifyKind},
 };
 
 use crate::{
@@ -674,7 +674,13 @@ impl WatchServer {
     /// Converts a watcher's event and relative path to a relevant `EventType`, if possible
     fn get_event_type(&self, event: &Event, rel_path: &str) -> Option<EventType> {
         if !event_is_relevant(event) {
-            return None;
+            // File renames within submodule source trees are legitimate changes, but we
+            // can't allow Modify(Name) events through globally because git's
+            // `index.lock` -> `index` rename would trigger spurious reindexes.
+            let is_root_watcher = rel_path.eq(DOT_GIT) || rel_path.eq(DOT_GITMODULES);
+            if is_root_watcher || !matches!(event.kind, EventKind::Modify(ModifyKind::Name(_))) {
+                return None;
+            }
         }
 
         if rel_path.eq(DOT_GIT) {
