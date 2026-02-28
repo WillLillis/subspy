@@ -32,21 +32,26 @@ impl fmt::Display for DebugState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "Server PID: {}", self.server_pid)?;
         writeln!(f, "Worker threads: {}", self.rayon_threads)?;
-        if let Some(pid) = self.client_pid {
-            writeln!(f, "Last client PID: {pid}")?;
-        } else {
-            writeln!(f, "Last client PID: (none)")?;
-        }
         writeln!(f, "Root path: {}", self.root_path)?;
         writeln!(f, "Root rebasing: {}", self.root_rebasing)?;
         writeln!(f, "Watcher count: {}", self.watcher_count)?;
+        if self.progress_subscribers.is_empty() {
+            writeln!(f, "Progress subscribers: (none)")?;
+        } else {
+            let pids: Vec<String> = self
+                .progress_subscribers
+                .iter()
+                .map(ToString::to_string)
+                .collect();
+            writeln!(f, "Progress subscribers: {}", pids.join(", "))?;
+        }
 
         let max_path_width = self
             .watched_paths
             .iter()
             .map(|(p, _)| p.len())
             .max()
-            .unwrap_or(6);
+            .unwrap_or(6); // "(root)"
         writeln!(f, "\nWatched paths:")?;
         if self.watched_paths.is_empty() {
             writeln!(f, "  (none)")?;
@@ -92,16 +97,23 @@ impl fmt::Display for DebugState {
             }
         }
 
+        let max_path_width = self
+            .submodule_statuses
+            .iter()
+            .map(|(p, _)| p.len())
+            .max()
+            .unwrap_or(0);
         writeln!(f, "\nSubmodule statuses:")?;
         if self.submodule_statuses.is_empty() {
             write!(f, "  (none)")?;
         } else {
-            let last = self.submodule_statuses.len() - 1;
+            let last_idx = self.submodule_statuses.len() - 1;
             for (i, (path, status)) in self.submodule_statuses.iter().enumerate() {
-                if i == last {
-                    write!(f, "  {path}: {status}")?;
+                let padding = " ".repeat(1 + max_path_width - path.len());
+                if i == last_idx {
+                    write!(f, "  {path}:{padding}{status}")?;
                 } else {
-                    writeln!(f, "  {path}: {status}")?;
+                    writeln!(f, "  {path}:{padding}{status}")?;
                 }
             }
         }

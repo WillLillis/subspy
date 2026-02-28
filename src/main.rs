@@ -310,7 +310,7 @@ pub fn main() {
         if !err.to_string().is_empty() {
             eprintln!("{}: {err}", paint(Some(AnsiColor::Red), "Error"));
         }
-        std::process::exit(1);
+        process::exit(1);
     }
 }
 

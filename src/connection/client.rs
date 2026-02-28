@@ -28,7 +28,7 @@ pub fn request_reindex(root_path: &Path) -> ReindexResult<()> {
     let mut conn = BufReader::new(conn);
     let client_pid = std::process::id();
     let status_req = ClientMessage::Reindex(client_pid);
-    let mut msg = [0; 6]; // statically determined an upper bound of 4 bytes
+    let mut msg = [0; 6]; // 1 byte variant index + up to 5 bytes varint u32
     let msg_len = bincode::encode_into_slice(&status_req, &mut msg, BINCODE_CFG)?;
     write_full_message(&mut conn, &msg[..msg_len])?;
 
@@ -65,9 +65,8 @@ pub fn request_shutdown(root_path: &Path) -> ShutdownResult<()> {
     let name = ipc_name(root_path)?;
     let conn = Stream::connect(name)?;
     let mut conn = BufReader::new(conn);
-    let pid = std::process::id();
-    let status_req = ClientMessage::Shutdown(pid);
-    let mut msg = [0; 6]; // statically determined an upper bound of 6 bytes
+    let status_req = ClientMessage::Shutdown;
+    let mut msg = [0; 1]; // unit variant: 1 byte for variant index
     let msg_len = bincode::encode_into_slice(&status_req, &mut msg, BINCODE_CFG)?;
     write_full_message(&mut conn, &msg[..msg_len])?;
 
@@ -143,9 +142,8 @@ pub fn request_debug(root_path: &Path) -> DebugResult<DebugState> {
     let name = ipc_name(root_path)?;
     let conn = Stream::connect(name)?;
     let mut conn = BufReader::new(conn);
-    let pid = std::process::id();
-    let req = ClientMessage::Debug(pid);
-    let mut msg = [0; 6];
+    let req = ClientMessage::Debug;
+    let mut msg = [0; 1]; // unit variant: 1 byte for variant index
     let msg_len = bincode::encode_into_slice(&req, &mut msg, BINCODE_CFG)?;
     write_full_message(&mut conn, &msg[..msg_len])?;
 

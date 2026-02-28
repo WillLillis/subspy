@@ -22,9 +22,9 @@ pub const BINCODE_CFG: bincode::config::Configuration = bincode::config::standar
 #[derive(Clone, Debug, Eq, PartialEq, Encode, BorrowDecode)]
 pub enum ClientMessage {
     Reindex(u32),
-    Shutdown(u32),
+    Shutdown,
     Status(u32),
-    Debug(u32),
+    Debug,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Encode, BorrowDecode)]
@@ -40,7 +40,7 @@ pub enum ServerMessage {
 pub struct DebugState {
     pub server_pid: u32,
     pub rayon_threads: u32,
-    pub client_pid: Option<u32>,
+    pub progress_subscribers: Vec<u32>,
     pub watcher_count: u32,
     pub watched_paths: Vec<(String, String)>,
     pub skip_set: Vec<String>,

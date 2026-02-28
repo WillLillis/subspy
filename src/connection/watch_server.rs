@@ -41,6 +41,9 @@ type StatusMap = Mutex<BTreeMap<String, StatusSummary>>;
 /// Type alias for the progress queue mutex
 type ProgressMap = Mutex<HashMap<u32, VecDeque<ProgressUpdate>>>;
 
+/// Set of client PIDs that should receive progress updates during indexing
+type ProgressSubscribers = Mutex<HashSet<u32>>;
+
 /// Message receiver type for a watcher
 type WatchReceiver = crossbeam_channel::Receiver<Result<notify::Event, notify::Error>>;
 
@@ -83,8 +86,6 @@ type WatchList = Vec<WatchListItem>;
 struct WatchServer {
     /// Whether the server should continue to watch the repository at `root_path`
     do_watch: bool,
-    /// The pid of the client who issued the latest request.
-    client_pid: Option<u32>,
     /// Filesystem watchers
     watchers: WatchList,
     /// Which submodules to skip indexing
@@ -114,6 +115,8 @@ struct WatchServer {
     submod_statuses: Arc<StatusMap>,
     /// Associates a given client pid with a queue of indexing progress updates.
     progress_queue: Arc<ProgressMap>,
+    /// Client PIDs that should receive progress updates during indexing.
+    progress_subscribers: Arc<ProgressSubscribers>,
 }
 
 /// Summarizes an event received from a watcher. Create with `get_event_type`
@@ -137,8 +140,8 @@ enum EventType {
 
 /// Control messages sent from the listener thread to the main event loop
 enum ControlMessage {
-    Reindex { pid: u32 },
-    Shutdown { pid: u32, conn: BufReader<Stream> },
+    Reindex,
+    Shutdown { conn: BufReader<Stream> },
     Debug { conn: BufReader<Stream> },
 }
 
@@ -290,7 +293,6 @@ impl WatchServer {
 
         Self {
             do_watch: true,
-            client_pid: None,
             watchers: Vec::new(),
             skip_set: HashSet::new(),
             root_rebasing: false,
@@ -303,6 +305,7 @@ impl WatchServer {
             control_rx,
             submod_statuses: Arc::new(Mutex::new(BTreeMap::new())),
             progress_queue: Arc::new(Mutex::new(HashMap::new())),
+            progress_subscribers: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -318,6 +321,7 @@ impl WatchServer {
         let listener = create_listener(&self.root_path)?;
         let statuses = Arc::clone(&self.submod_statuses);
         let progress = Arc::clone(&self.progress_queue);
+        let subscribers = Arc::clone(&self.progress_subscribers);
 
         std::thread::Builder::new()
             .name("subspy_listener".to_string())
@@ -336,6 +340,7 @@ impl WatchServer {
                         &control_tx,
                         &statuses,
                         &progress,
+                        &subscribers,
                     )? {
                         break;
                     }
@@ -347,7 +352,7 @@ impl WatchServer {
         Ok(())
     }
 
-    /// Stop all the watchers in `self.watchers`, clearing the list
+    /// Stop all non-root watchers in `self.watchers`, clearing them from the list
     fn clear_watchers(&mut self) {
         for WatchListItem {
             mut watcher,
@@ -439,6 +444,7 @@ impl WatchServer {
         &mut self,
         repo: &Repository,
         display_progress: bool,
+        mut status_guard: MutexGuard<'_, BTreeMap<String, StatusSummary>>,
     ) -> WatchResult<()> {
         use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -481,17 +487,15 @@ impl WatchServer {
             "Indexing submodules",
         ));
 
-        if let Some(id) = self.client_pid {
-            update_progress(
-                &self.progress_queue,
-                id,
-                ProgressUpdate::new(0, n_submodules),
-            );
-        }
+        broadcast_progress(
+            &self.progress_subscribers,
+            &self.progress_queue,
+            ProgressUpdate::new(0, n_submodules),
+        );
 
         let completed = AtomicU32::new(0);
         let root_path = &self.root_path;
-        let client_pid = self.client_pid;
+        let progress_subscribers = &self.progress_subscribers;
         let progress_queue = &self.progress_queue;
         let tl_repo = thread_local::ThreadLocal::new();
 
@@ -526,9 +530,11 @@ impl WatchServer {
                 };
 
                 let count = completed.fetch_add(1, Ordering::Relaxed) + 1;
-                if let Some(id) = client_pid {
-                    update_progress(progress_queue, id, ProgressUpdate::new(count, n_submodules));
-                }
+                broadcast_progress(
+                    progress_subscribers,
+                    progress_queue,
+                    ProgressUpdate::new(count, n_submodules),
+                );
                 if let Some(pb) = &progress_bar {
                     pb.inc(1);
                 }
@@ -544,9 +550,9 @@ impl WatchServer {
             .collect();
         let results = results?;
 
-        let mut new_statuses = BTreeMap::new();
+        status_guard.clear();
         for (relative_path, full_path, lock_path, status, is_in_rebase) in results {
-            new_statuses.insert(relative_path.clone(), status);
+            status_guard.insert(relative_path.clone(), status);
             let (rx, watcher) = Self::place_watch(&full_path, notify::RecursiveMode::Recursive)?;
             if is_in_rebase {
                 self.skip_set.insert(relative_path.clone());
@@ -559,12 +565,8 @@ impl WatchServer {
                 watcher,
             ));
         }
-
-        let mut status_guard = self.submod_statuses.lock().expect("Mutex poisoned");
-        *status_guard = new_statuses;
         drop(status_guard);
 
-        self.client_pid = None;
         if let Some(pb) = &progress_bar {
             pb.finish();
         }
@@ -585,7 +587,7 @@ impl WatchServer {
         let submodule_statuses: Vec<(String, StatusSummary)> = self
             .submod_statuses
             .lock()
-            .unwrap()
+            .expect("StatusMap mutex poisoned")
             .iter()
             .map(|(k, v)| (k.clone(), *v))
             .collect();
@@ -615,7 +617,7 @@ impl WatchServer {
         let progress_queues: Vec<(u32, Vec<(u32, u32)>)> = self
             .progress_queue
             .lock()
-            .unwrap()
+            .expect("ProgressQueue mutex poisoned")
             .iter()
             .map(|(pid, queue)| {
                 let updates: Vec<(u32, u32)> = queue.iter().map(|p| (p.curr, p.total)).collect();
@@ -623,10 +625,18 @@ impl WatchServer {
             })
             .collect();
 
+        let progress_subscribers: Vec<u32> = self
+            .progress_subscribers
+            .lock()
+            .expect("Subscribers mutex poisoned")
+            .iter()
+            .copied()
+            .collect();
+
         DebugState {
             server_pid: std::process::id(),
             rayon_threads: rayon::current_num_threads() as u32,
-            client_pid: self.client_pid,
+            progress_subscribers,
             watcher_count: self.watchers.len() as u32,
             watched_paths,
             skip_set,
@@ -641,12 +651,10 @@ impl WatchServer {
     /// Sends a shutdown acknowledgment to the client over the IPC connection.
     fn signal_shutdown(shutdown_conn: Option<BufReader<Stream>>) {
         if let Some(mut conn) = shutdown_conn {
-            // Statically determined an upper bound of 1 byte
-            let mut buf = 0u8;
-            let buf = std::slice::from_mut(&mut buf);
-            match bincode::encode_into_slice(ServerMessage::ShutdownAck, buf, BINCODE_CFG) {
+            let mut buf = [0; 1]; // unit variant: 1 byte for variant index
+            match bincode::encode_into_slice(ServerMessage::ShutdownAck, &mut buf, BINCODE_CFG) {
                 Ok(_) => {
-                    if let Err(e) = write_full_message(&mut conn, buf) {
+                    if let Err(e) = write_full_message(&mut conn, &buf) {
                         error!("Failed to send shutdown ack -- {e}");
                     }
                 }
@@ -659,21 +667,35 @@ impl WatchServer {
 
     /// The main watch loop for the server. Will loop until a client shutdown request is received
     /// or an error is encountered.
-    fn watch(&mut self) -> WatchResult<()> {
-        // only display the progress bar on the first indexing
-        let mut display_progress = true;
-        // If a shutdown was requested, holds the requesting client's IPC connection
-        let mut shutdown_conn = None;
+    ///
+    /// `status_guard` is a pre-acquired lock on the status map, ensuring clients
+    /// block until initial indexing completes.
+    #[expect(clippy::significant_drop_tightening)]
+    fn watch(
+        &mut self,
+        status_guard: MutexGuard<'_, BTreeMap<String, StatusSummary>>,
+    ) -> WatchResult<()> {
+        // Place watches on `.git/` and `.gitmodules`. These watches will live for the entirety of
+        // the watch server's execution.
         self.place_root_watches()?;
+
+        // Initial indexing with the pre-acquired guard
+        let repo = Repository::open(&self.root_path)?;
+        self.populate_status_map(&repo, true, status_guard)?;
+        // If a shutdown was requested, holds the requesting client's IPC connection
+        let mut shutdown_conn = self.handle_events()?;
+
+        // Subsequent reindex iterations
+        let status_lock = Arc::clone(&self.submod_statuses);
         loop {
             self.clear_watchers();
             if !self.do_watch {
                 break;
             }
 
+            let status_guard = status_lock.lock().expect("Mutex poisoned");
             let repo = Repository::open(&self.root_path)?;
-            self.populate_status_map(&repo, display_progress)?;
-            display_progress = false;
+            self.populate_status_map(&repo, false, status_guard)?;
 
             shutdown_conn = self.handle_events()?;
         }
@@ -963,13 +985,11 @@ impl WatchServer {
 
             if index == control_idx {
                 match oper.recv(&self.control_rx)? {
-                    ControlMessage::Reindex { pid } => {
-                        self.client_pid = Some(pid);
+                    ControlMessage::Reindex => {
                         wait_for_in_flight(&in_flight);
                         return Ok(None);
                     }
-                    ControlMessage::Shutdown { pid, conn } => {
-                        self.client_pid = Some(pid);
+                    ControlMessage::Shutdown { conn } => {
                         self.do_watch = false;
                         wait_for_in_flight(&in_flight);
                         return Ok(Some(conn));
@@ -1123,19 +1143,30 @@ fn try_acquire<T>(mutex: &Mutex<T>) -> Option<MutexGuard<'_, T>> {
     }
 }
 
-/// Adds `progress_val` to the queue in `progress` for `client_pid`
+/// Pushes `progress_val` to the progress queue for every registered subscriber.
 ///
 /// # Panics
 ///
-/// Panics if the progress mutex has been poisoned
-#[expect(clippy::significant_drop_tightening)] // false positive???
-fn update_progress(progress: &ProgressMap, client_pid: u32, progress_val: ProgressUpdate) {
+/// Panics if either mutex has been poisoned
+#[expect(clippy::significant_drop_tightening)]
+fn broadcast_progress(
+    subscribers: &ProgressSubscribers,
+    progress: &ProgressMap,
+    progress_val: ProgressUpdate,
+) {
+    let subs = subscribers.lock().expect("Subscribers mutex poisoned");
+    // Avoid locking the progress queue for the common case of no active subscribers
+    if subs.is_empty() {
+        return;
+    }
     let mut progress_guard = progress.lock().expect("Progress mutex poisoned");
-    let queue = progress_guard.entry(client_pid).or_insert_with(|| {
-        let ProgressUpdate { total: cap, .. } = progress_val;
-        VecDeque::with_capacity(cap as usize + 1)
-    });
-    queue.push_back(progress_val);
+    for &pid in subs.iter() {
+        let queue = progress_guard.entry(pid).or_insert_with(|| {
+            let ProgressUpdate { total: cap, .. } = progress_val;
+            VecDeque::with_capacity(cap as usize + 1)
+        });
+        queue.push_back(progress_val);
+    }
 }
 
 /// Handles incoming client connections. Returns whether the listener received a shutdown command
@@ -1149,6 +1180,7 @@ fn handle_client_connection(
     control_tx: &crossbeam_channel::Sender<ControlMessage>,
     statuses: &StatusMap,
     progress: &ProgressMap,
+    subscribers: &ProgressSubscribers,
 ) -> WatchResult<bool> {
     let mut conn = BufReader::new(conn);
 
@@ -1158,26 +1190,25 @@ fn handle_client_connection(
 
     match msg {
         ClientMessage::Reindex(client_pid) => {
-            // Trigger the main loop to reindex
+            subscribers
+                .lock()
+                .expect("Subscribers mutex poisoned")
+                .insert(client_pid);
             control_tx
-                .send(ControlMessage::Reindex { pid: client_pid })
+                .send(ControlMessage::Reindex)
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::BrokenPipe, e.to_string()))?;
-            // Send progress updates to the client
-            handle_reindex_request(conn, client_pid, progress)?;
+            handle_reindex_request(conn, client_pid, progress, subscribers)?;
         }
         ClientMessage::Status(client_pid) => {
-            handle_status_request(conn, client_pid, statuses, progress)?;
+            handle_status_request(conn, client_pid, statuses, progress, subscribers)?;
         }
-        ClientMessage::Shutdown(client_pid) => {
+        ClientMessage::Shutdown => {
             control_tx
-                .send(ControlMessage::Shutdown {
-                    pid: client_pid,
-                    conn,
-                })
+                .send(ControlMessage::Shutdown { conn })
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::BrokenPipe, e.to_string()))?;
             return Ok(true);
         }
-        ClientMessage::Debug(_) => {
+        ClientMessage::Debug => {
             control_tx
                 .send(ControlMessage::Debug { conn })
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::BrokenPipe, e.to_string()))?;
@@ -1193,8 +1224,18 @@ fn handle_status_request(
     client_pid: u32,
     statuses: &StatusMap,
     progress: &ProgressMap,
+    subscribers: &ProgressSubscribers,
 ) -> WatchResult<()> {
+    subscribers
+        .lock()
+        .expect("Subscribers mutex poisoned")
+        .insert(client_pid);
     let guard = get_status_guard_with_progress(&mut conn, client_pid, statuses, progress)?;
+    _ = subscribers
+        .lock()
+        .expect("Subscribers mutex poisoned")
+        .remove(&client_pid);
+    _ = progress.lock().expect("Mutex poisoned").remove(&client_pid);
 
     let mut status_out = Vec::with_capacity(guard.len());
     for (submod_path, status) in guard.iter().filter(|(_, st)| **st != StatusSummary::CLEAN) {
@@ -1216,6 +1257,7 @@ fn handle_reindex_request(
     mut conn: BufReader<Stream>,
     client_pid: u32,
     progress: &ProgressMap,
+    subscribers: &ProgressSubscribers,
 ) -> WatchResult<()> {
     loop {
         if try_send_progress_update(&mut conn, client_pid, progress)? {
@@ -1224,6 +1266,10 @@ fn handle_reindex_request(
         std::thread::yield_now();
     }
 
+    _ = subscribers
+        .lock()
+        .expect("Subscribers mutex poisoned")
+        .remove(&client_pid);
     _ = progress.lock().expect("Mutex poisoned").remove(&client_pid);
 
     Ok(())
@@ -1299,11 +1345,19 @@ const fn event_is_relevant(event: &Event) -> bool {
 /// # Panics
 ///
 /// Panics if the `SUBMOD_STATUSES` mutex is poisoned.
+#[expect(clippy::significant_drop_tightening)]
 pub fn watch(root_dir: &Path) -> WatchResult<()> {
     let (control_tx, control_rx) = crossbeam_channel::unbounded();
     let mut server = WatchServer::new(root_dir, control_rx);
+
+    // Lock status map before accepting connections so clients block (with
+    // progress updates) until initial indexing completes instead of reading
+    // an empty map.
+    let status_lock = Arc::clone(&server.submod_statuses);
+    let status_guard = status_lock.lock().expect("Mutex poisoned");
+
     server.spawn_listener(control_tx)?;
-    server.watch()?;
+    server.watch(status_guard)?;
 
     Ok(())
 }
@@ -1313,14 +1367,29 @@ mod tests {
     use super::*;
 
     #[test]
-    fn shutdown_ack_fits_in_single_byte() {
-        let encoded = bincode::encode_to_vec(ServerMessage::ShutdownAck, BINCODE_CFG)
-            .expect("Failed to encode ShutdownAck");
-        assert_eq!(
-            encoded.len(),
-            1,
-            "Expected ShutdownAck to encode to 1 byte, got {} bytes",
-            encoded.len(),
-        );
+    fn server_msg_unit_variants_fit_in_single_byte() {
+        let cases: &[(&str, Vec<u8>)] = &[
+            (
+                "ServerMessage::ShutdownAck",
+                bincode::encode_to_vec(ServerMessage::ShutdownAck, BINCODE_CFG).unwrap(),
+            ),
+            (
+                "ClientMessage::Shutdown",
+                bincode::encode_to_vec(ClientMessage::Shutdown, BINCODE_CFG).unwrap(),
+            ),
+            (
+                "ClientMessage::Debug",
+                bincode::encode_to_vec(ClientMessage::Debug, BINCODE_CFG).unwrap(),
+            ),
+        ];
+
+        for (name, encoded) in cases {
+            assert_eq!(
+                encoded.len(),
+                1,
+                "Expected {name} to encode to 1 byte, got {} bytes",
+                encoded.len(),
+            );
+        }
     }
 }
