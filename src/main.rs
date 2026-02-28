@@ -23,29 +23,29 @@ use subspy::{
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Reindex a watch server
-    Reindex(Reindex),
-    /// Shutdown a watch server
-    Shutdown(Shutdown),
+    /// Start a watch server on a git project
+    Start(Start),
     /// Display the status of a watched git project
     Status(Status),
-    /// Start a watch server on a git project
-    Watch(Watch),
+    /// Shutdown a watch server
+    Stop(Stop),
+    /// Reindex a watch server
+    Reindex(Reindex),
 }
 
 impl Commands {
     const fn log_level(&self) -> Option<LogLevel> {
         match self {
             Self::Reindex(cmd) => cmd.log_level,
-            Self::Shutdown(cmd) => cmd.log_level,
+            Self::Stop(cmd) => cmd.log_level,
             Self::Status(cmd) => cmd.log_level,
-            Self::Watch(cmd) => cmd.log_level,
+            Self::Start(cmd) => cmd.log_level,
         }
     }
 }
 
 #[derive(Args, Debug)]
-#[command(visible_aliases = ["r", "re"])]
+#[command(visible_aliases = ["re", "r"])]
 struct Reindex {
     /// The directory whose watcher should reindex
     #[arg(index = 1)]
@@ -56,7 +56,7 @@ struct Reindex {
 }
 
 #[derive(Args, Debug)]
-#[command(visible_aliases = ["s", "st"])]
+#[command(visible_aliases = ["st", "s"])]
 struct Status {
     /// The directory to query `git status` for
     #[arg(index = 1)]
@@ -67,8 +67,7 @@ struct Status {
 }
 
 #[derive(Args, Debug)]
-#[command(visible_aliases = ["sh", "stop"])]
-struct Shutdown {
+struct Stop {
     /// The directory to shutdown a watcher for
     #[arg(index = 1)]
     pub dir: Option<PathBuf>,
@@ -78,8 +77,8 @@ struct Shutdown {
 }
 
 #[derive(Args, Debug)]
-#[command(visible_aliases = ["w", "wa"])]
-struct Watch {
+#[command(visible_aliases = ["watch", "w"])]
+struct Start {
     /// The directory containing the repository's `.gitmodules` file
     #[arg(index = 1)]
     pub dir: Option<PathBuf>,
@@ -174,7 +173,7 @@ impl Reindex {
     }
 }
 
-impl Shutdown {
+impl Stop {
     fn run(self) -> RunResult<()> {
         let (true_path, repo_kind) = get_project_path(self.dir)?;
         if repo_kind != RepoKind::WithSubmodules {
@@ -191,7 +190,7 @@ impl Status {
     }
 }
 
-impl Watch {
+impl Start {
     fn run(self) -> RunResult<()> {
         let (true_path, repo_kind) = get_project_path(self.dir)?;
         if repo_kind != RepoKind::WithSubmodules {
@@ -319,9 +318,9 @@ fn run() -> RunResult<()> {
     info!("Invoked with command: {command:#?}");
 
     match command {
-        Commands::Watch(watch_options) => watch_options.run()?,
+        Commands::Start(watch_options) => watch_options.run()?,
         Commands::Status(status_options) => status_options.run()?,
-        Commands::Shutdown(shutdown_options) => shutdown_options.run()?,
+        Commands::Stop(shutdown_options) => shutdown_options.run()?,
         Commands::Reindex(reindex_options) => reindex_options.run()?,
     }
 
