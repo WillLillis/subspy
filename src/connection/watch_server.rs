@@ -684,7 +684,11 @@ impl WatchServer {
                 .any(|p| p.starts_with(&self.root_modules_path))
             {
                 if event.paths.iter().any(|p| Self::is_index_or_head_path(p)) {
-                    Some(EventType::SubmoduleGitOperation)
+                    if matches!(event.kind, EventKind::Remove(_)) {
+                        None
+                    } else {
+                        Some(EventType::SubmoduleGitOperation)
+                    }
                 } else if self.is_submod_rebase_start_event(event) {
                     Some(EventType::SubmoduleRebaseStart)
                 } else if self.is_submod_rebase_end_event(event) {
