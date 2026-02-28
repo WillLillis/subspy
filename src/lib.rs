@@ -6,6 +6,7 @@ use bitflags::bitflags;
 use indicatif::{ProgressBar, ProgressStyle};
 
 pub mod connection;
+pub mod debug;
 pub mod reindex;
 pub mod shutdown;
 pub mod status;

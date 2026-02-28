@@ -15,6 +15,7 @@ use thiserror::Error;
 use subspy::{
     DOT_GIT, DOT_GITMODULES, RepoKind,
     connection::{client::request_reindex, watch_server::watch},
+    debug::{DebugError, debug},
     reindex::ReindexError,
     shutdown::{ShutdownError, shutdown},
     status::{StatusError, status},
@@ -31,6 +32,8 @@ enum Commands {
     Stop(Stop),
     /// Reindex a watch server
     Reindex(Reindex),
+    /// Dump the watch server's internal state
+    Debug(DebugDump),
 }
 
 impl Commands {
@@ -40,6 +43,7 @@ impl Commands {
             Self::Stop(cmd) => cmd.log_level,
             Self::Status(cmd) => cmd.log_level,
             Self::Start(cmd) => cmd.log_level,
+            Self::Debug(cmd) => cmd.log_level,
         }
     }
 }
@@ -69,6 +73,17 @@ struct Status {
 #[derive(Args, Debug)]
 struct Stop {
     /// The directory to shutdown a watcher for
+    #[arg(index = 1)]
+    pub dir: Option<PathBuf>,
+    /// The log level to use for the requesting client
+    #[arg(short, long)]
+    pub log_level: Option<LogLevel>,
+}
+
+#[derive(Args, Debug)]
+#[command(visible_aliases = ["dbg", "d"])]
+struct DebugDump {
+    /// The directory whose watcher state to dump
     #[arg(index = 1)]
     pub dir: Option<PathBuf>,
     /// The log level to use for the requesting client
@@ -107,6 +122,8 @@ pub enum RunError {
     Reindex(#[from] ReindexError),
     #[error(transparent)]
     Shutdown(#[from] ShutdownError),
+    #[error(transparent)]
+    Debug(#[from] DebugError),
     #[error("Unable to determine home directory: {0}")]
     Home(#[from] HomeDirError),
     #[error(transparent)]
@@ -160,6 +177,16 @@ impl std::fmt::Display for LogLevel {
                 Self::Trace => "trace",
             }
         )
+    }
+}
+
+impl DebugDump {
+    fn run(self) -> RunResult<()> {
+        let (true_path, repo_kind) = get_project_path(self.dir)?;
+        if repo_kind != RepoKind::WithSubmodules {
+            return Err(RunError::server_path(true_path));
+        }
+        Ok(debug(true_path.as_path())?)
     }
 }
 
@@ -322,6 +349,7 @@ fn run() -> RunResult<()> {
         Commands::Status(status_options) => status_options.run()?,
         Commands::Stop(shutdown_options) => shutdown_options.run()?,
         Commands::Reindex(reindex_options) => reindex_options.run()?,
+        Commands::Debug(debug_options) => debug_options.run()?,
     }
 
     Ok(())

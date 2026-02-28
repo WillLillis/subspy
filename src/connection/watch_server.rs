@@ -22,7 +22,7 @@ use notify::{
 use crate::{
     DOT_GIT, DOT_GITMODULES, StatusSummary,
     connection::{
-        BINCODE_CFG, ClientMessage, ServerMessage, create_listener, read_full_message,
+        BINCODE_CFG, ClientMessage, DebugState, ServerMessage, create_listener, read_full_message,
         write_full_message,
     },
     create_progress_bar,
@@ -139,6 +139,7 @@ enum EventType {
 enum ControlMessage {
     Reindex { pid: u32 },
     Shutdown { pid: u32, conn: BufReader<Stream> },
+    Debug { conn: BufReader<Stream> },
 }
 
 /// RAII guard that acquires a lock file on creation and removes it on drop.
@@ -571,6 +572,72 @@ impl WatchServer {
         Ok(())
     }
 
+    /// Gathers a snapshot of the server's internal state for diagnostic purposes.
+    fn gather_debug_state(&self, in_flight: &(Mutex<InFlightTracker>, Condvar)) -> DebugState {
+        let watched_paths: Vec<(String, String)> = self
+            .watchers
+            .iter()
+            .map(|w| (w.relative_path.clone(), w.watch_path.display().to_string()))
+            .collect();
+
+        let skip_set: Vec<String> = self.skip_set.iter().cloned().collect();
+
+        let submodule_statuses: Vec<(String, StatusSummary)> = self
+            .submod_statuses
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(k, v)| (k.clone(), *v))
+            .collect();
+
+        let in_flight_tasks: Vec<(String, String)> = in_flight
+            .0
+            .lock()
+            .unwrap()
+            .tasks
+            .iter()
+            .map(|(idx, state)| {
+                let rel_path = self
+                    .watchers
+                    .get(*idx)
+                    .map_or("(unknown)", |w| w.relative_path.as_str());
+                let cancelled = state.cancellation_flag().load(Ordering::Relaxed);
+                let state_str = match (state, cancelled) {
+                    (TaskState::Active(_), false) => "active",
+                    (TaskState::Active(_), true) => "active (cancelling)",
+                    (TaskState::Dirty(_), false) => "dirty",
+                    (TaskState::Dirty(_), true) => "dirty (cancelling)",
+                };
+                (rel_path.to_owned(), state_str.to_owned())
+            })
+            .collect();
+
+        let progress_queues: Vec<(u32, Vec<(u32, u32)>)> = self
+            .progress_queue
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(pid, queue)| {
+                let updates: Vec<(u32, u32)> = queue.iter().map(|p| (p.curr, p.total)).collect();
+                (*pid, updates)
+            })
+            .collect();
+
+        DebugState {
+            server_pid: std::process::id(),
+            rayon_threads: rayon::current_num_threads() as u32,
+            client_pid: self.client_pid,
+            watcher_count: self.watchers.len() as u32,
+            watched_paths,
+            skip_set,
+            root_rebasing: self.root_rebasing,
+            root_path: self.root_path.display().to_string(),
+            submodule_statuses,
+            in_flight: in_flight_tasks,
+            progress_queues,
+        }
+    }
+
     /// Sends a shutdown acknowledgment to the client over the IPC connection.
     fn signal_shutdown(shutdown_conn: Option<BufReader<Stream>>) {
         if let Some(mut conn) = shutdown_conn {
@@ -907,6 +974,21 @@ impl WatchServer {
                         wait_for_in_flight(&in_flight);
                         return Ok(Some(conn));
                     }
+                    ControlMessage::Debug { mut conn } => {
+                        let state = self.gather_debug_state(&in_flight);
+                        let msg = ServerMessage::DebugInfo(state);
+                        match bincode::encode_to_vec(msg, BINCODE_CFG) {
+                            Ok(serialized) => {
+                                if let Err(e) = write_full_message(&mut conn, &serialized) {
+                                    error!("Failed to send debug state -- {e}");
+                                }
+                            }
+                            Err(e) => {
+                                error!("Failed to encode debug state -- {e}");
+                            }
+                        }
+                        continue;
+                    }
                 }
             }
             match oper.recv(&self.watchers[index].receiver)? {
@@ -1094,6 +1176,11 @@ fn handle_client_connection(
                 })
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::BrokenPipe, e.to_string()))?;
             return Ok(true);
+        }
+        ClientMessage::Debug(_) => {
+            control_tx
+                .send(ControlMessage::Debug { conn })
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::BrokenPipe, e.to_string()))?;
         }
     }
 

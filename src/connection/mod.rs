@@ -24,6 +24,7 @@ pub enum ClientMessage {
     Reindex(u32),
     Shutdown(u32),
     Status(u32),
+    Debug(u32),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Encode, BorrowDecode)]
@@ -31,6 +32,25 @@ pub enum ServerMessage {
     Status(Vec<(String, StatusSummary)>),
     Indexing { curr: u32, total: u32 },
     ShutdownAck,
+    DebugInfo(DebugState),
+}
+
+/// Diagnostic snapshot of the watch server's internal state
+#[derive(Clone, Debug, Eq, PartialEq, Encode, BorrowDecode)]
+pub struct DebugState {
+    pub server_pid: u32,
+    pub rayon_threads: u32,
+    pub client_pid: Option<u32>,
+    pub watcher_count: u32,
+    pub watched_paths: Vec<(String, String)>,
+    pub skip_set: Vec<String>,
+    pub root_rebasing: bool,
+    pub root_path: String,
+    pub submodule_statuses: Vec<(String, StatusSummary)>,
+    /// In-flight rayon tasks: `(relative_path, state)` where state is "active" or "dirty"
+    pub in_flight: Vec<(String, String)>,
+    /// Progress queues keyed by client PID: `(pid, [(curr, total)])`
+    pub progress_queues: Vec<(u32, Vec<(u32, u32)>)>,
 }
 
 /// Writes all of `msg` to `conn`, followed by `MSG_DELIM`
