@@ -307,14 +307,43 @@ fn paint(color: Option<impl Into<Color>>, text: &str) -> String {
 
 pub fn main() {
     if let Err(err) = run() {
-        error!("Fatal: {err}");
         if !err.to_string().is_empty() {
             eprintln!("{}: {err}", paint(Some(AnsiColor::Red), "Error"));
         }
-        log::logger().flush();
         std::process::exit(1);
     }
-    log::logger().flush();
+}
+
+/// Sets up logging, panic hooks, and flush behavior. Returns `true` if the
+/// command is the watch server (i.e. logs should be flushed on exit).
+fn setup_logging(command: &Commands) -> RunResult<bool> {
+    let is_watcher = matches!(command, Commands::Start(_));
+
+    if is_watcher {
+        let mut log_file_dir = etcetera::choose_base_strategy()?.cache_dir();
+        log_file_dir.push("subspy");
+        Logger::with(command.log_level().unwrap_or(LogLevel::Info))
+            .log_to_file(FileSpec::default().directory(log_file_dir))
+            .write_mode(WriteMode::BufferAndFlush)
+            .start()
+            .unwrap();
+
+        let default_panic_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            error!("Panic: {info}");
+            log::logger().flush();
+            default_panic_hook(info);
+        }));
+
+        info!("Invoked with command: {command:#?}");
+    } else {
+        Logger::with(command.log_level().unwrap_or(LogLevel::Warn))
+            .log_to_stderr()
+            .start()
+            .unwrap();
+    }
+
+    Ok(is_watcher)
 }
 
 fn run() -> RunResult<()> {
@@ -326,31 +355,22 @@ fn run() -> RunResult<()> {
     let cli = Commands::augment_subcommands(cli);
 
     let command = Commands::from_arg_matches(&cli.get_matches())?;
+    let is_watcher = setup_logging(&command)?;
 
-    let mut log_file_dir = etcetera::choose_base_strategy()?.cache_dir();
-    log_file_dir.push("subspy");
+    let result = match command {
+        Commands::Start(watch_options) => watch_options.run(),
+        Commands::Status(status_options) => status_options.run(),
+        Commands::Stop(shutdown_options) => shutdown_options.run(),
+        Commands::Reindex(reindex_options) => reindex_options.run(),
+        Commands::Debug(debug_options) => debug_options.run(),
+    };
 
-    Logger::with(command.log_level().unwrap_or(LogLevel::Info))
-        .log_to_file(FileSpec::default().directory(log_file_dir))
-        .write_mode(WriteMode::BufferAndFlush)
-        .start()
-        .unwrap();
-
-    let default_panic_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        error!("Panic: {info}");
+    if is_watcher {
+        if let Err(ref err) = result {
+            error!("Fatal: {err}");
+        }
         log::logger().flush();
-        default_panic_hook(info);
-    }));
-    info!("Invoked with command: {command:#?}");
-
-    match command {
-        Commands::Start(watch_options) => watch_options.run()?,
-        Commands::Status(status_options) => status_options.run()?,
-        Commands::Stop(shutdown_options) => shutdown_options.run()?,
-        Commands::Reindex(reindex_options) => reindex_options.run()?,
-        Commands::Debug(debug_options) => debug_options.run()?,
     }
 
-    Ok(())
+    result
 }
