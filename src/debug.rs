@@ -35,35 +35,32 @@ impl fmt::Display for DebugState {
         writeln!(f, "Root path: {}", self.root_path)?;
         writeln!(f, "Root rebasing: {}", self.root_rebasing)?;
         writeln!(f, "Watcher count: {}", self.watcher_count)?;
+        write!(f, "Progress subscribers: ")?;
         if self.progress_subscribers.is_empty() {
-            writeln!(f, "Progress subscribers: (none)")?;
+            writeln!(f, "(none)")?;
         } else {
             let pids: Vec<String> = self
                 .progress_subscribers
                 .iter()
                 .map(ToString::to_string)
                 .collect();
-            writeln!(f, "Progress subscribers: {}", pids.join(", "))?;
+            writeln!(f, "{}", pids.join(", "))?;
         }
 
-        let max_path_width = self
-            .watched_paths
-            .iter()
-            .map(|(p, _)| p.len())
-            .max()
-            .unwrap_or(6); // "(root)"
         writeln!(f, "\nWatched paths:")?;
         if self.watched_paths.is_empty() {
             writeln!(f, "  (none)")?;
         } else {
-            for (relative, watch_path) in &self.watched_paths {
-                let rel_disp = if relative.is_empty() {
-                    "(root)"
-                } else {
-                    relative
-                };
-                let padding = " ".repeat(1 + max_path_width - rel_disp.len());
-                writeln!(f, "  {rel_disp}{padding}-> {watch_path}")?;
+            for (relative, watch_path, pending) in &self.watched_paths {
+                writeln!(
+                    f,
+                    "  {} -> {watch_path} ({pending} pending events)",
+                    if relative.is_empty() {
+                        "(root)"
+                    } else {
+                        relative
+                    }
+                )?;
             }
         }
 
@@ -97,25 +94,24 @@ impl fmt::Display for DebugState {
             }
         }
 
-        let max_path_width = self
-            .submodule_statuses
-            .iter()
-            .map(|(p, _)| p.len())
-            .max()
-            .unwrap_or(0);
         writeln!(f, "\nSubmodule statuses:")?;
         if self.submodule_statuses.is_empty() {
             write!(f, "  (none)")?;
         } else {
             let last_idx = self.submodule_statuses.len() - 1;
             for (i, (path, status)) in self.submodule_statuses.iter().enumerate() {
-                let padding = " ".repeat(1 + max_path_width - path.len());
                 if i == last_idx {
-                    write!(f, "  {path}:{padding}{status}")?;
+                    write!(f, "  {path}: {status}")?;
                 } else {
-                    writeln!(f, "  {path}:{padding}{status}")?;
+                    writeln!(f, "  {path}: {status}")?;
                 }
             }
+        }
+
+        writeln!(f, "\n\nLast watcher error:")?;
+        match self.last_watcher_error {
+            Some(ref err) => write!(f, "  {err}")?,
+            None => write!(f, "  (none)")?,
         }
 
         Ok(())

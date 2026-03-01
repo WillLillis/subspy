@@ -42,7 +42,7 @@ pub struct DebugState {
     pub rayon_threads: u32,
     pub progress_subscribers: Vec<u32>,
     pub watcher_count: u32,
-    pub watched_paths: Vec<(String, String)>,
+    pub watched_paths: Vec<(String, String, u32)>,
     pub skip_set: Vec<String>,
     pub root_rebasing: bool,
     pub root_path: String,
@@ -51,6 +51,8 @@ pub struct DebugState {
     pub in_flight: Vec<(String, String)>,
     /// Progress queues keyed by client PID: `(pid, [(curr, total)])`
     pub progress_queues: Vec<(u32, Vec<(u32, u32)>)>,
+    /// The last watcher error that triggered a reindex, if any
+    pub last_watcher_error: Option<String>,
 }
 
 /// Writes all of `msg` to `conn`, followed by `MSG_DELIM`

@@ -117,6 +117,8 @@ struct WatchServer {
     progress_queue: Arc<ProgressMap>,
     /// Client PIDs that should receive progress updates during indexing.
     progress_subscribers: Arc<ProgressSubscribers>,
+    /// The last watcher error that triggered a reindex, if any.
+    last_watcher_error: Option<String>,
 }
 
 /// Summarizes an event received from a watcher. Create with `get_event_type`
@@ -306,6 +308,7 @@ impl WatchServer {
             submod_statuses: Arc::new(Mutex::new(BTreeMap::new())),
             progress_queue: Arc::new(Mutex::new(HashMap::new())),
             progress_subscribers: Arc::new(Mutex::new(HashSet::new())),
+            last_watcher_error: None,
         }
     }
 
@@ -576,10 +579,16 @@ impl WatchServer {
 
     /// Gathers a snapshot of the server's internal state for diagnostic purposes.
     fn gather_debug_state(&self, in_flight: &(Mutex<InFlightTracker>, Condvar)) -> DebugState {
-        let watched_paths: Vec<(String, String)> = self
+        let watched_paths: Vec<(String, String, u32)> = self
             .watchers
             .iter()
-            .map(|w| (w.relative_path.clone(), w.watch_path.display().to_string()))
+            .map(|w| {
+                (
+                    w.relative_path.clone(),
+                    w.watch_path.display().to_string(),
+                    w.receiver.len() as u32,
+                )
+            })
             .collect();
 
         let skip_set: Vec<String> = self.skip_set.iter().cloned().collect();
@@ -645,6 +654,7 @@ impl WatchServer {
             submodule_statuses,
             in_flight: in_flight_tasks,
             progress_queues,
+            last_watcher_error: self.last_watcher_error.clone(),
         }
     }
 
@@ -1103,10 +1113,12 @@ impl WatchServer {
                     }
                 }
                 Err(e) => {
-                    error!(
-                        "Watcher error for submodule {}: {e}\nReindexing to reset watchers...",
+                    let msg = format!(
+                        "Watcher error for {}: {e}",
                         self.watchers[index].relative_path
                     );
+                    error!("{msg}\nReindexing to reset watchers...");
+                    self.last_watcher_error = Some(msg);
                     wait_for_in_flight(&in_flight);
                     break;
                 }
