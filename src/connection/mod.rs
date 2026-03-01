@@ -14,6 +14,7 @@ use interprocess::local_socket::{
 use crate::StatusSummary;
 
 pub mod client;
+mod client_handler;
 pub mod watch_server;
 
 /// Common bincode configuration used to encode/decode messages between the client and server
