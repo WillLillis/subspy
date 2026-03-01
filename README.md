@@ -27,15 +27,16 @@ any time a change is detected in one of these locations. For sufficiently many s
 Usage: subspy <COMMAND>
 
 Commands:
-  reindex   Reindex a watch server [aliases: r, re]
-  shutdown  Shutdown a watch server [aliases: sh, stop]
-  status    Display the status of a watched git project [aliases: s, st]
-  watch     Start a watch server on a git project [aliases: w, wa]
+  start    Start a watch server on a git project [aliases: watch, w]
+  status   Display the status of a watched git project [aliases: st, s]
+  stop     Shutdown a watch server
+  reindex  Reindex a watch server [aliases: re, r]
+  debug    Dump the internal state of the watch server [aliases: dbg, d]
 
 Options:
   -h, --help  Print help
 
-~/very_large_project/ > subspy watch --daemon # Or start normally in another terminal w/o --daemon
+~/very_large_project/ > subspy start
 # Work on your project as normal
 ~/very_large_project/ > subspy status
 -- top level status here --
