@@ -64,12 +64,12 @@ git may have in place.
 
 ```sh
 ~/very_large_project/ > time subspy status
-real    0m0.275s
+real    0m0.099s
 user    0m0.000s
 sys     0m0.000s
 
 ~/very_large_project/ > time git status
-real    0m26.108s
+real    0m11.770s
 user    0m0.015s
 sys     0m0.000s
 ```
