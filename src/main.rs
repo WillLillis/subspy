@@ -97,9 +97,9 @@ struct Start {
     /// The directory containing the repository's `.gitmodules` file
     #[arg(index = 1)]
     pub dir: Option<PathBuf>,
-    /// Launch the watch server as a background process
+    /// Don't launch the server as a background process
     #[arg(short, long)]
-    pub daemon: bool,
+    pub foreground: bool,
     /// The log level to use for the watch server
     #[arg(short, long)]
     pub log_level: Option<LogLevel>,
@@ -224,10 +224,10 @@ impl Start {
             return Err(RunError::server_path(true_path));
         }
 
-        if self.daemon {
-            Ok(Self::spawn_daemon(&true_path, self.log_level)?)
-        } else {
+        if self.foreground {
             Ok(watch(true_path.as_path())?)
+        } else {
+            Ok(Self::spawn_daemon(&true_path, self.log_level)?)
         }
     }
 
@@ -236,8 +236,9 @@ impl Start {
         let log_level = log_level.map(|l| l.to_string());
         let exe = std::env::current_exe()?;
         let mut cmd = process::Command::new(exe);
-        cmd.arg("watch")
+        cmd.arg("start")
             .arg(path)
+            .arg("--foreground")
             .stdin(process::Stdio::null())
             .stdout(process::Stdio::null())
             .stderr(process::Stdio::null());
