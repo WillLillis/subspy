@@ -1,6 +1,6 @@
 use anstyle::AnsiColor;
 use git2::{Repository, Statuses};
-use std::{fs, path::Path};
+use std::{cmp::Ordering, fs, path::Path};
 use thiserror::Error;
 
 use crate::{RepoKind, StatusSummary, connection::client::request_status, paint};
@@ -255,10 +255,12 @@ fn print_unmerged_paths(repo: &Repository) -> StatusResult<bool> {
 
 fn print_normal_header(repo: &Repository) -> StatusResult<()> {
     println!("{}", current_branch_display(repo)?);
-    if let (Some(upstream_status), Some(upstream_name)) =
-        (get_upstream_status(repo)?, get_upstream_ref_name(repo)?)
-    {
-        println!("Your branch is {upstream_status} with '{upstream_name}'.\n");
+    if let Some((status_line, hint)) = get_upstream_status(repo)? {
+        println!("{status_line}");
+        if !hint.is_empty() {
+            println!("  {hint}");
+        }
+        println!();
     }
     Ok(())
 }
@@ -486,22 +488,7 @@ fn current_branch_display(repo: &Repository) -> StatusResult<String> {
     Ok(format!("On branch {branch_name}"))
 }
 
-fn get_upstream_ref_name(repo: &Repository) -> StatusResult<Option<String>> {
-    let head = repo.head()?;
-    if !head.is_branch() {
-        return Ok(None); // Detached HEAD, no upstream
-    }
-    let current_branch = git2::Branch::wrap(head);
-    let Ok(upstream) = current_branch.upstream() else {
-        // No upstream set
-        return Ok(None);
-    };
-    let upstream_ref = upstream.get();
-    let name = upstream_ref.shorthand().map(|s| s.to_string());
-    Ok(name)
-}
-
-fn get_upstream_status(repo: &Repository) -> StatusResult<Option<String>> {
+fn get_upstream_status(repo: &Repository) -> StatusResult<Option<(String, &'static str)>> {
     let head_ref = repo.head()?;
     if !head_ref.is_branch() {
         return Ok(None);
@@ -512,6 +499,12 @@ fn get_upstream_status(repo: &Repository) -> StatusResult<Option<String>> {
         return Ok(None);
     };
 
+    let name = upstream_branch
+        .get()
+        .shorthand()
+        .unwrap_or("unknown")
+        .to_string();
+
     // Get local and upstream commit OIDs
     let local_oid = local_branch.get().peel_to_commit()?.id();
     let upstream_oid = upstream_branch.get().peel_to_commit()?.id();
@@ -519,18 +512,36 @@ fn get_upstream_status(repo: &Repository) -> StatusResult<Option<String>> {
     // Compare graphs
     let (ahead, behind) = repo.graph_ahead_behind(local_oid, upstream_oid)?;
 
-    if ahead == 0 && behind == 0 {
-        Ok(Some("up to date".to_string()))
-    } else if ahead > 0 && behind == 0 {
-        Ok(Some(format!("ahead by {ahead} commit(s)")))
-    } else if ahead == 0 && behind > 0 {
-        Ok(Some(format!("behind by {behind} commit(s)")))
-    } else if ahead > 0 && behind > 0 {
-        Ok(Some(format!(
-            "diverged (ahead by {ahead}, behind by {behind})",
-        )))
-    } else {
-        Ok(None)
+    let commit_s = |n: usize| if n == 1 { "commit" } else { "commits" };
+
+    match (ahead.cmp(&0), behind.cmp(&0)) {
+        (Ordering::Equal, Ordering::Equal) => Ok(Some((
+            format!("Your branch is up to date with '{name}'."),
+            "",
+        ))),
+        (Ordering::Greater, Ordering::Equal) => Ok(Some((
+            format!(
+                "Your branch is ahead of '{name}' by {ahead} {}.",
+                commit_s(ahead)
+            ),
+            "(use \"git push\" to publish your local commits)",
+        ))),
+        (Ordering::Equal, Ordering::Greater) => Ok(Some((
+            format!(
+                "Your branch is behind '{name}' by {behind} {}, and can be fast-forwarded.",
+                commit_s(behind)
+            ),
+            "(use \"git pull\" to update your local branch)",
+        ))),
+        _ => {
+            Ok(Some((
+                format!(
+                    "Your branch and '{name}' have diverged,\nand have {ahead} and {behind} different {} each, respectively.",
+                    commit_s(ahead + behind) // git uses plural when total > 1
+                ),
+                "(use \"git pull\" if you want to integrate the remote branch with yours)",
+            )))
+        }
     }
 }
 
