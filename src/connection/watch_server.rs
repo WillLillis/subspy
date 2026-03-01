@@ -84,8 +84,6 @@ type WatchList = Vec<WatchListItem>;
 
 /// The primary state necessary to maintain a status watch over the repository at `root_path`
 struct WatchServer {
-    /// Whether the server should continue to watch the repository at `root_path`
-    do_watch: bool,
     /// Filesystem watchers
     watchers: WatchList,
     /// Which submodules to skip indexing
@@ -138,6 +136,18 @@ enum EventType {
     RootRebaseStart,
     /// A rebase ended within the root repository
     RootRebaseEnd,
+}
+
+/// Reason `handle_events` exited its select loop
+enum HandleEventsExit {
+    /// A reindex was requested or required (root git operation or rebase end event)
+    ReindexEvent,
+    /// A reindex was requested by a client
+    ReindexRequest,
+    /// A shutdown was requested by a client
+    Shutdown { conn: BufReader<Stream> },
+    /// A filesystem watcher at `index` reported an error
+    WatcherError { index: usize },
 }
 
 /// Control messages sent from the listener thread to the main event loop
@@ -294,7 +304,6 @@ impl WatchServer {
         let root_lock_path = root_path.join(DOT_GIT).join("index.lock");
 
         Self {
-            do_watch: true,
             watchers: Vec::new(),
             skip_set: HashSet::new(),
             root_rebasing: false,
@@ -355,23 +364,6 @@ impl WatchServer {
         Ok(())
     }
 
-    /// Stop all non-root watchers in `self.watchers`, clearing them from the list
-    fn clear_watchers(&mut self) {
-        for WatchListItem {
-            mut watcher,
-            watch_path,
-            ..
-        } in self.watchers.drain(ROOT_WATCHER_COUNT..)
-        {
-            if let Err(e) = watcher.unwatch(&watch_path) {
-                error!(
-                    "Failed to stop watcher for path {} -- {e}",
-                    watch_path.display()
-                );
-            }
-        }
-    }
-
     /// Places a watcher of type `mode` on `watch_path`. The watcher created is stored in
     /// `self.watchers` along with `rel_path`. Returns the watcher and its transmitter.
     ///
@@ -407,10 +399,19 @@ impl WatchServer {
     ///
     /// Returns `notify::Error` if any watchers cannot be created
     fn place_root_watches(&mut self) -> notify::Result<()> {
-        let (rx, watcher) = Self::place_watch(
+        let (rx, watcher) = match Self::place_watch(
             self.root_gitmodules_path.as_path(),
             notify::RecursiveMode::NonRecursive, // ignored
-        )?;
+        ) {
+            Ok((rx, watcher)) => (rx, watcher),
+            Err(e) => {
+                error!(
+                    "Failed to place root watch at `{}` - {e}",
+                    self.root_gitmodules_path.display()
+                );
+                Err(e)?
+            }
+        };
         self.watchers.push(WatchListItem::new(
             DOT_GITMODULES.to_owned(),
             self.root_gitmodules_path.clone(),
@@ -419,10 +420,19 @@ impl WatchServer {
             watcher,
         ));
 
-        let (rx, watcher) = Self::place_watch(
+        let (rx, watcher) = match Self::place_watch(
             self.root_git_path.as_path(),
             notify::RecursiveMode::Recursive,
-        )?;
+        ) {
+            Ok((rx, watcher)) => (rx, watcher),
+            Err(e) => {
+                error!(
+                    "Failed to place root watch at `{}` - {e}",
+                    self.root_git_path.display()
+                );
+                Err(e)?
+            }
+        };
         self.watchers.push(WatchListItem::new(
             DOT_GIT.to_owned(),
             self.root_git_path.clone(),
@@ -433,6 +443,40 @@ impl WatchServer {
 
         debug_assert_eq!(self.watchers.len(), ROOT_WATCHER_COUNT);
         Ok(())
+    }
+
+    /// Stop all non-root watchers in `self.watchers`, clearing them from the list
+    fn clear_submod_watchers(&mut self) {
+        for WatchListItem {
+            mut watcher,
+            watch_path,
+            ..
+        } in self.watchers.drain(ROOT_WATCHER_COUNT..)
+        {
+            if let Err(e) = watcher.unwatch(&watch_path) {
+                error!(
+                    "Failed to stop watcher for path {} -- {e}",
+                    watch_path.display()
+                );
+            }
+        }
+    }
+
+    /// Stops the root watchers (`.git/` and `.gitmodules`).
+    fn clear_root_watches(&mut self) {
+        for WatchListItem {
+            mut watcher,
+            watch_path,
+            ..
+        } in self.watchers.drain(..ROOT_WATCHER_COUNT)
+        {
+            if let Err(e) = watcher.unwatch(&watch_path) {
+                error!(
+                    "Failed to stop root watcher for path {} -- {e}",
+                    watch_path.display()
+                );
+            }
+        }
     }
 
     /// Gathers the status for all submodules within the given repository, places watchers
@@ -447,6 +491,7 @@ impl WatchServer {
         &mut self,
         repo: &Repository,
         display_progress: bool,
+        place_submod_watches: bool,
         mut status_guard: MutexGuard<'_, BTreeMap<String, StatusSummary>>,
     ) -> WatchResult<()> {
         use std::sync::atomic::{AtomicU32, Ordering};
@@ -556,17 +601,20 @@ impl WatchServer {
         status_guard.clear();
         for (relative_path, full_path, lock_path, status, is_in_rebase) in results {
             status_guard.insert(relative_path.clone(), status);
-            let (rx, watcher) = Self::place_watch(&full_path, notify::RecursiveMode::Recursive)?;
             if is_in_rebase {
                 self.skip_set.insert(relative_path.clone());
             }
-            self.watchers.push(WatchListItem::new(
-                relative_path,
-                full_path,
-                Some(lock_path),
-                rx,
-                watcher,
-            ));
+            if place_submod_watches {
+                let (rx, watcher) =
+                    Self::place_watch(&full_path, notify::RecursiveMode::Recursive)?;
+                self.watchers.push(WatchListItem::new(
+                    relative_path,
+                    full_path,
+                    Some(lock_path),
+                    rx,
+                    watcher,
+                ));
+            }
         }
         drop(status_guard);
 
@@ -659,18 +707,16 @@ impl WatchServer {
     }
 
     /// Sends a shutdown acknowledgment to the client over the IPC connection.
-    fn signal_shutdown(shutdown_conn: Option<BufReader<Stream>>) {
-        if let Some(mut conn) = shutdown_conn {
-            let mut buf = [0; 1]; // unit variant: 1 byte for variant index
-            match bincode::encode_into_slice(ServerMessage::ShutdownAck, &mut buf, BINCODE_CFG) {
-                Ok(_) => {
-                    if let Err(e) = write_full_message(&mut conn, &buf) {
-                        error!("Failed to send shutdown ack -- {e}");
-                    }
+    fn signal_shutdown(mut conn: BufReader<Stream>) {
+        let mut buf = [0; 1]; // unit variant: 1 byte for variant index
+        match bincode::encode_into_slice(ServerMessage::ShutdownAck, &mut buf, BINCODE_CFG) {
+            Ok(_) => {
+                if let Err(e) = write_full_message(&mut conn, &buf) {
+                    error!("Failed to send shutdown ack -- {e}");
                 }
-                Err(e) => {
-                    error!("Failed to encode shutdown ack -- {e}");
-                }
+            }
+            Err(e) => {
+                error!("Failed to encode shutdown ack -- {e}");
             }
         }
     }
@@ -686,31 +732,45 @@ impl WatchServer {
         status_guard: MutexGuard<'_, BTreeMap<String, StatusSummary>>,
     ) -> WatchResult<()> {
         // Place watches on `.git/` and `.gitmodules`. These watches will live for the entirety of
-        // the watch server's execution.
+        // the watch server's execution, unless a root watcher error requires replacement.
         self.place_root_watches()?;
 
         // Initial indexing with the pre-acquired guard
         let repo = Repository::open(&self.root_path)?;
-        self.populate_status_map(&repo, true, status_guard)?;
-        // If a shutdown was requested, holds the requesting client's IPC connection
-        let mut shutdown_conn = self.handle_events()?;
+        self.populate_status_map(&repo, true, true, status_guard)?;
+        let mut exit_reason = self.handle_events()?;
 
         // Subsequent reindex iterations
         let status_lock = Arc::clone(&self.submod_statuses);
         loop {
-            self.clear_watchers();
-            if !self.do_watch {
-                break;
-            }
+            let new_submod_watches = match exit_reason {
+                HandleEventsExit::ReindexEvent => false,
+                HandleEventsExit::Shutdown { .. } => break,
+                HandleEventsExit::ReindexRequest => {
+                    self.clear_submod_watchers();
+                    self.clear_root_watches();
+                    self.place_root_watches()?;
+                    true
+                }
+                HandleEventsExit::WatcherError { index } => {
+                    self.clear_submod_watchers();
+                    if index < ROOT_WATCHER_COUNT {
+                        self.clear_root_watches();
+                        self.place_root_watches()?;
+                    }
+                    true
+                }
+            };
 
             let status_guard = status_lock.lock().expect("Mutex poisoned");
-            let repo = Repository::open(&self.root_path)?;
-            self.populate_status_map(&repo, false, status_guard)?;
+            self.populate_status_map(&repo, false, new_submod_watches, status_guard)?;
 
-            shutdown_conn = self.handle_events()?;
+            exit_reason = self.handle_events()?;
         }
 
-        Self::signal_shutdown(shutdown_conn);
+        if let HandleEventsExit::Shutdown { conn } = exit_reason {
+            Self::signal_shutdown(conn);
+        }
 
         Ok(())
     }
@@ -969,12 +1029,9 @@ impl WatchServer {
 
     /// The "meat" of the logic for the watch server. Handles incoming watcher events and updates
     /// server state accordingly. This function will only exit if a reindex is required or
-    /// requested, a shutdown is received via the control channel, or if an error occurs.
-    ///
-    /// Returns `Some(conn)` if a shutdown was requested, where `conn` is the client's IPC
-    /// connection to send the acknowledgment through.
+    /// requested, a shutdown is received via the control channel, or if a watcher error occurs.
     #[allow(clippy::too_many_lines)]
-    fn handle_events(&mut self) -> WatchResult<Option<BufReader<Stream>>> {
+    fn handle_events(&mut self) -> WatchResult<HandleEventsExit> {
         let mut sel = crossbeam_channel::Select::new();
         // filesystem watchers
         for WatchListItem { receiver, .. } in &self.watchers {
@@ -997,12 +1054,11 @@ impl WatchServer {
                 match oper.recv(&self.control_rx)? {
                     ControlMessage::Reindex => {
                         wait_for_in_flight(&in_flight);
-                        return Ok(None);
+                        return Ok(HandleEventsExit::ReindexRequest);
                     }
                     ControlMessage::Shutdown { conn } => {
-                        self.do_watch = false;
                         wait_for_in_flight(&in_flight);
-                        return Ok(Some(conn));
+                        return Ok(HandleEventsExit::Shutdown { conn });
                     }
                     ControlMessage::Debug { mut conn } => {
                         let state = self.gather_debug_state(&in_flight);
@@ -1028,7 +1084,7 @@ impl WatchServer {
                         Some(EventType::RootGitOperation) => {
                             if !self.root_rebasing {
                                 wait_for_in_flight(&in_flight);
-                                break;
+                                return Ok(HandleEventsExit::ReindexEvent);
                             }
                         }
                         Some(EventType::RootRebaseStart) => {
@@ -1037,7 +1093,7 @@ impl WatchServer {
                         Some(EventType::RootRebaseEnd) => {
                             wait_for_in_flight(&in_flight);
                             self.root_rebasing = false;
-                            break;
+                            return Ok(HandleEventsExit::ReindexEvent);
                         }
                         Some(EventType::SubmoduleChange) => {
                             if !self.skip_set.contains(rel_path) {
@@ -1120,12 +1176,10 @@ impl WatchServer {
                     error!("{msg}\nReindexing to reset watchers...");
                     self.last_watcher_error = Some(msg);
                     wait_for_in_flight(&in_flight);
-                    break;
+                    return Ok(HandleEventsExit::WatcherError { index });
                 }
             }
         }
-
-        Ok(None)
     }
 }
 
