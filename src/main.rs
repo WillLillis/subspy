@@ -32,7 +32,7 @@ enum Commands {
     Stop(Stop),
     /// Reindex a watch server
     Reindex(Reindex),
-    /// Dump the watch server's internal state
+    /// Dump the internal state of the watch server
     Debug(DebugDump),
 }
 
