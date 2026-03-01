@@ -80,7 +80,7 @@ impl std::fmt::Display for StatusSummary {
 
 impl From<u32> for StatusSummary {
     fn from(value: u32) -> Self {
-        Self(value & 0b1111)
+        Self(value & Self::all().bits())
     }
 }
 

@@ -257,7 +257,6 @@ fn wait_for_in_flight(state: &(Mutex<InFlightTracker>, Condvar)) {
 }
 
 /// Signals cancellation to the in-flight rayon task for `index`, if one exists.
-/// Also clears the dirty flag so the task doesn't re-check after cancellation.
 fn cancel_submod_update(index: usize, state: &(Mutex<InFlightTracker>, Condvar)) {
     let tracker = state.0.lock().expect("InFlightTracker mutex poisoned");
     if let Some(task) = tracker.tasks.get(&index) {
@@ -798,6 +797,19 @@ impl WatchServer {
             && Self::has_rebase_marker_path(&event.paths, &self.root_modules_path)
     }
 
+    /// Finds the watcher index of the submodule whose `.git/modules` path matches the event.
+    #[inline]
+    fn find_submod_for_event(&self, event: &Event) -> Option<usize> {
+        self.watchers.iter().enumerate().find_map(|(i, watcher)| {
+            let submod_modules_path = watcher.lock_file_path.as_ref().unwrap().parent().unwrap();
+            event
+                .paths
+                .iter()
+                .any(|p| p.starts_with(submod_modules_path))
+                .then_some(i)
+        })
+    }
+
     #[inline]
     fn is_root_rebase_start_event(&self, event: &Event) -> bool {
         matches!(event.kind, EventKind::Create(_))
@@ -1101,22 +1113,10 @@ impl WatchServer {
                             }
                         }
                         Some(EventType::SubmoduleGitOperation) => {
-                            for (i, watcher) in self.watchers.iter().enumerate() {
-                                let Some(submod_modules_path) =
-                                    watcher.lock_file_path.as_ref().and_then(|p| p.parent())
-                                else {
-                                    continue;
-                                };
-                                if event
-                                    .paths
-                                    .iter()
-                                    .any(|p| p.starts_with(submod_modules_path))
-                                {
-                                    if !self.skip_set.contains(&watcher.relative_path) {
-                                        self.try_spawn_submod_update(i, &in_flight, &tl_repo);
-                                    }
-                                    break;
-                                }
+                            if let Some(i) = self.find_submod_for_event(&event)
+                                && !self.skip_set.contains(&self.watchers[i].relative_path)
+                            {
+                                self.try_spawn_submod_update(i, &in_flight, &tl_repo);
                             }
                         }
                         // Rebases generate an incredible volume of events, and during such an
@@ -1126,43 +1126,19 @@ impl WatchServer {
                         // through when git fails to acquire `index.lock`. Instead, we pause
                         // updating the relevant submodule until the rebase is completed.
                         Some(EventType::SubmoduleRebaseStart) => {
-                            for (i, watcher) in self.watchers.iter().enumerate() {
-                                let Some(submod_modules_path) =
-                                    watcher.lock_file_path.as_ref().and_then(|p| p.parent())
-                                else {
-                                    continue;
-                                };
-                                if event
-                                    .paths
-                                    .iter()
-                                    .any(|p| p.starts_with(submod_modules_path))
-                                {
-                                    cancel_submod_update(i, &in_flight);
-                                    self.skip_set.insert(watcher.relative_path.clone());
-                                    self.submod_statuses.lock().expect("Mutex poisoned").insert(
-                                        watcher.relative_path.clone(),
-                                        StatusSummary::NEW_COMMITS,
-                                    );
-                                    break;
-                                }
+                            if let Some(i) = self.find_submod_for_event(&event) {
+                                cancel_submod_update(i, &in_flight);
+                                self.skip_set.insert(self.watchers[i].relative_path.clone());
+                                self.submod_statuses.lock().expect("Mutex poisoned").insert(
+                                    self.watchers[i].relative_path.clone(),
+                                    StatusSummary::NEW_COMMITS,
+                                );
                             }
                         }
                         Some(EventType::SubmoduleRebaseEnd) => {
-                            for (i, watcher) in self.watchers.iter().enumerate() {
-                                let Some(submod_modules_path) =
-                                    watcher.lock_file_path.as_ref().and_then(|p| p.parent())
-                                else {
-                                    continue;
-                                };
-                                if event
-                                    .paths
-                                    .iter()
-                                    .any(|p| p.starts_with(submod_modules_path))
-                                {
-                                    self.skip_set.remove(&watcher.relative_path);
-                                    self.try_spawn_submod_update(i, &in_flight, &tl_repo);
-                                    break;
-                                }
+                            if let Some(i) = self.find_submod_for_event(&event) {
+                                self.skip_set.remove(&self.watchers[i].relative_path);
+                                self.try_spawn_submod_update(i, &in_flight, &tl_repo);
                             }
                         }
                         None => {}

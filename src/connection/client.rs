@@ -35,10 +35,7 @@ pub fn request_reindex(root_path: &Path) -> ReindexResult<()> {
     let progress_bar = create_progress_bar(0, "Reindexing in progress...");
     let mut buffer = Vec::with_capacity(1024);
     loop {
-        if let Err(e) = read_full_message(&mut conn, &mut buffer) {
-            error!("Error occurred while reindexing: {e}");
-            break;
-        }
+        read_full_message(&mut conn, &mut buffer)?;
         let Ok((ServerMessage::Indexing { curr, total }, _)): Result<(ServerMessage, usize), _> =
             bincode::borrow_decode_from_slice(&buffer, BINCODE_CFG)
         else {
@@ -125,9 +122,10 @@ pub fn request_status(root_path: &Path) -> StatusResult<Vec<(String, StatusSumma
                 progress_bar.set_length(u64::from(total));
                 progress_bar.set_position(u64::from(curr));
             }
-            other => {
-                error!("Unexpected response from server during status request: {other:?}");
-            }
+            other => Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("Unexpected response from server during status request: {other:?}"),
+            ))?,
         }
         buffer.clear();
     }
