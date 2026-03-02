@@ -3,6 +3,8 @@ use core::hash::{Hash as _, Hasher as _};
 use std::{
     io::{BufReader, Read, Write as _},
     path::Path,
+    sync::{Mutex, MutexGuard, TryLockError},
+    time::{Duration, Instant},
 };
 
 use bincode::{BorrowDecode, Encode};
@@ -41,17 +43,18 @@ pub enum ServerMessage {
 pub struct DebugState {
     pub server_pid: u32,
     pub rayon_threads: u32,
-    pub progress_subscribers: Vec<u32>,
+    pub progress_subscribers: Option<Vec<u32>>,
     pub watcher_count: u32,
     pub watched_paths: Vec<(String, String, u32)>,
     pub skip_set: Vec<String>,
     pub root_rebasing: bool,
     pub root_path: String,
-    pub submodule_statuses: Vec<(String, StatusSummary)>,
+    pub submodule_statuses: Option<Vec<(String, StatusSummary)>>,
     /// In-flight rayon tasks: `(relative_path, state)` where state is "active" or "dirty"
-    pub in_flight: Vec<(String, String)>,
+    pub in_flight: Option<Vec<(String, String)>>,
     /// Progress queues keyed by client PID: `(pid, [(curr, total)])`
-    pub progress_queues: Vec<(u32, Vec<(u32, u32)>)>,
+    #[expect(clippy::type_complexity)]
+    pub progress_queues: Option<Vec<(u32, Vec<(u32, u32)>)>>,
     /// The last watcher error that triggered a reindex, if any
     pub last_watcher_error: Option<String>,
 }
@@ -135,4 +138,35 @@ pub fn create_listener(root_dir: &Path) -> std::io::Result<Listener> {
     };
 
     Ok(listener)
+}
+
+/// Attempts to acquire `mutex` without blocking.
+///
+/// # Panics
+///
+/// Panics if `mutex` has been poisoned
+fn try_lock<T>(mutex: &Mutex<T>) -> Option<MutexGuard<'_, T>> {
+    try_lock_for(mutex, Duration::ZERO)
+}
+
+/// Attempts to acquire `mutex` within `timeout`, polling with `try_lock`.
+/// Returns `None` if the timeout elapses without acquiring the lock.
+///
+/// # Panics
+///
+/// Panics if `mutex` has been poisoned
+fn try_lock_for<T>(mutex: &Mutex<T>, timeout: Duration) -> Option<MutexGuard<'_, T>> {
+    let start = Instant::now();
+    loop {
+        match mutex.try_lock() {
+            Ok(guard) => return Some(guard),
+            Err(TryLockError::WouldBlock) => {
+                if start.elapsed() >= timeout {
+                    return None;
+                }
+                std::thread::yield_now();
+            }
+            Err(TryLockError::Poisoned(_)) => panic!("Mutex poisoned"),
+        }
+    }
 }

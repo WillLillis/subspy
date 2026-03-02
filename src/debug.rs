@@ -36,15 +36,13 @@ impl fmt::Display for DebugState {
         writeln!(f, "Root rebasing: {}", self.root_rebasing)?;
         writeln!(f, "Watcher count: {}", self.watcher_count)?;
         write!(f, "Progress subscribers: ")?;
-        if self.progress_subscribers.is_empty() {
-            writeln!(f, "(none)")?;
-        } else {
-            let pids: Vec<String> = self
-                .progress_subscribers
-                .iter()
-                .map(ToString::to_string)
-                .collect();
-            writeln!(f, "{}", pids.join(", "))?;
+        match &self.progress_subscribers {
+            None => writeln!(f, "WARNING: mutex locked, could not read")?,
+            Some(subs) if subs.is_empty() => writeln!(f, "(none)")?,
+            Some(subs) => {
+                let pids: Vec<String> = subs.iter().map(ToString::to_string).collect();
+                writeln!(f, "{}", pids.join(", "))?;
+            }
         }
 
         writeln!(f, "\nWatched paths:")?;
@@ -74,36 +72,42 @@ impl fmt::Display for DebugState {
         }
 
         writeln!(f, "\nIn-flight tasks:")?;
-        if self.in_flight.is_empty() {
-            writeln!(f, "  (none)")?;
-        } else {
-            for (path, task_state) in &self.in_flight {
-                writeln!(f, "  {path}: {task_state}")?;
+        match &self.in_flight {
+            None => writeln!(f, "  WARNING: mutex locked, could not read")?,
+            Some(tasks) if tasks.is_empty() => writeln!(f, "  (none)")?,
+            Some(tasks) => {
+                for (path, task_state) in tasks {
+                    writeln!(f, "  {path}: {task_state}")?;
+                }
             }
         }
 
         writeln!(f, "\nProgress queues:")?;
-        if self.progress_queues.is_empty() {
-            writeln!(f, "  (none)")?;
-        } else {
-            for (pid, updates) in &self.progress_queues {
-                writeln!(f, "  PID {pid}: {} pending update(s)", updates.len())?;
-                for (curr, total) in updates {
-                    writeln!(f, "    {curr}/{total}")?;
+        match &self.progress_queues {
+            None => writeln!(f, "  WARNING: mutex locked, could not read")?,
+            Some(queues) if queues.is_empty() => writeln!(f, "  (none)")?,
+            Some(queues) => {
+                for (pid, updates) in queues {
+                    writeln!(f, "  PID {pid}: {} pending update(s)", updates.len())?;
+                    for (curr, total) in updates {
+                        writeln!(f, "    {curr}/{total}")?;
+                    }
                 }
             }
         }
 
         writeln!(f, "\nSubmodule statuses:")?;
-        if self.submodule_statuses.is_empty() {
-            write!(f, "  (none)")?;
-        } else {
-            let last_idx = self.submodule_statuses.len() - 1;
-            for (i, (path, status)) in self.submodule_statuses.iter().enumerate() {
-                if i == last_idx {
-                    write!(f, "  {path}: {status}")?;
-                } else {
-                    writeln!(f, "  {path}: {status}")?;
+        match &self.submodule_statuses {
+            None => write!(f, "  WARNING: mutex locked, could not read")?,
+            Some(statuses) if statuses.is_empty() => write!(f, "  (none)")?,
+            Some(statuses) => {
+                let last_idx = statuses.len() - 1;
+                for (i, (path, status)) in statuses.iter().enumerate() {
+                    if i == last_idx {
+                        write!(f, "  {path}: {status}")?;
+                    } else {
+                        writeln!(f, "  {path}: {status}")?;
+                    }
                 }
             }
         }

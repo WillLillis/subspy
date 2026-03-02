@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, VecDeque},
     io::{BufReader, Read as _},
-    sync::{Arc, Mutex, MutexGuard, TryLockError},
+    sync::{Arc, MutexGuard},
 };
 
 use bincode::{BorrowDecode, Encode};
@@ -14,7 +14,10 @@ use crate::{
     watch::WatchResult,
 };
 
-use super::watch_server::{ControlMessage, ProgressMap, ProgressSubscribers, StatusMap};
+use super::{
+    try_lock,
+    watch_server::{ControlMessage, ProgressMap, ProgressSubscribers, StatusMap},
+};
 
 #[derive(Debug, Clone, Copy, Encode, BorrowDecode)]
 pub struct ProgressUpdate {
@@ -26,19 +29,6 @@ impl ProgressUpdate {
     #[must_use]
     pub const fn new(curr: u32, total: u32) -> Self {
         Self { curr, total }
-    }
-}
-
-/// Attempts to acquire `mutex`.
-///
-/// # Panics
-///
-/// Panics if `mutex` has been poisoned
-fn try_acquire<T>(mutex: &Mutex<T>) -> Option<MutexGuard<'_, T>> {
-    match mutex.try_lock() {
-        Ok(guard) => Some(guard),
-        Err(TryLockError::WouldBlock) => None,
-        Err(TryLockError::Poisoned(_)) => panic!("Mutex poisoned"),
     }
 }
 
@@ -215,7 +205,7 @@ fn try_send_progress_update(
     client_pid: u32,
     progress: &ProgressMap,
 ) -> WatchResult<bool> {
-    let Some(mut progress_queue) = try_acquire(progress) else {
+    let Some(mut progress_queue) = try_lock(progress) else {
         return Ok(false);
     };
     let Some(queue) = progress_queue.get_mut(&client_pid) else {
@@ -244,7 +234,7 @@ fn get_status_guard_with_progress<'a>(
     progress: &ProgressMap,
 ) -> WatchResult<MutexGuard<'a, BTreeMap<String, StatusSummary>>> {
     loop {
-        if let Some(g) = try_acquire(statuses) {
+        if let Some(g) = try_lock(statuses) {
             return Ok(g);
         }
         if !try_send_progress_update(conn, client_pid, progress)? {

@@ -25,13 +25,17 @@ use crate::{
     watch::{LockFileError, WatchError, WatchResult},
 };
 
-use super::client_handler::{ProgressUpdate, broadcast_progress, handle_client_connection};
+use super::{
+    client_handler::{ProgressUpdate, broadcast_progress, handle_client_connection},
+    try_lock_for,
+};
 
 /// `.git/` and `.gitmodules`
 const ROOT_WATCHER_COUNT: usize = 2;
 
 const MAX_LOCKFILE_BACKOFF: Duration = Duration::from_millis(100);
 const LOCKFILE_TIMEOUT: Duration = Duration::from_secs(10);
+const DEBUG_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Type alias for the submodule status map mutex
 pub(super) type StatusMap = Mutex<BTreeMap<String, StatusSummary>>;
@@ -638,54 +642,43 @@ impl WatchServer {
 
         let skip_set: Vec<String> = self.skip_set.iter().cloned().collect();
 
-        let submodule_statuses: Vec<(String, StatusSummary)> = self
-            .submod_statuses
-            .lock()
-            .expect("StatusMap mutex poisoned")
-            .iter()
-            .map(|(k, v)| (k.clone(), *v))
-            .collect();
+        let submodule_statuses = try_lock_for(&self.submod_statuses, DEBUG_LOCK_TIMEOUT)
+            .map(|guard| guard.iter().map(|(k, v)| (k.clone(), *v)).collect());
 
-        let in_flight_tasks: Vec<(String, String)> = in_flight
-            .0
-            .lock()
-            .unwrap()
-            .tasks
-            .iter()
-            .map(|(idx, state)| {
-                let rel_path = self
-                    .watchers
-                    .get(*idx)
-                    .map_or("(unknown)", |w| w.relative_path.as_str());
-                let cancelled = state.cancellation_flag().load(Ordering::Relaxed);
-                let state_str = match (state, cancelled) {
-                    (TaskState::Active(_), false) => "active",
-                    (TaskState::Active(_), true) => "active (cancelling)",
-                    (TaskState::Dirty(_), false) => "dirty",
-                    (TaskState::Dirty(_), true) => "dirty (cancelling)",
-                };
-                (rel_path.to_owned(), state_str.to_owned())
-            })
-            .collect();
+        let in_flight_tasks = try_lock_for(&in_flight.0, DEBUG_LOCK_TIMEOUT).map(|guard| {
+            guard
+                .tasks
+                .iter()
+                .map(|(idx, state)| {
+                    let rel_path = self
+                        .watchers
+                        .get(*idx)
+                        .map_or("(unknown)", |w| w.relative_path.as_str());
+                    let cancelled = state.cancellation_flag().load(Ordering::Relaxed);
+                    let state_str = match (state, cancelled) {
+                        (TaskState::Active(_), false) => "active",
+                        (TaskState::Active(_), true) => "active (cancelling)",
+                        (TaskState::Dirty(_), false) => "dirty",
+                        (TaskState::Dirty(_), true) => "dirty (cancelling)",
+                    };
+                    (rel_path.to_owned(), state_str.to_owned())
+                })
+                .collect()
+        });
 
-        let progress_queues: Vec<(u32, Vec<(u32, u32)>)> = self
-            .progress_queue
-            .lock()
-            .expect("ProgressQueue mutex poisoned")
-            .iter()
-            .map(|(pid, queue)| {
-                let updates: Vec<(u32, u32)> = queue.iter().map(|p| (p.curr, p.total)).collect();
-                (*pid, updates)
-            })
-            .collect();
+        let progress_queues = try_lock_for(&self.progress_queue, DEBUG_LOCK_TIMEOUT).map(|guard| {
+            guard
+                .iter()
+                .map(|(pid, queue)| {
+                    let updates: Vec<(u32, u32)> =
+                        queue.iter().map(|p| (p.curr, p.total)).collect();
+                    (*pid, updates)
+                })
+                .collect()
+        });
 
-        let progress_subscribers: Vec<u32> = self
-            .progress_subscribers
-            .lock()
-            .expect("Subscribers mutex poisoned")
-            .iter()
-            .copied()
-            .collect();
+        let progress_subscribers = try_lock_for(&self.progress_subscribers, DEBUG_LOCK_TIMEOUT)
+            .map(|guard| guard.iter().copied().collect());
 
         DebugState {
             server_pid: std::process::id(),
