@@ -19,6 +19,6 @@ pub enum ReindexError {
 /// # Errors
 ///
 /// Returns `Err` if any failure occurs.
-pub fn reindex(root_path: &Path) -> ReindexResult<()> {
-    request_reindex(root_path)
+pub fn reindex(root_path: &Path, replace_watchers: bool) -> ReindexResult<()> {
+    request_reindex(root_path, replace_watchers)
 }

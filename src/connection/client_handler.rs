@@ -92,7 +92,8 @@ fn dispatch_client_message(
         conn.read_exact(&mut len_buf)?;
         u32::from_le_bytes(len_buf) as usize
     };
-    let mut buffer = [0u8; 6]; // 1 byte variant index + up to 5 bytes varint u32 (if present)
+    // 1 byte variant index + up to 5 bytes varint u32 + 1 byte bool (if present)
+    let mut buffer = [0u8; 7];
     if msg_len > buffer.len() {
         Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
@@ -108,15 +109,18 @@ fn dispatch_client_message(
     info!("Received client message: {msg:?}");
 
     match msg {
-        ClientMessage::Reindex(client_pid) => {
+        ClientMessage::Reindex {
+            pid,
+            replace_watchers,
+        } => {
             subscribers
                 .lock()
                 .expect("Subscribers mutex poisoned")
-                .insert(client_pid);
+                .insert(pid);
             control_tx
-                .send(ControlMessage::Reindex)
+                .send(ControlMessage::Reindex { replace_watchers })
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::BrokenPipe, e.to_string()))?;
-            handle_reindex_request(conn, client_pid, progress, subscribers)?;
+            handle_reindex_request(conn, pid, progress, subscribers)?;
         }
         ClientMessage::Status(client_pid) => {
             handle_status_request(conn, client_pid, statuses, progress, subscribers)?;

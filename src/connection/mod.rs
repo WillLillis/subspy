@@ -24,7 +24,7 @@ pub const BINCODE_CFG: bincode::config::Configuration = bincode::config::standar
 
 #[derive(Clone, Debug, Eq, PartialEq, Encode, BorrowDecode)]
 pub enum ClientMessage {
-    Reindex(u32),
+    Reindex { pid: u32, replace_watchers: bool },
     Shutdown,
     Status(u32),
     Debug,

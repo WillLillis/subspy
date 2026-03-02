@@ -144,7 +144,7 @@ enum HandleEventsExit {
     /// A reindex was required due to a root git operation or rebase event
     ReindexEvent,
     /// A reindex was requested by a client
-    ReindexRequest,
+    ReindexRequest { replace_watchers: bool },
     /// A shutdown was requested by a client
     Shutdown { conn: BufReader<Stream> },
     /// A filesystem watcher at `index` reported an error
@@ -153,7 +153,7 @@ enum HandleEventsExit {
 
 /// Control messages sent from the listener thread to the main event loop
 pub(super) enum ControlMessage {
-    Reindex,
+    Reindex { replace_watchers: bool },
     Shutdown { conn: BufReader<Stream> },
     Debug { conn: BufReader<Stream> },
 }
@@ -701,11 +701,12 @@ impl WatchServer {
             let new_submod_watches = match exit_reason {
                 HandleEventsExit::ReindexEvent => false,
                 HandleEventsExit::Shutdown { .. } => break,
-                HandleEventsExit::ReindexRequest => {
-                    self.watchers.clear();
-                    self.place_root_watchers()?;
-                    // submodule watchers placed in `populate_status_map`
-                    true
+                HandleEventsExit::ReindexRequest { replace_watchers } => {
+                    if replace_watchers {
+                        self.watchers.clear();
+                        self.place_root_watchers()?;
+                    }
+                    replace_watchers
                 }
                 HandleEventsExit::WatcherError { index } => {
                     if index < ROOT_WATCHER_COUNT {
@@ -1029,9 +1030,9 @@ impl WatchServer {
 
             if index == control_idx {
                 match oper.recv(&self.control_rx)? {
-                    ControlMessage::Reindex => {
+                    ControlMessage::Reindex { replace_watchers } => {
                         wait_for_in_flight(&in_flight);
-                        return Ok(HandleEventsExit::ReindexRequest);
+                        return Ok(HandleEventsExit::ReindexRequest { replace_watchers });
                     }
                     ControlMessage::Shutdown { conn } => {
                         wait_for_in_flight(&in_flight);

@@ -57,6 +57,9 @@ struct Reindex {
     /// The log level to use for the requesting client
     #[arg(short, long)]
     pub log_level: Option<LogLevel>,
+    /// Replace all filesystem watchers during the reindex
+    #[arg(short = 'w', long)]
+    pub replace_watchers: bool,
 }
 
 #[derive(Args, Debug)]
@@ -196,7 +199,7 @@ impl Reindex {
         if repo_kind != RepoKind::WithSubmodules {
             return Err(RunError::server_path(true_path));
         }
-        Ok(request_reindex(true_path.as_path())?)
+        Ok(request_reindex(true_path.as_path(), self.replace_watchers)?)
     }
 }
 
