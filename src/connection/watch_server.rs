@@ -1168,7 +1168,7 @@ mod tests {
     use crate::connection::ClientMessage;
 
     #[test]
-    fn server_msg_unit_variants_fit_in_single_byte() {
+    fn unit_variant_sizes() {
         let cases: &[(&str, Vec<u8>)] = &[
             (
                 "ServerMessage::ShutdownAck",
@@ -1192,5 +1192,50 @@ mod tests {
                 encoded.len(),
             );
         }
+    }
+
+    /// Verifies that the worst-case encoded sizes of `ClientMessage` and
+    /// `ServerMessage::Indexing` fit within the stack buffers used to
+    /// encode/decode them in `client.rs` and `client_handler.rs`.
+    #[test]
+    fn max_message_sizes() {
+        // ClientMessage::Reindex with max u32 is the largest ClientMessage variant
+        let reindex_max = bincode::encode_to_vec(
+            ClientMessage::Reindex {
+                pid: u32::MAX,
+                replace_watchers: true,
+            },
+            BINCODE_CFG,
+        )
+        .unwrap();
+        assert!(
+            reindex_max.len() <= 7,
+            "ClientMessage::Reindex(u32::MAX, true) encoded to {} bytes, exceeds buffer size of 7",
+            reindex_max.len(),
+        );
+
+        // ClientMessage::Status with max u32
+        let status_max =
+            bincode::encode_to_vec(ClientMessage::Status(u32::MAX), BINCODE_CFG).unwrap();
+        assert!(
+            status_max.len() <= 7,
+            "ClientMessage::Status(u32::MAX) encoded to {} bytes, exceeds buffer size of 7",
+            status_max.len(),
+        );
+
+        // ServerMessage::Indexing with max values (used in try_send_progress_update)
+        let indexing_max = bincode::encode_to_vec(
+            ServerMessage::Indexing {
+                curr: u32::MAX,
+                total: u32::MAX,
+            },
+            BINCODE_CFG,
+        )
+        .unwrap();
+        assert!(
+            indexing_max.len() <= 11,
+            "ServerMessage::Indexing(u32::MAX, u32::MAX) encoded to {} bytes, exceeds buffer size of 11",
+            indexing_max.len(),
+        );
     }
 }
