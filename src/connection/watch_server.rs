@@ -55,7 +55,6 @@ type ServerWatcher = notify::RecommendedWatcher;
 /// Item watched by the server
 #[derive(Debug)]
 struct WatchListItem {
-    // need to hang onto the watched path to `unwatch` later
     watch_path: PathBuf,
     relative_path: String,
     /// Cached path to the submodule's `index.lock` file. `None` for root watchers.
@@ -399,7 +398,7 @@ impl WatchServer {
     /// # Errors
     ///
     /// Returns `notify::Error` if any watchers cannot be created
-    fn place_root_watches(&mut self) -> notify::Result<()> {
+    fn place_root_watchers(&mut self) -> notify::Result<()> {
         let (rx, watcher) = match Self::place_watch(
             self.root_gitmodules_path.as_path(),
             notify::RecursiveMode::NonRecursive, // ignored
@@ -444,40 +443,6 @@ impl WatchServer {
 
         debug_assert_eq!(self.watchers.len(), ROOT_WATCHER_COUNT);
         Ok(())
-    }
-
-    /// Stop all non-root watchers in `self.watchers`, clearing them from the list
-    fn clear_submod_watchers(&mut self) {
-        for WatchListItem {
-            mut watcher,
-            watch_path,
-            ..
-        } in self.watchers.drain(ROOT_WATCHER_COUNT..)
-        {
-            if let Err(e) = watcher.unwatch(&watch_path) {
-                error!(
-                    "Failed to stop watcher for path {} -- {e}",
-                    watch_path.display()
-                );
-            }
-        }
-    }
-
-    /// Stops the root watchers (`.git/` and `.gitmodules`).
-    fn clear_root_watches(&mut self) {
-        for WatchListItem {
-            mut watcher,
-            watch_path,
-            ..
-        } in self.watchers.drain(..ROOT_WATCHER_COUNT)
-        {
-            if let Err(e) = watcher.unwatch(&watch_path) {
-                error!(
-                    "Failed to stop root watcher for path {} -- {e}",
-                    watch_path.display()
-                );
-            }
-        }
     }
 
     /// Gathers the status for all submodules within the given repository, places watchers
@@ -723,7 +688,7 @@ impl WatchServer {
     ) -> WatchResult<()> {
         // Place watches on `.git/` and `.gitmodules`. These watches will live for the entirety of
         // the watch server's execution, unless a root watcher error requires replacement.
-        self.place_root_watches()?;
+        self.place_root_watchers()?;
 
         // Initial indexing with the pre-acquired guard
         let repo = Repository::open(&self.root_path)?;
@@ -737,18 +702,27 @@ impl WatchServer {
                 HandleEventsExit::ReindexEvent => false,
                 HandleEventsExit::Shutdown { .. } => break,
                 HandleEventsExit::ReindexRequest => {
-                    self.clear_submod_watchers();
-                    self.clear_root_watches();
-                    self.place_root_watches()?;
+                    self.watchers.clear();
+                    self.place_root_watchers()?;
+                    // submodule watchers placed in `populate_status_map`
                     true
                 }
                 HandleEventsExit::WatcherError { index } => {
-                    self.clear_submod_watchers();
                     if index < ROOT_WATCHER_COUNT {
-                        self.clear_root_watches();
-                        self.place_root_watches()?;
+                        // Root watcher errors require a full reindex since the
+                        // submodule set may have changed
+                        self.watchers.clear();
+                        self.place_root_watchers()?;
+                        true
+                    } else {
+                        let (new_rx, new_watcher) = Self::place_watch(
+                            &self.watchers[index].watch_path,
+                            notify::RecursiveMode::Recursive,
+                        )?;
+                        self.watchers[index].watcher = new_watcher;
+                        self.watchers[index].receiver = new_rx;
+                        false
                     }
-                    true
                 }
             };
 
