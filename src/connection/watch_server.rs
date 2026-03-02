@@ -347,7 +347,12 @@ impl WatchServer {
                     let statuses = Arc::clone(&statuses);
                     let progress = Arc::clone(&progress);
                     let subscribers = Arc::clone(&subscribers);
-                    rayon::spawn(move || {
+                    // Client handlers must NOT run on rayon's global thread pool. The
+                    // main thread enters rayon's work-stealing loop during
+                    // `par_iter().collect()` in `populate_status_map` while holding
+                    // the status map lock. If the main thread picks up a spawned
+                    // handler that spins waiting for that same lock, we deadlock.
+                    std::thread::spawn(move || {
                         handle_client_connection(conn, control_tx, statuses, progress, subscribers);
                     });
                 }
