@@ -335,7 +335,7 @@ impl WatchServer {
         std::thread::Builder::new()
             .name("subspy_listener".to_string())
             .spawn(move || {
-                let mut buffer = Vec::with_capacity(1024);
+                // The listener thread runs until the process exits and is cleaned up by the OS
                 for conn in listener.incoming().filter_map(|c| match c {
                     Ok(c) => Some(c),
                     Err(e) => {
@@ -343,19 +343,14 @@ impl WatchServer {
                         None
                     }
                 }) {
-                    if handle_client_connection(
-                        conn,
-                        &mut buffer,
-                        &control_tx,
-                        &statuses,
-                        &progress,
-                        &subscribers,
-                    )? {
-                        break;
-                    }
+                    let control_tx = control_tx.clone();
+                    let statuses = Arc::clone(&statuses);
+                    let progress = Arc::clone(&progress);
+                    let subscribers = Arc::clone(&subscribers);
+                    rayon::spawn(move || {
+                        handle_client_connection(conn, control_tx, statuses, progress, subscribers);
+                    });
                 }
-
-                WatchResult::Ok(())
             })?;
 
         Ok(())

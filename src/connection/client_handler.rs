@@ -1,18 +1,16 @@
 use std::{
     collections::{BTreeMap, VecDeque},
-    io::BufReader,
-    sync::{Mutex, MutexGuard, TryLockError},
+    io::{BufReader, Read as _},
+    sync::{Arc, Mutex, MutexGuard, TryLockError},
 };
 
 use bincode::{BorrowDecode, Encode};
 use interprocess::local_socket::Stream;
-use log::info;
+use log::{error, info};
 
 use crate::{
     StatusSummary,
-    connection::{
-        BINCODE_CFG, ClientMessage, ServerMessage, read_full_message, write_full_message,
-    },
+    connection::{BINCODE_CFG, ClientMessage, ServerMessage, write_full_message},
     watch::WatchResult,
 };
 
@@ -70,23 +68,53 @@ pub(super) fn broadcast_progress(
     }
 }
 
-/// Handles incoming client connections. Returns whether the listener received a shutdown command
-///
-/// # Errors
-///
-/// Returns `Err` if the client message couldn't be read, decoded, or handled.
+/// Handles an incoming client connection on the rayon thread pool.
+/// Errors are logged rather than propagated, since each connection is handled independently.
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "owned values required for 'static rayon::spawn closure"
+)]
 pub(super) fn handle_client_connection(
     conn: Stream,
-    buffer: &mut Vec<u8>,
+    control_tx: crossbeam_channel::Sender<ControlMessage>,
+    statuses: Arc<StatusMap>,
+    progress: Arc<ProgressMap>,
+    subscribers: Arc<ProgressSubscribers>,
+) {
+    if let Err(e) = dispatch_client_message(conn, &control_tx, &statuses, &progress, &subscribers) {
+        error!("Failed to handle client connection: {e}");
+    }
+}
+
+// NOTE: The logic in this function is kept separate from `handle_client_connection` purely to
+// preserve `?` ergonomics.
+fn dispatch_client_message(
+    conn: Stream,
     control_tx: &crossbeam_channel::Sender<ControlMessage>,
     statuses: &StatusMap,
     progress: &ProgressMap,
     subscribers: &ProgressSubscribers,
-) -> WatchResult<bool> {
+) -> WatchResult<()> {
     let mut conn = BufReader::new(conn);
 
-    read_full_message(&mut conn, buffer)?;
-    let (msg, _): (ClientMessage, usize) = bincode::borrow_decode_from_slice(buffer, BINCODE_CFG)?;
+    let msg_len = {
+        let mut len_buf = [0u8; 4];
+        conn.read_exact(&mut len_buf)?;
+        u32::from_le_bytes(len_buf) as usize
+    };
+    let mut buffer = [0u8; 6]; // 1 byte variant index + up to 5 bytes varint u32 (if present)
+    if msg_len > buffer.len() {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "Client message too large: {msg_len} bytes > {}",
+                buffer.len()
+            ),
+        ))?;
+    }
+    conn.read_exact(&mut buffer[..msg_len])?;
+    let (msg, _): (ClientMessage, usize) =
+        bincode::borrow_decode_from_slice(&buffer[..msg_len], BINCODE_CFG)?;
     info!("Received client message: {msg:?}");
 
     match msg {
@@ -107,7 +135,6 @@ pub(super) fn handle_client_connection(
             control_tx
                 .send(ControlMessage::Shutdown { conn })
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::BrokenPipe, e.to_string()))?;
-            return Ok(true);
         }
         ClientMessage::Debug => {
             control_tx
@@ -116,7 +143,7 @@ pub(super) fn handle_client_connection(
         }
     }
 
-    Ok(false)
+    Ok(())
 }
 
 /// Handles a client's request for submodule statuses.
