@@ -221,7 +221,8 @@ fn try_send_progress_update(
     drop(progress_queue);
 
     let progress = ServerMessage::Indexing { curr, total };
-    let mut progress_msg = [0; 10]; // statically determined an upper bound of 10 bytes
+    // 1 byte variant index + up to 5 bytes varint u32 each (if present)
+    let mut progress_msg = [0; 11];
     let progress_msg_len = bincode::encode_into_slice(progress, &mut progress_msg, BINCODE_CFG)?;
     write_full_message(conn, &progress_msg[..progress_msg_len])?;
 
