@@ -276,7 +276,7 @@ fn get_submod_status(
 ) -> WatchResult<StatusSummary> {
     let lock = LockFileGuard::acquire(lock_path, cancel);
     let status: StatusSummary = match lock {
-        Ok(ref _lock) => repo
+        Ok(_) => repo
             .submodule_status(relative_path, git2::SubmoduleIgnore::None)?
             .into(),
         Err(WatchError::LockFileAcquire(_)) => {
@@ -1005,10 +1005,41 @@ impl WatchServer {
         });
     }
 
+    /// Handles a debug request from a client by serializing and sending the current server state.
+    #[cold]
+    fn handle_debug_request(
+        &self,
+        conn: &mut BufReader<Stream>,
+        in_flight: &Arc<(Mutex<InFlightTracker>, Condvar)>,
+    ) {
+        let state = self.gather_debug_state(in_flight);
+        let msg = ServerMessage::DebugInfo(state);
+        match bincode::encode_to_vec(msg, BINCODE_CFG) {
+            Ok(serialized) => {
+                if let Err(e) = write_full_message(conn, &serialized) {
+                    error!("Failed to send debug state -- {e}");
+                }
+            }
+            Err(e) => {
+                error!("Failed to encode debug state -- {e}");
+            }
+        }
+    }
+
+    /// Logs a watcher error and records it in `last_watcher_error`.
+    fn handle_watcher_error(&mut self, index: usize, error: &notify::Error) -> HandleEventsExit {
+        let msg = format!(
+            "Watcher error for {}: {error}",
+            self.watchers[index].relative_path
+        );
+        error!("{msg}\nReindexing to reset watchers...");
+        self.last_watcher_error = Some(msg);
+        HandleEventsExit::WatcherError { index }
+    }
+
     /// The "meat" of the logic for the watch server. Handles incoming watcher events and updates
     /// server state accordingly. This function will only exit if a reindex is required or
     /// requested, a shutdown is received via the control channel, or if a watcher error occurs.
-    #[allow(clippy::too_many_lines)]
     fn handle_events(&mut self) -> WatchResult<HandleEventsExit> {
         let mut sel = crossbeam_channel::Select::new();
         // filesystem watchers
@@ -1039,18 +1070,7 @@ impl WatchServer {
                         return Ok(HandleEventsExit::Shutdown { conn });
                     }
                     ControlMessage::Debug { mut conn } => {
-                        let state = self.gather_debug_state(&in_flight);
-                        let msg = ServerMessage::DebugInfo(state);
-                        match bincode::encode_to_vec(msg, BINCODE_CFG) {
-                            Ok(serialized) => {
-                                if let Err(e) = write_full_message(&mut conn, &serialized) {
-                                    error!("Failed to send debug state -- {e}");
-                                }
-                            }
-                            Err(e) => {
-                                error!("Failed to encode debug state -- {e}");
-                            }
-                        }
+                        self.handle_debug_request(&mut conn, &in_flight);
                         continue;
                     }
                 }
@@ -1111,14 +1131,8 @@ impl WatchServer {
                     }
                 }
                 Err(e) => {
-                    let msg = format!(
-                        "Watcher error for {}: {e}",
-                        self.watchers[index].relative_path
-                    );
-                    error!("{msg}\nReindexing to reset watchers...");
-                    self.last_watcher_error = Some(msg);
                     wait_for_in_flight(&in_flight);
-                    return Ok(HandleEventsExit::WatcherError { index });
+                    return Ok(self.handle_watcher_error(index, &e));
                 }
             }
         }
