@@ -37,6 +37,7 @@ impl ProgressUpdate {
 /// # Panics
 ///
 /// Panics if either mutex has been poisoned
+#[inline]
 #[expect(clippy::significant_drop_tightening)]
 pub(super) fn broadcast_progress(
     subscribers: &ProgressSubscribers,

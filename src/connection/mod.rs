@@ -64,6 +64,7 @@ pub struct DebugState {
 /// # Errors
 ///
 /// Returns `std::io::Error` if writing to `conn` fails
+#[inline]
 pub fn write_full_message(conn: &mut BufReader<Stream>, msg: &[u8]) -> std::io::Result<()> {
     let len_bytes = (msg.len() as u32).to_le_bytes();
     conn.get_mut().write_all(&len_bytes)?;
@@ -155,6 +156,7 @@ fn try_lock<T>(mutex: &Mutex<T>) -> Option<MutexGuard<'_, T>> {
 /// # Panics
 ///
 /// Panics if `mutex` has been poisoned
+#[inline]
 fn try_lock_for<T>(mutex: &Mutex<T>, timeout: Duration) -> Option<MutexGuard<'_, T>> {
     let start = Instant::now();
     loop {
