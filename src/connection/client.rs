@@ -1,5 +1,6 @@
-use std::{io::BufReader, path::Path};
+use std::{io::BufReader, path::Path, time::Duration};
 
+use indicatif::{ProgressBar, ProgressStyle};
 use interprocess::local_socket::{Stream, traits::Stream as _};
 use log::error;
 
@@ -7,7 +8,7 @@ use crate::{
     StatusSummary,
     connection::{
         BINCODE_CFG, ClientMessage, DebugState, ServerMessage, ipc_name, read_full_message,
-        write_full_message,
+        spawn_daemon, write_full_message,
     },
     create_progress_bar,
     debug::DebugResult,
@@ -89,6 +90,53 @@ pub fn request_shutdown(root_path: &Path) -> ShutdownResult<()> {
     Ok(())
 }
 
+/// Connects to the watch server for `root_path`, starting one if necessary.
+///
+/// On the happy path (server already running), this is a single `Stream::connect`
+/// call with no overhead. If the connection fails with `ConnectionRefused` or
+/// `NotFound`, a new server is spawned and the connection is retried until
+/// it succeeds or the user terminates the program.
+fn connect_to_server(root_path: &Path) -> StatusResult<BufReader<Stream>> {
+    let name = ipc_name(root_path)?;
+    match Stream::connect(name) {
+        Ok(conn) => return Ok(BufReader::new(conn)),
+        Err(e) if server_not_started(&e) => {}
+        Err(e) => Err(e)?,
+    }
+
+    spawn_daemon(root_path, None)?;
+
+    #[allow(clippy::literal_string_with_formatting_args)]
+    let spinner = ProgressBar::new_spinner()
+        .with_style(ProgressStyle::with_template("{spinner} {msg}").unwrap());
+    spinner.set_message("Starting watch server...");
+    spinner.enable_steady_tick(Duration::from_millis(80));
+
+    let name = ipc_name(root_path)?;
+    loop {
+        match Stream::connect(name.clone()) {
+            Ok(conn) => {
+                spinner.finish_and_clear();
+                return Ok(BufReader::new(conn));
+            }
+            Err(e) if server_not_started(&e) => {}
+            Err(e) => {
+                spinner.abandon_with_message("Failed to connect to watch server".to_string());
+                Err(e)?;
+            }
+        }
+        std::thread::yield_now();
+    }
+}
+
+#[inline]
+fn server_not_started(e: &std::io::Error) -> bool {
+    matches!(
+        e.kind(),
+        std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
+    )
+}
+
 /// Requests the statuses of the submodules within `path` from the watch server
 ///
 /// # Errors
@@ -99,10 +147,7 @@ pub fn request_shutdown(root_path: &Path) -> ShutdownResult<()> {
 ///
 /// Panics if a malformed response from the watch server is received
 pub fn request_status(root_path: &Path) -> StatusResult<Vec<(String, StatusSummary)>> {
-    let name = ipc_name(root_path)?;
-
-    let conn = Stream::connect(name)?;
-    let mut conn = BufReader::new(conn);
+    let mut conn = connect_to_server(root_path)?;
     let status_req = ClientMessage::Status(std::process::id());
     let mut req_msg = [0; 6]; // statically determined an upper bound of 6 bytes
     let req_msg_len = bincode::encode_into_slice(&status_req, &mut req_msg, BINCODE_CFG)?;

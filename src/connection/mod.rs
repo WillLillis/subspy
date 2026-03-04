@@ -141,6 +141,44 @@ pub fn create_listener(root_dir: &Path) -> std::io::Result<Listener> {
     Ok(listener)
 }
 
+/// Spawns the watch server as a fully detached background process for `path`.
+///
+/// The server is started by re-invoking the current executable with
+/// `start <path> --foreground`.
+///
+/// # Errors
+///
+/// Returns `std::io::Error` if the current executable path cannot be determined
+/// or the child process cannot be spawned.
+pub fn spawn_daemon(path: &Path, log_level: Option<&str>) -> std::io::Result<()> {
+    let exe = std::env::current_exe()?;
+    let mut cmd = std::process::Command::new(exe);
+    cmd.arg("start")
+        .arg(path)
+        .arg("--foreground")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    if let Some(level) = log_level {
+        cmd.args(["--log-level", level]);
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt as _;
+        // https://learn.microsoft.com/en-us/windows/win32/procthread/process-creation-flags#flags
+        // The new process does not inherit its parent's console
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        // The new process is the root process of a new process group...If this flag is specified,
+        // CTRL+C signals will be disabled for all processes within the new process group.
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+    }
+
+    cmd.spawn()?;
+    Ok(())
+}
+
 /// Attempts to acquire `mutex` without blocking.
 ///
 /// # Panics

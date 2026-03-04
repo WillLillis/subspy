@@ -629,15 +629,7 @@ pub fn status(root_path: &Path, repo_kind: RepoKind) -> StatusResult<()> {
         .collect();
 
     let submodule_statuses = if repo_kind == RepoKind::WithSubmodules {
-        match request_status(root_path) {
-            Ok(statuses) => statuses,
-            Err(e) => {
-                eprintln!(
-                    "Failed to retrieve submodule statuses. Have you started a watch server?"
-                );
-                Err(e)?
-            }
-        }
+        request_status(root_path)?
     } else {
         Vec::new()
     };

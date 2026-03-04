@@ -36,9 +36,7 @@ Commands:
 Options:
   -h, --help  Print help
 
-~/very_large_project/ > subspy start
-# Work on your project as normal
-~/very_large_project/ > subspy status
+~/very_large_project/ > subspy status # spawns a watch server if needed
 -- top level status here --
 ~/very_large_project/ > subspy status some/subdirectory/
 -- other status here --
@@ -59,18 +57,25 @@ Note that the project's current Minimum Supported Rust Version (MSRV) is 1.87.0.
 #### Outrageous Anecdotal Performance Claims
 
 I developed this tool to remove an annoyance at work. Here's a comparison between `subspy status` and `git status` on a
-repo with >200 submodules, running on Windows 11 with git bash. The `subspy` measurement was taken after the initial `watch`
-indexing step completed. The `git` measurement was taken after already running `git status` to "preheat" any caching mechanisms
-git may have in place.
+repo with >200 submodules, running on Windows 11 with git bash. The `subspy` measurement was taken twice and both times
+are shown. The first measures the time to start the watch server, connect to it, and display the status. The second connects
+to the existing server and display the status.  The `git` measurement was taken after already running `git status` to "preheat"
+any caching mechanisms git may have in place. Note that making changes to a repository may increase the runtime of the next
+`git status` invocation, while `subspy status`'s should remain constant.
 
 ```sh
-~/very_large_project/ > time subspy status
-real    0m0.099s
+~/very_large_project/ > time subspy status # Spawns a new watch server
+real    0m0.745s
+user    0m0.000s
+sys     0m0.000s
+
+~/very_large_project/ > time subspy status # Connects to previously spawned server
+real    0m0.117s
 user    0m0.000s
 sys     0m0.000s
 
 ~/very_large_project/ > time git status
-real    0m11.770s
+real    0m15.667s
 user    0m0.015s
 sys     0m0.000s
 ```

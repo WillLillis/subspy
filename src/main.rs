@@ -1,9 +1,4 @@
-use std::{
-    env::current_dir,
-    io,
-    path::{Path, PathBuf},
-    process,
-};
+use std::{env::current_dir, io, path::PathBuf, process};
 
 use anstyle::{AnsiColor, Color, Style};
 use clap::{Args, Command, FromArgMatches as _, Subcommand, ValueEnum};
@@ -14,12 +9,12 @@ use thiserror::Error;
 
 use subspy::{
     DOT_GIT, DOT_GITMODULES, RepoKind,
-    connection::{client::request_reindex, watch_server::watch},
+    connection::{client::request_reindex, spawn_daemon, watch_server::watch},
     debug::{DebugError, debug},
     reindex::ReindexError,
     shutdown::{ShutdownError, shutdown},
     status::{StatusError, status},
-    watch::{WatchError, WatchResult},
+    watch::WatchError,
 };
 
 #[derive(Subcommand, Debug)]
@@ -230,39 +225,10 @@ impl Start {
         if self.foreground {
             Ok(watch(true_path.as_path())?)
         } else {
-            Ok(Self::spawn_daemon(&true_path, self.log_level)?)
+            let level_str = self.log_level.map(|l| l.to_string());
+            spawn_daemon(&true_path, level_str.as_deref()).map_err(WatchError::from)?;
+            Ok(())
         }
-    }
-
-    /// Spawns the watch server as a fully detached background process.
-    fn spawn_daemon(path: &Path, log_level: Option<LogLevel>) -> WatchResult<()> {
-        let log_level = log_level.map(|l| l.to_string());
-        let exe = std::env::current_exe()?;
-        let mut cmd = process::Command::new(exe);
-        cmd.arg("start")
-            .arg(path)
-            .arg("--foreground")
-            .stdin(process::Stdio::null())
-            .stdout(process::Stdio::null())
-            .stderr(process::Stdio::null());
-        if let Some(log_level) = log_level {
-            cmd.args(["--log-level", &log_level]);
-        }
-
-        #[cfg(target_os = "windows")]
-        {
-            use std::os::windows::process::CommandExt as _;
-            // https://learn.microsoft.com/en-us/windows/win32/procthread/process-creation-flags#flags
-            // The new process does not inherit its parent's console
-            const DETACHED_PROCESS: u32 = 0x0000_0008;
-            // The new process is the root process of a new process group...If this flag is specified,
-            // CTRL+C signals will be disabled for all processes within the new process group.
-            const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-            cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
-        }
-
-        cmd.spawn()?;
-        Ok(())
     }
 }
 
