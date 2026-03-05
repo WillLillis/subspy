@@ -819,9 +819,28 @@ impl WatchServer {
             // File renames within submodule source trees are legitimate changes, but we
             // can't allow Modify(Name) events through globally because git's
             // `index.lock` -> `index` rename would trigger spurious reindexes.
-            let is_root_watcher = rel_path.eq(DOT_GIT) || rel_path.eq(DOT_GITMODULES);
-            if is_root_watcher || !matches!(event.kind, EventKind::Modify(ModifyKind::Name(_))) {
-                return None;
+            //
+            // However, renames under `.git/modules/` _are_ meaningful, e.g. a
+            // `git add` inside a submodule produces only a `MOVED_TO index` event
+            // on Linux (inotify), and without this carve-out it would be silently
+            // dropped. Windows reports these as different event kinds, so this is
+            // only needed on non-Windows platforms.
+            #[cfg(not(target_os = "windows"))]
+            let is_submod_modules_rename = rel_path.eq(DOT_GIT)
+                && matches!(event.kind, EventKind::Modify(ModifyKind::Name(_)))
+                && event
+                    .paths
+                    .iter()
+                    .any(|p| p.starts_with(&self.root_modules_path));
+            #[cfg(target_os = "windows")]
+            let is_submod_modules_rename = false;
+            if !is_submod_modules_rename {
+                let is_root_watcher = rel_path.eq(DOT_GIT) || rel_path.eq(DOT_GITMODULES);
+                if is_root_watcher
+                    || !matches!(event.kind, EventKind::Modify(ModifyKind::Name(_)))
+                {
+                    return None;
+                }
             }
         }
 
