@@ -765,15 +765,20 @@ impl WatchServer {
 
     /// Finds the watcher index of the submodule whose `.git/modules` path matches the event.
     #[inline]
-    fn find_submod_for_event(&self, event: &Event) -> Option<usize> {
-        self.watchers.iter().enumerate().find_map(|(i, watcher)| {
-            let submod_modules_path = watcher.lock_file_path.as_ref().unwrap().parent().unwrap();
-            event
-                .paths
-                .iter()
-                .any(|p| p.starts_with(submod_modules_path))
-                .then_some(i)
-        })
+    fn submod_for_event(&self, event: &Event) -> Option<usize> {
+        self.watchers
+            .iter()
+            .enumerate()
+            .skip(ROOT_WATCHER_COUNT)
+            .find_map(|(i, watcher)| {
+                let submod_modules_path =
+                    watcher.lock_file_path.as_ref().unwrap().parent().unwrap();
+                event
+                    .paths
+                    .iter()
+                    .any(|p| p.starts_with(submod_modules_path))
+                    .then_some(i)
+            })
     }
 
     #[inline]
@@ -827,11 +832,11 @@ impl WatchServer {
                 .any(|p| p.starts_with(&self.root_modules_path))
             {
                 if event.paths.iter().any(|p| Self::is_index_or_head_path(p)) {
-                    if matches!(event.kind, EventKind::Remove(_)) {
-                        None
-                    } else {
-                        Some(EventType::SubmoduleGitOperation)
-                    }
+                    // NOTE: We don't take the same `Remove` defensive measures for submodule
+                    // `index`/`HEAD` operations as we do with the root repository. This is because
+                    // the event loop continues to run (as opposed to breaking out for a reindex),
+                    // so the rebase start event is caught in time.
+                    Some(EventType::SubmoduleGitOperation)
                 } else if self.is_submod_rebase_start_event(event) {
                     Some(EventType::SubmoduleRebaseStart)
                 } else if self.is_submod_rebase_end_event(event) {
@@ -1099,7 +1104,7 @@ impl WatchServer {
                             }
                         }
                         Some(EventType::SubmoduleGitOperation) => {
-                            if let Some(i) = self.find_submod_for_event(&event)
+                            if let Some(i) = self.submod_for_event(&event)
                                 && !self.skip_set.contains(&self.watchers[i].relative_path)
                             {
                                 self.try_spawn_submod_update(i, &in_flight, &tl_repo);
@@ -1112,7 +1117,7 @@ impl WatchServer {
                         // through when git fails to acquire `index.lock`. Instead, we pause
                         // updating the relevant submodule until the rebase is completed.
                         Some(EventType::SubmoduleRebaseStart) => {
-                            if let Some(i) = self.find_submod_for_event(&event) {
+                            if let Some(i) = self.submod_for_event(&event) {
                                 cancel_submod_update(i, &in_flight);
                                 self.skip_set.insert(self.watchers[i].relative_path.clone());
                                 self.submod_statuses.lock().expect("Mutex poisoned").insert(
@@ -1122,7 +1127,7 @@ impl WatchServer {
                             }
                         }
                         Some(EventType::SubmoduleRebaseEnd) => {
-                            if let Some(i) = self.find_submod_for_event(&event) {
+                            if let Some(i) = self.submod_for_event(&event) {
                                 self.skip_set.remove(&self.watchers[i].relative_path);
                                 self.try_spawn_submod_update(i, &in_flight, &tl_repo);
                             }
