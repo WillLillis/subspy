@@ -582,6 +582,40 @@ fn display_status(
     Ok(())
 }
 
+/// Returns the relative paths of newly-added submodules.
+///
+/// These are submodules whose gitlink has been staged via `git submodule add`
+/// but not yet committed (present in the index but absent from HEAD).
+///
+/// # Errors
+///
+/// Returns `Err` if the repository index cannot be read.
+pub fn new_submodule_paths(repo: &Repository) -> StatusResult<Vec<String>> {
+    let head_tree = repo.head().ok().and_then(|h| h.peel_to_tree().ok());
+    let index = repo.index()?;
+    let paths = index
+        .iter()
+        .filter(|entry| {
+            // `FileMode::Commit` is the gitlink mode used for submodule entries. Note that
+            // `FileMode::Commit as u32` gives the enum discriminant (6), not the mode value,
+            // so the `From` impl must be used.
+            entry.mode == u32::from(git2::FileMode::Commit)
+                && head_tree.as_ref().is_none_or(|t| {
+                    std::str::from_utf8(&entry.path).is_ok_and(|p| {
+                        matches!(
+                            t.get_path(Path::new(p)),
+                            // New submodules are staged but not in the HEAD commit yet, so looking
+                            // them up should return `NotFound`.
+                            Err(e) if e.code() == git2::ErrorCode::NotFound
+                        )
+                    })
+                })
+        })
+        .filter_map(|entry| String::from_utf8(entry.path).ok())
+        .collect();
+    Ok(paths)
+}
+
 /// Retrieves and displays the statuses for the repository at `path`.
 ///
 /// # Errors
@@ -603,30 +637,7 @@ pub fn status(root_path: &Path, repo_kind: RepoKind, display_progress: bool) -> 
 
     let non_submodule_statuses = repo.statuses(Some(&mut opts))?;
 
-    // `exclude_submodules` also filters out newly-staged gitlinks (INDEX_NEW submodules), so we
-    // detect those separately by scanning the index for gitlink entries absent from HEAD.
-    let head_tree = repo.head().ok().and_then(|h| h.peel_to_tree().ok());
-    let index = repo.index()?;
-    let new_submodule_paths: Vec<String> = index
-        .iter()
-        .filter(|entry| {
-            // `FileMode::Commit` is the gitlink mode used for submodule entries. Note that
-            // `FileMode::Commit as u32` gives the enum discriminant (6), not the mode value,
-            // so the `From` impl must be used.
-            entry.mode == u32::from(git2::FileMode::Commit)
-                && head_tree.as_ref().is_none_or(|t| {
-                    std::str::from_utf8(&entry.path).is_ok_and(|p| {
-                        matches!(
-                            t.get_path(Path::new(p)),
-                            // New submodules are staged but not in the HEAD commit yet, so looking
-                            // them up should return `NotFound`.
-                            Err(e) if e.code() == git2::ErrorCode::NotFound
-                        )
-                    })
-                })
-        })
-        .filter_map(|entry| String::from_utf8(entry.path).ok())
-        .collect();
+    let new_submodule_paths = new_submodule_paths(&repo)?;
 
     let submodule_statuses = if repo_kind == RepoKind::WithSubmodules {
         request_status(root_path, display_progress)?

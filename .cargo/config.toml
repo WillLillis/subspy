@@ -1,0 +1,5 @@
+# Integration tests spin up real watch servers with recursive inotify
+# watchers. Running them in parallel exhausts file descriptor / inotify
+# watch limits, so we enforce serial execution.
+[env]
+RUST_TEST_THREADS = "1"

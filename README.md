@@ -82,7 +82,6 @@ sys     0m0.000s
 
 #### Future Improvements
 
-- [ ] Tests
 - [ ] crates.io releases if desired
 
 #### Known Issues
