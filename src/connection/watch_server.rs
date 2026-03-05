@@ -1171,6 +1171,9 @@ const fn event_is_relevant(event: &Event) -> bool {
         EventKind::Remove(_)
             | EventKind::Access(AccessKind::Close(AccessMode::Write))
             | EventKind::Create(_)
+            // Windows and macOS don't produce `Close(Write)`; file modifications
+            // are reported as `Modify(Data(_))` instead.
+            | EventKind::Modify(ModifyKind::Data(_))
     )
 }
 
