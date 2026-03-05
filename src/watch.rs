@@ -53,6 +53,6 @@ impl LockFileError {
 /// # Errors
 ///
 /// Returns `Err` if watching fails.
-pub fn watch_project(path: &Path) -> WatchResult<()> {
-    watch(path)
+pub fn watch_project(path: &Path, display_progress: bool) -> WatchResult<()> {
+    watch(path, display_progress)
 }

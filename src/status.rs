@@ -587,7 +587,7 @@ fn display_status(
 /// # Errors
 ///
 /// Returns `Err` if statuses cannot be retrieved from the repository or watch server
-pub fn status(root_path: &Path, repo_kind: RepoKind) -> StatusResult<()> {
+pub fn status(root_path: &Path, repo_kind: RepoKind, display_progress: bool) -> StatusResult<()> {
     let repo = Repository::open(root_path)?;
 
     let mut opts = git2::StatusOptions::new();
@@ -629,7 +629,7 @@ pub fn status(root_path: &Path, repo_kind: RepoKind) -> StatusResult<()> {
         .collect();
 
     let submodule_statuses = if repo_kind == RepoKind::WithSubmodules {
-        request_status(root_path)?
+        request_status(root_path, display_progress)?
     } else {
         Vec::new()
     };

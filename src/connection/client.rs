@@ -22,7 +22,11 @@ use crate::{
 /// # Errors
 ///
 /// Returns `Err` if client-server communication or bincode encoding fails.
-pub fn request_reindex(root_path: &Path, replace_watchers: bool) -> ReindexResult<()> {
+pub fn request_reindex(
+    root_path: &Path,
+    replace_watchers: bool,
+    display_progress: bool,
+) -> ReindexResult<()> {
     let name = ipc_name(root_path)?;
 
     let conn = Stream::connect(name)?;
@@ -36,7 +40,8 @@ pub fn request_reindex(root_path: &Path, replace_watchers: bool) -> ReindexResul
     let msg_len = bincode::encode_into_slice(&status_req, &mut msg, BINCODE_CFG)?;
     write_full_message(&mut conn, &msg[..msg_len])?;
 
-    let progress_bar = create_progress_bar(0, "Reindexing in progress...");
+    let progress_bar =
+        display_progress.then(|| create_progress_bar(0, "Reindexing in progress..."));
     let mut buffer = Vec::with_capacity(1024);
     loop {
         read_full_message(&mut conn, &mut buffer)?;
@@ -45,14 +50,18 @@ pub fn request_reindex(root_path: &Path, replace_watchers: bool) -> ReindexResul
         else {
             break;
         };
-        progress_bar.set_position(u64::from(curr));
-        progress_bar.set_length(u64::from(total));
+        if let Some(pb) = &progress_bar {
+            pb.set_position(u64::from(curr));
+            pb.set_length(u64::from(total));
+        }
         if curr == total {
             break;
         }
     }
 
-    progress_bar.finish_with_message("Reindex complete");
+    if let Some(pb) = &progress_bar {
+        pb.finish_with_message("Reindex complete");
+    }
 
     Ok(())
 }
@@ -146,14 +155,17 @@ fn server_not_started(e: &std::io::Error) -> bool {
 /// # Panics
 ///
 /// Panics if a malformed response from the watch server is received
-pub fn request_status(root_path: &Path) -> StatusResult<Vec<(String, StatusSummary)>> {
+pub fn request_status(
+    root_path: &Path,
+    display_progress: bool,
+) -> StatusResult<Vec<(String, StatusSummary)>> {
     let mut conn = connect_to_server(root_path)?;
     let status_req = ClientMessage::Status(std::process::id());
     let mut req_msg = [0; 6]; // statically determined an upper bound of 6 bytes
     let req_msg_len = bincode::encode_into_slice(&status_req, &mut req_msg, BINCODE_CFG)?;
     write_full_message(&mut conn, &req_msg[..req_msg_len])?;
 
-    let progress_bar = create_progress_bar(0, "Indexing in progress...");
+    let progress_bar = display_progress.then(|| create_progress_bar(0, "Indexing in progress..."));
     // TODO: Get some impirical data on the actual buffer size we need
     let mut buffer = Vec::with_capacity(1024);
     loop {
@@ -163,12 +175,16 @@ pub fn request_status(root_path: &Path) -> StatusResult<Vec<(String, StatusSumma
             bincode::borrow_decode_from_slice(&buffer, BINCODE_CFG)?;
         match resp_msg {
             ServerMessage::Status(items) => {
-                progress_bar.finish_and_clear();
+                if let Some(pb) = &progress_bar {
+                    pb.finish_and_clear();
+                }
                 return Ok(items);
             }
             ServerMessage::Indexing { curr, total } => {
-                progress_bar.set_length(u64::from(total));
-                progress_bar.set_position(u64::from(curr));
+                if let Some(pb) = &progress_bar {
+                    pb.set_length(u64::from(total));
+                    pb.set_position(u64::from(curr));
+                }
             }
             other => Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,

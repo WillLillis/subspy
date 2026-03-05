@@ -1,4 +1,4 @@
-use std::{env::current_dir, io, path::PathBuf, process};
+use std::{env::current_dir, io, io::IsTerminal as _, path::PathBuf, process};
 
 use anstyle::{AnsiColor, Color, Style};
 use clap::{Args, Command, FromArgMatches as _, Subcommand, ValueEnum};
@@ -194,7 +194,12 @@ impl Reindex {
         if repo_kind != RepoKind::WithSubmodules {
             return Err(RunError::server_path(true_path));
         }
-        Ok(request_reindex(true_path.as_path(), self.replace_watchers)?)
+        let display_progress = std::io::stderr().is_terminal();
+        Ok(request_reindex(
+            true_path.as_path(),
+            self.replace_watchers,
+            display_progress,
+        )?)
     }
 }
 
@@ -211,7 +216,8 @@ impl Stop {
 impl Status {
     fn run(self) -> RunResult<()> {
         let (true_path, repo_kind) = get_project_path(self.dir)?;
-        Ok(status(true_path.as_path(), repo_kind)?)
+        let display_progress = std::io::stderr().is_terminal();
+        Ok(status(true_path.as_path(), repo_kind, display_progress)?)
     }
 }
 
@@ -223,7 +229,7 @@ impl Start {
         }
 
         if self.foreground {
-            Ok(watch(true_path.as_path())?)
+            Ok(watch(true_path.as_path(), std::io::stderr().is_terminal())?)
         } else {
             let level_str = self.log_level.map(|l| l.to_string());
             spawn_daemon(&true_path, level_str.as_deref()).map_err(WatchError::from)?;

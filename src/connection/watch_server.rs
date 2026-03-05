@@ -684,6 +684,7 @@ impl WatchServer {
     #[expect(clippy::significant_drop_tightening)]
     fn watch(
         &mut self,
+        display_progress: bool,
         status_guard: MutexGuard<'_, BTreeMap<String, StatusSummary>>,
     ) -> WatchResult<()> {
         // Place watches on `.git/` and `.gitmodules`. These watches will live for the entirety of
@@ -692,7 +693,7 @@ impl WatchServer {
 
         // Initial indexing with the pre-acquired guard
         let repo = Repository::open(&self.root_path)?;
-        self.populate_status_map(&repo, true, true, status_guard)?;
+        self.populate_status_map(&repo, display_progress, true, status_guard)?;
         let mut exit_reason = self.handle_events()?;
 
         // Subsequent reindex iterations
@@ -836,8 +837,7 @@ impl WatchServer {
             let is_submod_modules_rename = false;
             if !is_submod_modules_rename {
                 let is_root_watcher = rel_path.eq(DOT_GIT) || rel_path.eq(DOT_GITMODULES);
-                if is_root_watcher
-                    || !matches!(event.kind, EventKind::Modify(ModifyKind::Name(_)))
+                if is_root_watcher || !matches!(event.kind, EventKind::Modify(ModifyKind::Name(_)))
                 {
                     return None;
                 }
@@ -1187,7 +1187,7 @@ const fn event_is_relevant(event: &Event) -> bool {
 ///
 /// Panics if the `SUBMOD_STATUSES` mutex is poisoned.
 #[expect(clippy::significant_drop_tightening)]
-pub fn watch(root_dir: &Path) -> WatchResult<()> {
+pub fn watch(root_dir: &Path, display_progress: bool) -> WatchResult<()> {
     let (control_tx, control_rx) = crossbeam_channel::unbounded();
     let mut server = WatchServer::new(root_dir, control_rx);
 
@@ -1198,7 +1198,7 @@ pub fn watch(root_dir: &Path) -> WatchResult<()> {
     let status_guard = status_lock.lock().expect("Mutex poisoned");
 
     server.spawn_listener(control_tx)?;
-    server.watch(status_guard)?;
+    server.watch(display_progress, status_guard)?;
 
     Ok(())
 }
