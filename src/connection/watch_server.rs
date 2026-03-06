@@ -473,6 +473,12 @@ impl WatchServer {
         // return code.
         let submodules = {
             let _lock = LockFileGuard::acquire(&self.root_lock_path, None)?;
+            // The Repository may have been opened in a previous reindex
+            // iteration — refresh the in-memory index so `submodules()`
+            // sees the current submodule set.
+            if let Ok(mut idx) = repo.index() {
+                let _ = idx.read(false);
+            }
             repo.submodules()?
         };
 
@@ -830,18 +836,20 @@ impl WatchServer {
             // However, renames under `.git/modules/` _are_ meaningful, e.g. a
             // `git add` inside a submodule produces only a `MOVED_TO index` event
             // on Linux (inotify), and without this carve-out it would be silently
-            // dropped. Windows reports these as different event kinds, so this is
-            // only needed on non-Windows platforms.
+            // dropped. Root index renames (`index.lock`->`index`) also need
+            // detection so that operations like `git add <submodule>` in the
+            // parent repo are visible. Windows reports these as different event
+            // kinds, so this is only needed on non-Windows platforms.
             #[cfg(not(target_os = "windows"))]
-            let is_submod_modules_rename = rel_path.eq(DOT_GIT)
+            let is_git_dir_rename = rel_path.eq(DOT_GIT)
                 && matches!(event.kind, EventKind::Modify(ModifyKind::Name(_)))
                 && event
                     .paths
                     .iter()
-                    .any(|p| p.starts_with(&self.root_modules_path));
+                    .any(|p| p.starts_with(&self.root_modules_path) || p.eq(&self.root_index_path));
             #[cfg(target_os = "windows")]
-            let is_submod_modules_rename = false;
-            if !is_submod_modules_rename {
+            let is_git_dir_rename = false;
+            if !is_git_dir_rename {
                 let is_root_watcher = rel_path.eq(DOT_GIT) || rel_path.eq(DOT_GITMODULES);
                 if is_root_watcher || !matches!(event.kind, EventKind::Modify(ModifyKind::Name(_)))
                 {
@@ -879,18 +887,15 @@ impl WatchServer {
                     None
                 }
             } else if event.paths.iter().any(|p| p.eq(&self.root_index_path)) {
-                // HACK: When `git rebase ...` is issued, git will begin by acquiring `index.lock`,
-                // gathering some information about the current index (looking at all of the repo's
-                // submodules, why isn't the index considered up to date at this point?), writing
-                // the new `index` contents to `index.lock`, _deleting_ `index`, and renaming
-                // `index.lock` to `index`. Immediately after, the `.git/rebase-merge` directory is
-                // created, signaling the start of a rebase. Because these `index` operations happen
-                // before we can detect the rebase, they trigger a root reindex and cause the rebase
-                // to fail because git fails to acquire the `index.lock` file (why release it in the
-                // first place?). As a workaround, we simply ignore these events and trigger a root
-                // reindex after the rebase is completed. If git applies this pattern for other
-                // operations that I haven't tested, we may be in trouble. So far though, this
-                // approach seems to be ok.
+                // Git's atomic index update pattern: write to `index.lock`,
+                // delete `index`, rename `index.lock` → `index`. The `Remove`
+                // event for the transient deletion is ignored — acting on it
+                // would race with the immediately following rename. All other
+                // events (writes, renames) are classified as `RootGitOperation`
+                // and handled in the event loop by spawning lock-free rayon
+                // tasks to re-check submodule statuses. This avoids acquiring
+                // `index.lock` (which would contend with concurrent git
+                // operations like rebase).
                 if matches!(event.kind, EventKind::Remove(_)) {
                     None
                 } else {
@@ -1059,6 +1064,17 @@ impl WatchServer {
                     break;
                 }
 
+                // Refresh the in-memory index from disk if it changed.
+                // The thread-local Repository caches the index after the
+                // first load; without this, a task spawned from a
+                // RootGitOperation (e.g. `git add <submodule>`) would
+                // read the stale pre-add index and miss the staged gitlink.
+                // `read(false)` only stats the file and is essentially free
+                // when the index hasn't changed.
+                if let Ok(mut idx) = repo.index() {
+                    let _ = idx.read(false);
+                }
+
                 let read_ok =
                     match repo.submodule_status(&relative_path, git2::SubmoduleIgnore::None) {
                         Ok(st) => {
@@ -1205,8 +1221,31 @@ impl WatchServer {
                     match self.get_event_type(&event, rel_path) {
                         Some(EventType::RootGitOperation) => {
                             if !self.root_rebasing {
-                                wait_for_in_flight(&in_flight);
-                                return Ok(HandleEventsExit::ReindexEvent);
+                                if rel_path == DOT_GITMODULES {
+                                    // .gitmodules changed — the submodule set may
+                                    // have changed, requiring a full reindex with
+                                    // watcher replacement.
+                                    wait_for_in_flight(&in_flight);
+                                    return Ok(HandleEventsExit::ReindexEvent);
+                                }
+                                // Root index changed (e.g. `git add <submodule>`).
+                                // Re-check all submodule statuses via the lock-free
+                                // rayon task path. No full reindex needed since the
+                                // submodule set hasn't changed and submodule_status()
+                                // is read-only. During rebase setup this is harmless:
+                                // tasks that hit a transient missing index will retry,
+                                // and the full reindex after RootRebaseEnd corrects
+                                // any stale state.
+                                for i in ROOT_WATCHER_COUNT..self.watchers.len() {
+                                    if !self.skip_set.contains(&self.watchers[i].relative_path) {
+                                        self.try_spawn_submod_update(
+                                            i,
+                                            &in_flight,
+                                            &tl_repo,
+                                            &pending_lock_retries,
+                                        );
+                                    }
+                                }
                             }
                         }
                         Some(EventType::RootRebaseStart) => {
