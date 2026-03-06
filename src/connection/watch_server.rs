@@ -838,17 +838,13 @@ impl WatchServer {
             // on Linux (inotify), and without this carve-out it would be silently
             // dropped. Root index renames (`index.lock`->`index`) also need
             // detection so that operations like `git add <submodule>` in the
-            // parent repo are visible. Windows reports these as different event
-            // kinds, so this is only needed on non-Windows platforms.
-            #[cfg(not(target_os = "windows"))]
+            // parent repo are visible.
             let is_git_dir_rename = rel_path.eq(DOT_GIT)
                 && matches!(event.kind, EventKind::Modify(ModifyKind::Name(_)))
                 && event
                     .paths
                     .iter()
                     .any(|p| p.starts_with(&self.root_modules_path) || p.eq(&self.root_index_path));
-            #[cfg(target_os = "windows")]
-            let is_git_dir_rename = false;
             if !is_git_dir_rename {
                 let is_root_watcher = rel_path.eq(DOT_GIT) || rel_path.eq(DOT_GITMODULES);
                 if is_root_watcher || !matches!(event.kind, EventKind::Modify(ModifyKind::Name(_)))
@@ -1342,8 +1338,8 @@ const fn event_is_relevant(event: &Event) -> bool {
             | EventKind::Access(AccessKind::Close(AccessMode::Write))
             | EventKind::Create(_)
             // Windows and macOS don't produce `Close(Write)`; file modifications
-            // are reported as `Modify(Data(_))` instead.
-            | EventKind::Modify(ModifyKind::Data(_))
+            // are reported as `Modify(...)` instead.
+            | EventKind::Modify(ModifyKind::Any | ModifyKind::Data(_))
     )
 }
 
