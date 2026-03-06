@@ -129,6 +129,9 @@ enum EventType {
     SubmoduleChange,
     /// A change occurred in one of the watched submodule's `.git/` subdirectory
     SubmoduleGitOperation,
+    /// A submodule's `index.lock` was removed, indicating a git operation completed
+    /// or was aborted. Used to re-fire deferred status reads.
+    SubmoduleLockRelease,
     /// A rebase started within a submodule
     SubmoduleRebaseStart,
     /// A rebase ended within a submodule
@@ -863,6 +866,15 @@ impl WatchServer {
                     Some(EventType::SubmoduleRebaseStart)
                 } else if self.is_submod_rebase_end_event(event) {
                     Some(EventType::SubmoduleRebaseEnd)
+                } else if matches!(
+                    event.kind,
+                    EventKind::Remove(_) | EventKind::Modify(ModifyKind::Name(_))
+                ) && event
+                    .paths
+                    .iter()
+                    .any(|p| p.file_name().is_some_and(|n| n == "index.lock"))
+                {
+                    Some(EventType::SubmoduleLockRelease)
                 } else {
                     None
                 }
@@ -938,12 +950,22 @@ impl WatchServer {
     /// If the submodule is already being processed, marks it as dirty so the in-flight task
     /// will re-check after completing. Otherwise, inserts into the processing set and spawns
     /// a rayon task that loops until no more dirty events are pending.
+    ///
+    /// Any previous entry for `index` in `pending_lock_retries` is cleared, since the new
+    /// task supersedes the old retry request.
+    #[allow(clippy::too_many_lines)]
     fn try_spawn_submod_update(
         &self,
         index: usize,
         in_flight: &Arc<(Mutex<InFlightTracker>, Condvar)>,
         tl_repo: &Arc<thread_local::ThreadLocal<Repository>>,
+        pending_lock_retries: &Arc<Mutex<HashSet<usize>>>,
     ) {
+        pending_lock_retries
+            .lock()
+            .expect("pending_lock_retries mutex poisoned")
+            .remove(&index);
+
         let cancel = Arc::new(AtomicBool::new(false));
         {
             let mut tracker = in_flight.0.lock().expect("InFlightTracker mutex poisoned");
@@ -960,17 +982,12 @@ impl WatchServer {
 
         let watcher = &self.watchers[index];
         let relative_path = watcher.relative_path.clone();
-        let lock_file_path = watcher.lock_file_path.as_ref().unwrap_or_else(|| {
-            panic!(
-                "Submodule event for watcher with no cached lock file path\n -- watcher path: {}",
-                watcher.watch_path.display()
-            );
-        }).clone();
 
         let in_flight = Arc::clone(in_flight);
         let statuses = Arc::clone(&self.submod_statuses);
         let tl_repo = Arc::clone(tl_repo);
         let root_path = self.root_path.clone();
+        let pending_retries = Arc::clone(pending_lock_retries);
 
         rayon::spawn(move || {
             let repo = match tl_repo.get_or_try(|| Repository::open(&root_path)) {
@@ -988,32 +1005,86 @@ impl WatchServer {
                 }
             };
 
+            // ## Lock-free submodule status reads
+            //
+            // No `index.lock` is acquired here. `submodule_status()` is a
+            // read-only operation. It never calls `git_index_write()` in
+            // libgit2 (the `GIT_DIFF_UPDATE_INDEX` flag is never set in the
+            // submodule status path). Git's atomic rename pattern
+            // (`index.lock`->`index`) guarantees the index file is always
+            // in a consistent state for readers. Acquiring `index.lock`
+            // would block concurrent git operations (commit, rebase, add,
+            // etc.) that need the same lock for writing.
+            //
+            // NOTE: The assert that exists in git2 around
+            // `git_submodule_lookup` is specific to
+            // `Repository::submodules()`, NOT `submodule_status()`. The
+            // former is separately guarded by the root lock in
+            // `populate_status_map()`. A missing index during
+            // `submodule_status()` returns a git2 error, not a panic.
+            //
+            // ## Retry strategy for transient read failures
+            //
+            // If the index is transiently missing (between git deleting
+            // the old file and renaming `index.lock`->`index`), the read
+            // fails. Three retry paths cover all timing scenarios:
+            //
+            // 1. **Dirty retry (event loop already processed the rename)**:
+            //    This task runs concurrently with the event loop. If the
+            //    rename event arrives while we're in-flight, the event loop
+            //    calls `try_spawn_submod_update` which marks us `Dirty`.
+            //    After the failed read we fall through to the Dirty check,
+            //    see the flag, and loop back to retry. The index is
+            //    guaranteed to exist by now since the rename completed.
+            //
+            // 2. **New task (task exits before rename event arrives)**:
+            //    If we exit before the event loop processes the rename, we
+            //    remove ourselves from `InFlightTracker`. When the rename
+            //    event arrives it fires `SubmoduleGitOperation`, which
+            //    calls `try_spawn_submod_update`. Since we're gone, it
+            //    spawns a fresh task that reads successfully.
+            //
+            // 3. **`SubmoduleLockRelease` safety net (abort / no rename)**:
+            //    If git aborts (deletes `index.lock` without renaming), no
+            //    `SubmoduleGitOperation` fires. Instead, the `Remove
+            //    index.lock` event is classified as `SubmoduleLockRelease`.
+            //    On exit without a Dirty retry, we insert our watcher index
+            //    into `pending_retries`. The `SubmoduleLockRelease` handler
+            //    checks this set and re-fires the status read. (On Linux,
+            //    `Modify(Name(From)) index.lock` is also classified as
+            //    `SubmoduleLockRelease` for rename events where only the
+            //    source path is reported.)
             loop {
                 if cancel.load(Ordering::Relaxed) {
                     break;
                 }
 
-                match get_submod_status(repo, &relative_path, &lock_file_path, Some(&cancel)) {
-                    Ok(submod_status) => {
-                        if !cancel.load(Ordering::Relaxed) {
-                            let mut guard = statuses.lock().expect("StatusMap mutex poisoned");
-                            if let Some(st) = guard.get_mut(relative_path.as_str()) {
-                                *st = submod_status;
-                            } else {
-                                guard.insert(relative_path.clone(), submod_status);
+                let read_ok =
+                    match repo.submodule_status(&relative_path, git2::SubmoduleIgnore::None) {
+                        Ok(st) => {
+                            let submod_status: StatusSummary = st.into();
+                            if !cancel.load(Ordering::Relaxed) {
+                                let mut guard = statuses.lock().expect("StatusMap mutex poisoned");
+                                if let Some(entry) = guard.get_mut(relative_path.as_str()) {
+                                    *entry = submod_status;
+                                } else {
+                                    guard.insert(relative_path.clone(), submod_status);
+                                }
                             }
+                            true
                         }
-                    }
-                    Err(e) => {
-                        if !cancel.load(Ordering::Relaxed) {
-                            error!(
-                                "Failed to get submodule status for path: {relative_path} -- {e}",
-                            );
+                        Err(e) => {
+                            if !cancel.load(Ordering::Relaxed) {
+                                trace!(
+                                    "Transient read failure for {relative_path}, \
+                                     will retry if dirty -- {e}",
+                                );
+                            }
+                            false
                         }
-                    }
-                }
+                    };
 
-                let (mutex, condvar) = &*in_flight;
+                let (mutex, _) = &*in_flight;
                 let mut tracker = mutex.lock().expect("InFlightTracker mutex poisoned");
                 if let Some(task) = tracker.tasks.get_mut(&index)
                     && matches!(task, TaskState::Dirty(_))
@@ -1024,11 +1095,32 @@ impl WatchServer {
                     *task = TaskState::Active(cancel);
                     continue;
                 }
-                tracker.tasks.remove(&index);
                 drop(tracker);
-                condvar.notify_one();
+
+                // Exiting: if the read failed, register for a retry via
+                // `SubmoduleLockRelease` in the event loop.
+                if !read_ok && !cancel.load(Ordering::Relaxed) {
+                    pending_retries
+                        .lock()
+                        .expect("pending_retries mutex poisoned")
+                        .insert(index);
+                } else {
+                    // Clear any stale entry from a previous failed iteration
+                    pending_retries
+                        .lock()
+                        .expect("pending_retries mutex poisoned")
+                        .remove(&index);
+                }
                 break;
             }
+
+            // Always clean up the in-flight tracker entry, regardless of
+            // whether we exited via cancellation or normal completion.
+            let (mutex, condvar) = &*in_flight;
+            let mut tracker = mutex.lock().expect("InFlightTracker mutex poisoned");
+            tracker.tasks.remove(&index);
+            drop(tracker);
+            condvar.notify_one();
         });
     }
 
@@ -1067,6 +1159,7 @@ impl WatchServer {
     /// The "meat" of the logic for the watch server. Handles incoming watcher events and updates
     /// server state accordingly. This function will only exit if a reindex is required or
     /// requested, a shutdown is received via the control channel, or if a watcher error occurs.
+    #[allow(clippy::too_many_lines)]
     fn handle_events(&mut self) -> WatchResult<HandleEventsExit> {
         let mut sel = crossbeam_channel::Select::new();
         // filesystem watchers
@@ -1081,6 +1174,10 @@ impl WatchServer {
             Arc::new((Mutex::new(InFlightTracker::new()), Condvar::new()));
         let tl_repo: Arc<thread_local::ThreadLocal<Repository>> =
             Arc::new(thread_local::ThreadLocal::new());
+        // Watcher indices whose rayon task failed a non-blocking lock acquisition.
+        // When the corresponding `index.lock` is removed (lock released), the event
+        // loop re-fires the status read.
+        let pending_lock_retries: Arc<Mutex<HashSet<usize>>> = Arc::new(Mutex::new(HashSet::new()));
 
         loop {
             let oper = sel.select();
@@ -1122,14 +1219,24 @@ impl WatchServer {
                         }
                         Some(EventType::SubmoduleChange) => {
                             if !self.skip_set.contains(rel_path) {
-                                self.try_spawn_submod_update(index, &in_flight, &tl_repo);
+                                self.try_spawn_submod_update(
+                                    index,
+                                    &in_flight,
+                                    &tl_repo,
+                                    &pending_lock_retries,
+                                );
                             }
                         }
                         Some(EventType::SubmoduleGitOperation) => {
                             if let Some(i) = self.submod_for_event(&event)
                                 && !self.skip_set.contains(&self.watchers[i].relative_path)
                             {
-                                self.try_spawn_submod_update(i, &in_flight, &tl_repo);
+                                self.try_spawn_submod_update(
+                                    i,
+                                    &in_flight,
+                                    &tl_repo,
+                                    &pending_lock_retries,
+                                );
                             }
                         }
                         // Rebases generate an incredible volume of events, and during such an
@@ -1151,7 +1258,28 @@ impl WatchServer {
                         Some(EventType::SubmoduleRebaseEnd) => {
                             if let Some(i) = self.submod_for_event(&event) {
                                 self.skip_set.remove(&self.watchers[i].relative_path);
-                                self.try_spawn_submod_update(i, &in_flight, &tl_repo);
+                                self.try_spawn_submod_update(
+                                    i,
+                                    &in_flight,
+                                    &tl_repo,
+                                    &pending_lock_retries,
+                                );
+                            }
+                        }
+                        Some(EventType::SubmoduleLockRelease) => {
+                            if let Some(i) = self.submod_for_event(&event)
+                                && !self.skip_set.contains(&self.watchers[i].relative_path)
+                                && pending_lock_retries
+                                    .lock()
+                                    .expect("pending_lock_retries mutex poisoned")
+                                    .remove(&i)
+                            {
+                                self.try_spawn_submod_update(
+                                    i,
+                                    &in_flight,
+                                    &tl_repo,
+                                    &pending_lock_retries,
+                                );
                             }
                         }
                         None => {}
