@@ -127,7 +127,7 @@ enum EventType {
     RootGitOperation,
     /// A change occurred in one of the watched submodules's source
     SubmoduleChange,
-    /// A change occurred in oen of the watched submodule's `.git/` subdirectory
+    /// A change occurred in one of the watched submodule's `.git/` subdirectory
     SubmoduleGitOperation,
     /// A rebase started within a submodule
     SubmoduleRebaseStart,
@@ -700,7 +700,10 @@ impl WatchServer {
         let status_lock = Arc::clone(&self.submod_statuses);
         loop {
             let new_submod_watches = match exit_reason {
-                HandleEventsExit::ReindexEvent => false,
+                HandleEventsExit::ReindexEvent => {
+                    self.watchers.truncate(ROOT_WATCHER_COUNT);
+                    true
+                }
                 HandleEventsExit::Shutdown { .. } => break,
                 HandleEventsExit::ReindexRequest { replace_watchers } => {
                     if replace_watchers {
