@@ -98,6 +98,8 @@ struct WatchServer {
     root_path: PathBuf,
     /// `<root_path>/.git/index`
     root_index_path: PathBuf,
+    /// `<root_path>/.git/HEAD`
+    root_head_path: PathBuf,
     /// `<root_path>/.gitmodules`
     root_gitmodules_path: PathBuf,
     /// `<root_path>/.git`
@@ -106,6 +108,8 @@ struct WatchServer {
     root_modules_path: PathBuf,
     /// `<root_path>/.git/index.lock`
     root_lock_path: PathBuf,
+    /// `<root_path>/.git/HEAD.lock`
+    root_head_lock_path: PathBuf,
 
     /// Receiver for control messages from the listener thread
     control_rx: crossbeam_channel::Receiver<ControlMessage>,
@@ -300,11 +304,13 @@ fn get_submod_status(
 
 impl WatchServer {
     pub fn new(root_path: &Path, control_rx: crossbeam_channel::Receiver<ControlMessage>) -> Self {
-        let root_index_path = root_path.join(DOT_GIT).join("index");
-        let root_gitmodules_path = root_path.join(DOT_GITMODULES);
         let root_git_path = root_path.join(DOT_GIT);
-        let root_modules_path = root_path.join(DOT_GIT).join("modules");
-        let root_lock_path = root_path.join(DOT_GIT).join("index.lock");
+        let root_index_path = root_git_path.join("index");
+        let root_head_path = root_git_path.join("HEAD");
+        let root_gitmodules_path = root_path.join(DOT_GITMODULES);
+        let root_modules_path = root_git_path.join("modules");
+        let root_lock_path = root_git_path.join("index.lock");
+        let root_head_lock_path = root_git_path.join("HEAD.lock");
 
         Self {
             watchers: Vec::new(),
@@ -312,10 +318,12 @@ impl WatchServer {
             root_rebasing: false,
             root_path: root_path.to_path_buf(),
             root_index_path,
+            root_head_path,
             root_gitmodules_path,
             root_git_path,
             root_modules_path,
             root_lock_path,
+            root_head_lock_path,
             control_rx,
             submod_statuses: Arc::new(Mutex::new(BTreeMap::new())),
             progress_queue: Arc::new(Mutex::new(HashMap::new())),
@@ -473,12 +481,6 @@ impl WatchServer {
         // return code.
         let submodules = {
             let _lock = LockFileGuard::acquire(&self.root_lock_path, None)?;
-            // The Repository may have been opened in a previous reindex
-            // iteration — refresh the in-memory index so `submodules()`
-            // sees the current submodule set.
-            if let Ok(mut idx) = repo.index() {
-                let _ = idx.read(false);
-            }
             repo.submodules()?
         };
 
@@ -700,9 +702,16 @@ impl WatchServer {
         // the watch server's execution, unless a root watcher error requires replacement.
         self.place_root_watchers()?;
 
-        // Initial indexing with the pre-acquired guard
+        // Initial indexing with the pre-acquired guard.
+        // A fresh Repository is opened for each indexing pass so that
+        // `submodules()` always sees the current HEAD, index, and
+        // `.gitmodules` config. Reusing a long-lived Repository across
+        // reindexes risks stale cached state (HEAD ref, submodule config)
+        // that causes `git_submodule_lookup` to assert inside the
+        // `git_submodule_foreach` callback.
         let repo = Repository::open(&self.root_path)?;
         self.populate_status_map(&repo, display_progress, true, status_guard)?;
+        drop(repo);
         let mut exit_reason = self.handle_events()?;
 
         // Subsequent reindex iterations
@@ -740,6 +749,7 @@ impl WatchServer {
                 }
             };
 
+            let repo = Repository::open(&self.root_path)?;
             let status_guard = status_lock.lock().expect("Mutex poisoned");
             self.populate_status_map(&repo, false, new_submod_watches, status_guard)?;
 
@@ -841,10 +851,17 @@ impl WatchServer {
             // parent repo are visible.
             let is_git_dir_rename = rel_path.eq(DOT_GIT)
                 && matches!(event.kind, EventKind::Modify(ModifyKind::Name(_)))
-                && event
-                    .paths
-                    .iter()
-                    .any(|p| p.starts_with(&self.root_modules_path) || p.eq(&self.root_index_path));
+                && event.paths.iter().any(|p| {
+                    (p.starts_with(&self.root_modules_path)
+                        && p.file_name().is_some_and(|n| {
+                            let name = n.to_str().unwrap();
+                            matches!(name, "index" | "index.lock" | "HEAD" | "HEAD.lock")
+                        }))
+                        || p.eq(&self.root_index_path)
+                        || p.eq(&self.root_lock_path)
+                        || p.eq(&self.root_head_path)
+                        || p.eq(&self.root_head_lock_path)
+                });
             if !is_git_dir_rename {
                 let is_root_watcher = rel_path.eq(DOT_GIT) || rel_path.eq(DOT_GITMODULES);
                 if is_root_watcher || !matches!(event.kind, EventKind::Modify(ModifyKind::Name(_)))
@@ -882,16 +899,26 @@ impl WatchServer {
                 } else {
                     None
                 }
-            } else if event.paths.iter().any(|p| p.eq(&self.root_index_path)) {
-                // Git's atomic index update pattern: write to `index.lock`,
-                // delete `index`, rename `index.lock` → `index`. The `Remove`
-                // event for the transient deletion is ignored — acting on it
-                // would race with the immediately following rename. All other
-                // events (writes, renames) are classified as `RootGitOperation`
-                // and handled in the event loop by spawning lock-free rayon
-                // tasks to re-check submodule statuses. This avoids acquiring
-                // `index.lock` (which would contend with concurrent git
-                // operations like rebase).
+            } else if event
+                .paths
+                .iter()
+                .any(|p| p.eq(&self.root_index_path) || p.eq(&self.root_head_path))
+            {
+                // Git's atomic update pattern for `index` and `HEAD`: write
+                // to the `.lock` file, delete the original, rename `.lock`->
+                // target. The `Remove` event for the transient deletion is
+                // ignored, acting on it would race with the immediately
+                // following rename. All other events (writes, renames) are
+                // classified as `RootGitOperation` and handled in the event
+                // loop by spawning lock-free rayon tasks to re-check
+                // submodule statuses.
+                //
+                // Detecting HEAD changes is critical for `git checkout`:
+                // the index is updated before HEAD, so rayon tasks spawned
+                // from the index rename may read status against the stale
+                // HEAD (producing STAGED | NEW_COMMITS). When the HEAD
+                // rename fires shortly after, it triggers a second round of
+                // rayon tasks that correct the status.
                 if matches!(event.kind, EventKind::Remove(_)) {
                     None
                 } else {
@@ -1190,6 +1217,10 @@ impl WatchServer {
         // When the corresponding `index.lock` is removed (lock released), the event
         // loop re-fires the status read.
         let pending_lock_retries: Arc<Mutex<HashSet<usize>>> = Arc::new(Mutex::new(HashSet::new()));
+        // Set when `.gitmodules` changes — defers the full reindex (which
+        // needs `index.lock`) until the next root index/HEAD change signals
+        // that the in-progress git operation has released the lock.
+        let mut needs_watcher_update = false;
 
         loop {
             let oper = sel.select();
@@ -1218,20 +1249,28 @@ impl WatchServer {
                         Some(EventType::RootGitOperation) => {
                             if !self.root_rebasing {
                                 if rel_path == DOT_GITMODULES {
-                                    // .gitmodules changed — the submodule set may
-                                    // have changed, requiring a full reindex with
-                                    // watcher replacement.
+                                    // .gitmodules changed. The submodule set may
+                                    // have changed. Don't reindex immediately: the
+                                    // git operation that modified .gitmodules (e.g.
+                                    // `git submodule add`) may still be running and
+                                    // will need `index.lock` itself. Grabbing it now
+                                    // for `repo.submodules()` would cause git to fail.
+                                    //
+                                    // Instead, set a flag and defer the full reindex
+                                    // until the next root index/HEAD change, which
+                                    // signals that the operation has finished and
+                                    // released `index.lock`.
+                                    needs_watcher_update = true;
+                                } else if needs_watcher_update {
+                                    // Root index/HEAD changed after .gitmodules was
+                                    // modified — the git operation has finished and
+                                    // it's safe to acquire `index.lock` for a full
+                                    // reindex.
                                     wait_for_in_flight(&in_flight);
                                     return Ok(HandleEventsExit::ReindexEvent);
                                 }
-                                // Root index changed (e.g. `git add <submodule>`).
                                 // Re-check all submodule statuses via the lock-free
-                                // rayon task path. No full reindex needed since the
-                                // submodule set hasn't changed and submodule_status()
-                                // is read-only. During rebase setup this is harmless:
-                                // tasks that hit a transient missing index will retry,
-                                // and the full reindex after RootRebaseEnd corrects
-                                // any stale state.
+                                // rayon task path.
                                 for i in ROOT_WATCHER_COUNT..self.watchers.len() {
                                     if !self.skip_set.contains(&self.watchers[i].relative_path) {
                                         self.try_spawn_submod_update(
