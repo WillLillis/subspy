@@ -1314,10 +1314,17 @@ impl WatchServer {
                                         // Same rename operation (matching tracker
                                         // cookie)-> skip this event too.
                                     } else {
-                                        // Event from a subsequent git operation —
-                                        // safe to reindex.
-                                        wait_for_in_flight(&in_flight);
-                                        return Ok(HandleEventsExit::ReindexEvent);
+                                        // Event from a subsequent git operation.
+                                        // Reset the debounce timer rather than
+                                        // reindexing immediately: the operation
+                                        // may still be in progress (e.g. `git
+                                        // commit` has renamed the index but has
+                                        // not yet updated the branch ref).
+                                        // Reindexing mid-operation can hit a
+                                        // GIT_ENOTFOUND (-3) assert in
+                                        // git_submodule_lookup when HEAD and
+                                        // the index are temporarily out of sync.
+                                        reindex_deadline = Some(Instant::now() + REINDEX_DEBOUNCE);
                                     }
                                 }
                                 // Re-check all submodule statuses via the lock-free
