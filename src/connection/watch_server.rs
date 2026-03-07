@@ -37,6 +37,11 @@ const MAX_LOCKFILE_BACKOFF: Duration = Duration::from_millis(100);
 const LOCKFILE_TIMEOUT: Duration = Duration::from_secs(10);
 const DEBUG_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Fallback timeout for triggering a reindex after `.gitmodules` changes when
+/// no subsequent git operation produces a root event (e.g. `git submodule add`
+/// without a follow-up `git commit`).
+const REINDEX_DEBOUNCE: Duration = Duration::from_millis(200);
+
 /// Type alias for the submodule status map mutex
 pub(super) type StatusMap = Mutex<BTreeMap<String, StatusSummary>>;
 
@@ -1227,9 +1232,25 @@ impl WatchServer {
         // `index.lock` before the user's next command.
         let mut gitmodules_op_consumed = false;
         let mut gitmodules_rename_tracker: Option<usize> = None;
+        // Fallback deadline for reindex when no subsequent root event arrives
+        // after the same-operation events have been consumed.
+        let mut reindex_deadline: Option<Instant> = None;
 
         loop {
-            let oper = sel.select();
+            #[allow(clippy::single_match_else)]
+            let oper = if let Some(deadline) = reindex_deadline {
+                match sel.select_deadline(deadline) {
+                    Ok(oper) => oper,
+                    Err(_) => {
+                        // No new events within the debounce window-> trigger
+                        // the deferred reindex.
+                        wait_for_in_flight(&in_flight);
+                        return Ok(HandleEventsExit::ReindexEvent);
+                    }
+                }
+            } else {
+                sel.select()
+            };
             let index = oper.index();
 
             if index == control_idx {
@@ -1270,6 +1291,9 @@ impl WatchServer {
                                     needs_watcher_update = true;
                                     gitmodules_op_consumed = false;
                                     gitmodules_rename_tracker = None;
+                                    // Cancel any pending debounce-> this new
+                                    // .gitmodules event resets the deferral.
+                                    reindex_deadline = None;
                                 } else if needs_watcher_update {
                                     if !gitmodules_op_consumed {
                                         // First root event after .gitmodules changed,
@@ -1278,6 +1302,12 @@ impl WatchServer {
                                         // and skip.
                                         gitmodules_op_consumed = true;
                                         gitmodules_rename_tracker = event.attrs.tracker();
+                                        // Start a debounce timer as a fallback: if no
+                                        // subsequent git command produces a root event
+                                        // (e.g. `git submodule add` without a follow-up
+                                        // `git commit`), the timeout ensures we still
+                                        // reindex.
+                                        reindex_deadline = Some(Instant::now() + REINDEX_DEBOUNCE);
                                     } else if gitmodules_rename_tracker.is_some()
                                         && event.attrs.tracker() == gitmodules_rename_tracker
                                     {
