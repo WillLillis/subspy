@@ -1217,10 +1217,16 @@ impl WatchServer {
         // When the corresponding `index.lock` is removed (lock released), the event
         // loop re-fires the status read.
         let pending_lock_retries: Arc<Mutex<HashSet<usize>>> = Arc::new(Mutex::new(HashSet::new()));
-        // Set when `.gitmodules` changes — defers the full reindex (which
-        // needs `index.lock`) until the next root index/HEAD change signals
-        // that the in-progress git operation has released the lock.
+        // Set when `.gitmodules` changes. Defers the full reindex until a
+        // subsequent git operation produces a root event.
         let mut needs_watcher_update = false;
+        // Tracks whether the root event(s) from the same git operation that
+        // modified `.gitmodules` have been consumed. The index rename
+        // (`index.lock`->`index`) can produce multiple events sharing the
+        // same tracker cookie. All must be skipped to avoid acquiring
+        // `index.lock` before the user's next command.
+        let mut gitmodules_op_consumed = false;
+        let mut gitmodules_rename_tracker: Option<usize> = None;
 
         loop {
             let oper = sel.select();
@@ -1252,22 +1258,37 @@ impl WatchServer {
                                     // .gitmodules changed. The submodule set may
                                     // have changed. Don't reindex immediately: the
                                     // git operation that modified .gitmodules (e.g.
-                                    // `git submodule add`) may still be running and
-                                    // will need `index.lock` itself. Grabbing it now
-                                    // for `repo.submodules()` would cause git to fail.
+                                    // `git submodule add`, `git rm -f`) also produces
+                                    // index rename event(s) as part of the same
+                                    // command. Triggering a reindex on those events
+                                    // would acquire `index.lock` before the user's
+                                    // next command (e.g. `git commit`) can run.
                                     //
-                                    // Instead, set a flag and defer the full reindex
-                                    // until the next root index/HEAD change, which
-                                    // signals that the operation has finished and
-                                    // released `index.lock`.
+                                    // Track the rename cookie so all events from the
+                                    // same rename are skipped, then reindex on the
+                                    // first event from a different operation.
                                     needs_watcher_update = true;
+                                    gitmodules_op_consumed = false;
+                                    gitmodules_rename_tracker = None;
                                 } else if needs_watcher_update {
-                                    // Root index/HEAD changed after .gitmodules was
-                                    // modified — the git operation has finished and
-                                    // it's safe to acquire `index.lock` for a full
-                                    // reindex.
-                                    wait_for_in_flight(&in_flight);
-                                    return Ok(HandleEventsExit::ReindexEvent);
+                                    if !gitmodules_op_consumed {
+                                        // First root event after .gitmodules changed,
+                                        // so this is the index rename from the same
+                                        // git operation. Record its tracker cookie
+                                        // and skip.
+                                        gitmodules_op_consumed = true;
+                                        gitmodules_rename_tracker = event.attrs.tracker();
+                                    } else if gitmodules_rename_tracker.is_some()
+                                        && event.attrs.tracker() == gitmodules_rename_tracker
+                                    {
+                                        // Same rename operation (matching tracker
+                                        // cookie)-> skip this event too.
+                                    } else {
+                                        // Event from a subsequent git operation —
+                                        // safe to reindex.
+                                        wait_for_in_flight(&in_flight);
+                                        return Ok(HandleEventsExit::ReindexEvent);
+                                    }
                                 }
                                 // Re-check all submodule statuses via the lock-free
                                 // rayon task path.
