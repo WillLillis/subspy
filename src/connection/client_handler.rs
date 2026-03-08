@@ -1,4 +1,5 @@
 use std::{
+    cell::RefCell,
     collections::{BTreeMap, VecDeque},
     io::{BufReader, Read as _},
     sync::{Arc, MutexGuard},
@@ -18,6 +19,10 @@ use super::{
     try_lock,
     watch_server::{ControlMessage, ProgressMap, ProgressSubscribers, StatusMap},
 };
+
+thread_local! {
+    static ENCODE_BUF: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+}
 
 #[derive(Debug, Clone, Copy, Encode, BorrowDecode)]
 pub struct ProgressUpdate {
@@ -167,8 +172,12 @@ fn handle_status_request(
     drop(guard);
 
     let msg = ServerMessage::Status(status_out);
-    let serialized = bincode::encode_to_vec(msg, BINCODE_CFG)?;
-    write_full_message(&mut conn, &serialized)?;
+    ENCODE_BUF.with_borrow_mut(|buf| -> WatchResult<()> {
+        buf.clear();
+        bincode::encode_into_std_write(msg, buf, BINCODE_CFG)?;
+        write_full_message(&mut conn, buf)?;
+        Ok(())
+    })?;
 
     Ok(())
 }
