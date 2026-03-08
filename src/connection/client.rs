@@ -1,4 +1,8 @@
-use std::{io::BufReader, path::Path, time::Duration};
+use std::{
+    io::{BufReader, Read},
+    path::Path,
+    time::Duration,
+};
 
 use indicatif::{ProgressBar, ProgressStyle};
 use interprocess::local_socket::{Stream, traits::Stream as _};
@@ -42,11 +46,15 @@ pub fn request_reindex(
 
     let progress_bar =
         display_progress.then(|| create_progress_bar(0, "Reindexing in progress..."));
-    let mut buffer = Vec::with_capacity(1024);
+    // Indexing { u32, u32 } = 12 bytes fixint, so use a stack buffer.
+    let mut len_buf = [0u8; 4];
+    let mut buffer = [0u8; 12];
     loop {
-        read_full_message(&mut conn, &mut buffer)?;
+        conn.read_exact(&mut len_buf)?;
+        let msg_len = u32::from_le_bytes(len_buf) as usize;
+        conn.read_exact(&mut buffer[..msg_len])?;
         let Ok((ServerMessage::Indexing { curr, total }, _)): Result<(ServerMessage, usize), _> =
-            bincode::borrow_decode_from_slice(&buffer, BINCODE_CFG)
+            bincode::borrow_decode_from_slice(&buffer[..msg_len], BINCODE_CFG)
         else {
             break;
         };
@@ -80,11 +88,15 @@ pub fn request_shutdown(root_path: &Path) -> ShutdownResult<()> {
     let msg_len = bincode::encode_into_slice(&status_req, &mut msg, BINCODE_CFG)?;
     write_full_message(&mut conn, &msg[..msg_len])?;
 
-    // Wait for the watch server to acknowledge the shutdown
-    let mut buffer = Vec::with_capacity(1024);
-    read_full_message(&mut conn, &mut buffer)?;
+    // Wait for the watch server to acknowledge the shutdown.
+    // ShutdownAck is 4 bytes (fixint variant index only), so use a stack buffer.
+    let mut len_buf = [0u8; 4];
+    conn.read_exact(&mut len_buf)?;
+    let msg_len = u32::from_le_bytes(len_buf) as usize;
+    let mut buffer = [0u8; 4];
+    conn.read_exact(&mut buffer[..msg_len])?;
     let (resp, _): (ServerMessage, usize) =
-        bincode::borrow_decode_from_slice(&buffer, BINCODE_CFG)?;
+        bincode::borrow_decode_from_slice(&buffer[..msg_len], BINCODE_CFG)?;
 
     match resp {
         ServerMessage::ShutdownAck => {
@@ -176,7 +188,7 @@ pub fn recv_status_response(
     display_progress: bool,
 ) -> StatusResult<Vec<(String, StatusSummary)>> {
     let progress_bar = display_progress.then(|| create_progress_bar(0, "Indexing in progress..."));
-    let mut buffer = Vec::with_capacity(1024);
+    let mut buffer = Vec::with_capacity(4096); // empirically ~2 KiB on a test repo
     loop {
         read_full_message(conn, &mut buffer)?;
 
