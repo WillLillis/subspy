@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeMap, VecDeque},
     io::{BufReader, Read as _},
+    path::{Path, PathBuf},
     sync::{Arc, MutexGuard},
 };
 
@@ -11,6 +12,7 @@ use log::{error, info};
 use crate::{
     StatusSummary,
     connection::{BINCODE_CFG, ClientMessage, ServerMessage, write_full_message},
+    status::gather_full_status,
     watch::WatchResult,
 };
 
@@ -68,11 +70,14 @@ pub(super) fn broadcast_progress(
 pub(super) fn handle_client_connection(
     conn: Stream,
     control_tx: crossbeam_channel::Sender<ControlMessage>,
+    root_path: Arc<PathBuf>,
     statuses: Arc<StatusMap>,
     progress: Arc<ProgressMap>,
     subscribers: Arc<ProgressSubscribers>,
 ) {
-    if let Err(e) = dispatch_client_message(conn, &control_tx, &statuses, &progress, &subscribers) {
+    if let Err(e) =
+        dispatch_client_message(conn, &control_tx, &root_path, &statuses, &progress, &subscribers)
+    {
         error!("Failed to handle client connection: {e}");
     }
 }
@@ -82,6 +87,7 @@ pub(super) fn handle_client_connection(
 fn dispatch_client_message(
     conn: Stream,
     control_tx: &crossbeam_channel::Sender<ControlMessage>,
+    root_path: &Path,
     statuses: &StatusMap,
     progress: &ProgressMap,
     subscribers: &ProgressSubscribers,
@@ -124,7 +130,7 @@ fn dispatch_client_message(
             handle_reindex_request(conn, pid, progress, subscribers)?;
         }
         ClientMessage::Status(client_pid) => {
-            handle_status_request(conn, client_pid, statuses, progress, subscribers)?;
+            handle_status_request(conn, client_pid, root_path, statuses, progress, subscribers)?;
         }
         ClientMessage::Shutdown => {
             control_tx
@@ -141,10 +147,11 @@ fn dispatch_client_message(
     Ok(())
 }
 
-/// Handles a client's request for submodule statuses.
+/// Handles a client's request for the full repository status.
 fn handle_status_request(
     mut conn: BufReader<Stream>,
     client_pid: u32,
+    root_path: &Path,
     statuses: &StatusMap,
     progress: &ProgressMap,
     subscribers: &ProgressSubscribers,
@@ -160,13 +167,16 @@ fn handle_status_request(
         .remove(&client_pid);
     _ = progress.lock().expect("Mutex poisoned").remove(&client_pid);
 
-    let mut status_out = Vec::with_capacity(guard.len());
+    let mut submod_statuses = Vec::with_capacity(guard.len());
     for (submod_path, status) in guard.iter().filter(|(_, st)| **st != StatusSummary::CLEAN) {
-        status_out.push((submod_path.clone(), *status));
+        submod_statuses.push((submod_path.clone(), *status));
     }
     drop(guard);
 
-    let msg = ServerMessage::Status(status_out);
+    let full_status = gather_full_status(root_path, submod_statuses, true)
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
+
+    let msg = ServerMessage::Status(Box::new(full_status));
     let serialized = bincode::encode_to_vec(msg, BINCODE_CFG)?;
     write_full_message(&mut conn, &serialized)?;
 

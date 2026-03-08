@@ -347,6 +347,7 @@ impl WatchServer {
         control_tx: crossbeam_channel::Sender<ControlMessage>,
     ) -> std::io::Result<()> {
         let listener = create_listener(&self.root_path)?;
+        let root_path = Arc::new(self.root_path.clone());
         let statuses = Arc::clone(&self.submod_statuses);
         let progress = Arc::clone(&self.progress_queue);
         let subscribers = Arc::clone(&self.progress_subscribers);
@@ -363,6 +364,7 @@ impl WatchServer {
                     }
                 }) {
                     let control_tx = control_tx.clone();
+                    let root_path = Arc::clone(&root_path);
                     let statuses = Arc::clone(&statuses);
                     let progress = Arc::clone(&progress);
                     let subscribers = Arc::clone(&subscribers);
@@ -372,7 +374,7 @@ impl WatchServer {
                     // the status map lock. If the main thread picks up a spawned
                     // handler that spins waiting for that same lock, we deadlock.
                     std::thread::spawn(move || {
-                        handle_client_connection(conn, control_tx, statuses, progress, subscribers);
+                        handle_client_connection(conn, control_tx, root_path, statuses, progress, subscribers);
                     });
                 }
             })?;

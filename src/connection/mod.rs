@@ -13,7 +13,7 @@ use interprocess::local_socket::{
     ToFsName as _, ToNsName as _,
 };
 
-use crate::StatusSummary;
+use crate::{FullRepoStatus, StatusSummary};
 
 pub mod client;
 mod client_handler;
@@ -32,7 +32,7 @@ pub enum ClientMessage {
 
 #[derive(Clone, Debug, Eq, PartialEq, Encode, BorrowDecode)]
 pub enum ServerMessage {
-    Status(Vec<(String, StatusSummary)>),
+    Status(Box<FullRepoStatus>),
     Indexing { curr: u32, total: u32 },
     ShutdownAck,
     DebugInfo(DebugState),

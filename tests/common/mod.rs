@@ -9,7 +9,7 @@ use git2::{Repository, Signature};
 use interprocess::local_socket::{Stream, traits::Stream as _};
 use rstest_reuse::{self, template};
 use subspy::{
-    StatusSummary,
+    FullRepoStatus, StatusSummary,
     connection::watch_server::watch,
     connection::{client::request_shutdown, client::request_status, ipc_name},
 };
@@ -180,15 +180,15 @@ impl TestHarness {
         ]);
     }
 
-    /// Request the current status from the watch server.
-    pub fn status(&self) -> Vec<(String, StatusSummary)> {
+    /// Request the current full status from the watch server.
+    pub fn status(&self) -> FullRepoStatus {
         request_status(&self.root_path, false).expect("request_status failed")
     }
 
     /// Poll status until it matches the expected predicate, or panic on timeout.
     pub fn assert_status_eventually<F>(&self, description: &str, predicate: F)
     where
-        F: Fn(&[(String, StatusSummary)]) -> bool,
+        F: Fn(&FullRepoStatus) -> bool,
     {
         let start = Instant::now();
         loop {
@@ -208,7 +208,8 @@ impl TestHarness {
     /// Assert that a specific submodule has exactly the given flags.
     pub fn assert_submodule_status(&self, submodule: &str, expected: StatusSummary) {
         let description = format!("submodule '{submodule}' to have status {expected:?}");
-        self.assert_status_eventually(&description, |statuses| {
+        self.assert_status_eventually(&description, |status| {
+            let statuses = &status.submodule_statuses;
             if expected == StatusSummary::CLEAN {
                 // CLEAN submodules are omitted from the response
                 !statuses.iter().any(|(name, _)| name == submodule)
@@ -222,16 +223,19 @@ impl TestHarness {
 
     /// Assert all submodules are clean.
     pub fn assert_all_clean(&self) {
-        self.assert_status_eventually("all submodules clean", |s| s.is_empty());
+        self.assert_status_eventually("all submodules clean", |s| {
+            s.submodule_statuses.is_empty()
+        });
     }
 
-    /// Assert that `new_submodule_paths` returns exactly the given paths (order-sensitive).
+    /// Assert that `new_submodule_paths` contains exactly the given paths (order-sensitive).
     pub fn assert_new_submodule_paths(&self, expected: &[&str]) {
-        let repo = Repository::open(&self.root_path).expect("Failed to open root repo");
-        let actual =
-            subspy::status::new_submodule_paths(&repo).expect("new_submodule_paths failed");
+        let status = self.status();
         let expected: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
-        assert_eq!(actual, expected, "new_submodule_paths mismatch");
+        assert_eq!(
+            status.new_submodule_paths, expected,
+            "new_submodule_paths mismatch"
+        );
     }
 
     /// Run a git command in the root repo directory.

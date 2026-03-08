@@ -5,7 +5,7 @@ use interprocess::local_socket::{Stream, traits::Stream as _};
 use log::error;
 
 use crate::{
-    StatusSummary,
+    FullRepoStatus,
     connection::{
         BINCODE_CFG, ClientMessage, DebugState, ServerMessage, ipc_name, read_full_message,
         spawn_daemon, write_full_message,
@@ -146,7 +146,7 @@ fn server_not_started(e: &std::io::Error) -> bool {
     )
 }
 
-/// Requests the statuses of the submodules within `path` from the watch server
+/// Requests the full repository status from the watch server for `root_path`.
 ///
 /// # Errors
 ///
@@ -158,7 +158,7 @@ fn server_not_started(e: &std::io::Error) -> bool {
 pub fn request_status(
     root_path: &Path,
     display_progress: bool,
-) -> StatusResult<Vec<(String, StatusSummary)>> {
+) -> StatusResult<FullRepoStatus> {
     let mut conn = connect_to_server(root_path)?;
     let status_req = ClientMessage::Status(std::process::id());
     let mut req_msg = [0; 6]; // statically determined an upper bound of 6 bytes
@@ -166,19 +166,18 @@ pub fn request_status(
     write_full_message(&mut conn, &req_msg[..req_msg_len])?;
 
     let progress_bar = display_progress.then(|| create_progress_bar(0, "Indexing in progress..."));
-    // TODO: Get some impirical data on the actual buffer size we need
-    let mut buffer = Vec::with_capacity(1024);
+    let mut buffer = Vec::with_capacity(4096);
     loop {
         read_full_message(&mut conn, &mut buffer)?;
 
         let (resp_msg, _): (ServerMessage, usize) =
             bincode::borrow_decode_from_slice(&buffer, BINCODE_CFG)?;
         match resp_msg {
-            ServerMessage::Status(items) => {
+            ServerMessage::Status(full_status) => {
                 if let Some(pb) = &progress_bar {
                     pb.finish_and_clear();
                 }
-                return Ok(items);
+                return Ok(*full_status);
             }
             ServerMessage::Indexing { curr, total } => {
                 if let Some(pb) = &progress_bar {

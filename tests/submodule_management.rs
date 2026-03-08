@@ -59,8 +59,8 @@ fn remove_submodule_without_commit_detected_by_server(_run: u32) {
     harness.git_in_root(&["rm", "-f", "sub_b"]);
 
     // sub_b should no longer appear in the status after the debounce reindex
-    harness.assert_status_eventually("sub_b removed from status", |statuses| {
-        !statuses.iter().any(|(name, _)| name == "sub_b")
+    harness.assert_status_eventually("sub_b removed from status", |status| {
+        !status.submodule_statuses.iter().any(|(name, _)| name == "sub_b")
     });
 
     // sub_a should be unaffected
@@ -89,7 +89,7 @@ fn remove_submodule_detected_by_server(_run: u32) {
     harness.assert_submodule_status("sub_a", StatusSummary::UNTRACKED_CONTENT);
 
     // sub_b should no longer appear in the status
-    harness.assert_status_eventually("sub_b removed from status", |statuses| {
-        !statuses.iter().any(|(name, _)| name == "sub_b")
+    harness.assert_status_eventually("sub_b removed from status", |status| {
+        !status.submodule_statuses.iter().any(|(name, _)| name == "sub_b")
     });
 }

@@ -15,6 +15,97 @@ pub mod watch;
 pub const DOT_GITMODULES: &str = ".gitmodules";
 pub const DOT_GIT: &str = ".git";
 
+#[derive(Clone, Debug, Eq, PartialEq, Encode, BorrowDecode)]
+pub enum FileChange {
+    New,
+    Modified,
+    Deleted,
+    Renamed,
+    Typechange,
+}
+
+impl FileChange {
+    #[must_use]
+    pub const fn label(&self) -> &'static str {
+        match self {
+            Self::New => "new file: ",
+            Self::Modified => "modified: ",
+            Self::Deleted => "deleted: ",
+            Self::Renamed => "renamed: ",
+            Self::Typechange => "typechange:",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Encode, BorrowDecode)]
+pub enum FileZone {
+    Staged,
+    Unstaged,
+    Untracked,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Encode, BorrowDecode)]
+pub struct FileStatusEntry {
+    pub change: FileChange,
+    pub zone: FileZone,
+    pub path: String,
+    pub new_path: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Encode, BorrowDecode)]
+pub enum ConflictType {
+    BothModified,
+    BothAdded,
+    DeletedByUs,
+    DeletedByThem,
+    BothDeleted,
+    AddedByUs,
+    AddedByThem,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Encode, BorrowDecode)]
+pub struct ConflictEntry {
+    pub path: String,
+    pub conflict_type: ConflictType,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Encode, BorrowDecode)]
+pub enum BranchInfo {
+    Branch(String),
+    Detached(String),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Encode, BorrowDecode)]
+pub struct UpstreamStatus {
+    pub upstream_name: String,
+    pub ahead: u32,
+    pub behind: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Encode, BorrowDecode)]
+pub struct RebaseInfo {
+    pub onto_short: String,
+    pub head_name: String,
+    pub done_ops: Vec<String>,
+    pub total_done: u32,
+    pub remaining_ops: Vec<String>,
+    pub total_remaining: u32,
+    pub is_interactive: bool,
+    pub is_editing: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Encode, BorrowDecode)]
+pub struct FullRepoStatus {
+    pub submodule_statuses: Vec<(String, StatusSummary)>,
+    pub file_statuses: Vec<FileStatusEntry>,
+    pub branch: BranchInfo,
+    pub upstream: Option<UpstreamStatus>,
+    pub rebase: Option<RebaseInfo>,
+    pub conflicts: Vec<ConflictEntry>,
+    pub new_submodule_paths: Vec<String>,
+    pub rm_in_workdir: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RepoKind {
     /// A git repository with "just" a `.git` folder.
