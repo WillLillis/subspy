@@ -20,7 +20,12 @@ mod client_handler;
 pub mod watch_server;
 
 /// Common bincode configuration used to encode/decode messages between the client and server
-pub const BINCODE_CFG: bincode::config::Configuration = bincode::config::standard().with_no_limit();
+pub const BINCODE_CFG: bincode::config::Configuration<
+    bincode::config::LittleEndian,
+    bincode::config::Fixint,
+> = bincode::config::standard()
+    .with_fixed_int_encoding()
+    .with_no_limit();
 
 #[derive(Clone, Debug, Eq, PartialEq, Encode, BorrowDecode)]
 pub enum ClientMessage {

@@ -93,8 +93,8 @@ fn dispatch_client_message(
         conn.read_exact(&mut len_buf)?;
         u32::from_le_bytes(len_buf) as usize
     };
-    // 1 byte variant index + up to 5 bytes varint u32 + 1 byte bool (if present)
-    let mut buffer = [0u8; 7];
+    // 4 byte variant index + 4 byte u32 + 1 byte bool (fixint)
+    let mut buffer = [0u8; 9];
     if msg_len > buffer.len() {
         Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
@@ -222,8 +222,8 @@ fn try_send_progress_update(
     drop(progress_queue);
 
     let progress = ServerMessage::Indexing { curr, total };
-    // 1 byte variant index + up to 5 bytes varint u32 each (if present)
-    let mut progress_msg = [0; 11];
+    // 4 byte variant index + 4 byte u32 curr + 4 byte u32 total (fixint)
+    let mut progress_msg = [0; 12];
     let progress_msg_len = bincode::encode_into_slice(progress, &mut progress_msg, BINCODE_CFG)?;
     write_full_message(conn, &progress_msg[..progress_msg_len])?;
 

@@ -36,7 +36,7 @@ pub fn request_reindex(
         pid: client_pid,
         replace_watchers,
     };
-    let mut msg = [0; 7]; // 1 byte variant index + up to 5 bytes varint u32 + 1 byte bool
+    let mut msg = [0; 9]; // 4 byte variant index + 4 byte u32 pid + 1 byte bool (fixint)
     let msg_len = bincode::encode_into_slice(&status_req, &mut msg, BINCODE_CFG)?;
     write_full_message(&mut conn, &msg[..msg_len])?;
 
@@ -76,7 +76,7 @@ pub fn request_shutdown(root_path: &Path) -> ShutdownResult<()> {
     let conn = Stream::connect(name)?;
     let mut conn = BufReader::new(conn);
     let status_req = ClientMessage::Shutdown;
-    let mut msg = [0; 1]; // unit variant: 1 byte for variant index
+    let mut msg = [0; 4]; // unit variant: 4 byte variant index (fixint)
     let msg_len = bincode::encode_into_slice(&status_req, &mut msg, BINCODE_CFG)?;
     write_full_message(&mut conn, &msg[..msg_len])?;
 
@@ -161,7 +161,7 @@ pub fn request_status(
 ) -> StatusResult<Vec<(String, StatusSummary)>> {
     let mut conn = connect_to_server(root_path)?;
     let status_req = ClientMessage::Status(std::process::id());
-    let mut req_msg = [0; 6]; // statically determined an upper bound of 6 bytes
+    let mut req_msg = [0; 8]; // 4 byte variant index + 4 byte u32 pid (fixint)
     let req_msg_len = bincode::encode_into_slice(&status_req, &mut req_msg, BINCODE_CFG)?;
     write_full_message(&mut conn, &req_msg[..req_msg_len])?;
 
@@ -205,7 +205,7 @@ pub fn request_debug(root_path: &Path) -> DebugResult<DebugState> {
     let conn = Stream::connect(name)?;
     let mut conn = BufReader::new(conn);
     let req = ClientMessage::Debug;
-    let mut msg = [0; 1]; // unit variant: 1 byte for variant index
+    let mut msg = [0; 4]; // unit variant: 4 byte variant index (fixint)
     let msg_len = bincode::encode_into_slice(&req, &mut msg, BINCODE_CFG)?;
     write_full_message(&mut conn, &msg[..msg_len])?;
 

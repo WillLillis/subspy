@@ -679,7 +679,7 @@ impl WatchServer {
 
     /// Sends a shutdown acknowledgment to the client over the IPC connection.
     fn signal_shutdown(mut conn: BufReader<Stream>) {
-        let mut buf = [0; 1]; // unit variant: 1 byte for variant index
+        let mut buf = [0; 4]; // unit variant: 4 byte variant index (fixint)
         match bincode::encode_into_slice(ServerMessage::ShutdownAck, &mut buf, BINCODE_CFG) {
             Ok(_) => {
                 if let Err(e) = write_full_message(&mut conn, &buf) {
@@ -1491,8 +1491,8 @@ mod tests {
         for (name, encoded) in cases {
             assert_eq!(
                 encoded.len(),
-                1,
-                "Expected {name} to encode to 1 byte, got {} bytes",
+                4,
+                "Expected {name} to encode to 4 bytes, got {} bytes",
                 encoded.len(),
             );
         }
@@ -1513,8 +1513,8 @@ mod tests {
         )
         .unwrap();
         assert!(
-            reindex_max.len() <= 7,
-            "ClientMessage::Reindex(u32::MAX, true) encoded to {} bytes, exceeds buffer size of 7",
+            reindex_max.len() <= 9,
+            "ClientMessage::Reindex(u32::MAX, true) encoded to {} bytes, exceeds buffer size of 9",
             reindex_max.len(),
         );
 
@@ -1522,8 +1522,8 @@ mod tests {
         let status_max =
             bincode::encode_to_vec(ClientMessage::Status(u32::MAX), BINCODE_CFG).unwrap();
         assert!(
-            status_max.len() <= 7,
-            "ClientMessage::Status(u32::MAX) encoded to {} bytes, exceeds buffer size of 7",
+            status_max.len() <= 9,
+            "ClientMessage::Status(u32::MAX) encoded to {} bytes, exceeds buffer size of 9",
             status_max.len(),
         );
 
@@ -1537,8 +1537,8 @@ mod tests {
         )
         .unwrap();
         assert!(
-            indexing_max.len() <= 11,
-            "ServerMessage::Indexing(u32::MAX, u32::MAX) encoded to {} bytes, exceeds buffer size of 11",
+            indexing_max.len() <= 12,
+            "ServerMessage::Indexing(u32::MAX, u32::MAX) encoded to {} bytes, exceeds buffer size of 12",
             indexing_max.len(),
         );
     }
