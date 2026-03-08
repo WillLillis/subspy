@@ -552,6 +552,20 @@ fn display_status(
     submodule_statuses: &[(String, StatusSummary)],
     new_submodule_paths: &[String],
 ) -> StatusResult<()> {
+    // Fast path: nothing dirty
+    if non_submodule_statues.is_empty()
+        && submodule_statuses.is_empty()
+        && new_submodule_paths.is_empty()
+    {
+        match get_rebase_info(repo)? {
+            Some(ref info) => print_rebase_header(info),
+            None => print_normal_header(repo)?,
+        }
+        println!("nothing to commit, working tree clean");
+        print_lock_file_errors(submodule_statuses);
+        return Ok(());
+    }
+
     match get_rebase_info(repo)? {
         Some(ref info) => print_rebase_header(info),
         None => print_normal_header(repo)?,
