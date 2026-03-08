@@ -97,9 +97,6 @@ pub fn read_full_message(
         u32::from_le_bytes(len_buf) as usize
     };
 
-    let additional_size = msg_len.saturating_sub(buffer.capacity());
-    buffer.reserve_exact(additional_size);
-    // `buffer` length is set to 0, so resizing fills it with 0s
     buffer.resize(msg_len, 0);
     conn.read_exact(buffer)?;
 
