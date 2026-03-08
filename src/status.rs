@@ -3,7 +3,11 @@ use git2::{Repository, Statuses};
 use std::{cmp::Ordering, fs, path::Path};
 use thiserror::Error;
 
-use crate::{RepoKind, StatusSummary, connection::client::request_status, paint};
+use crate::{
+    RepoKind, StatusSummary,
+    connection::client::{recv_status_response, send_status_request},
+    paint,
+};
 
 pub type StatusResult<T> = Result<T, StatusError>;
 
@@ -636,6 +640,13 @@ pub fn new_submodule_paths(repo: &Repository) -> StatusResult<Vec<String>> {
 ///
 /// Returns `Err` if statuses cannot be retrieved from the repository or watch server
 pub fn status(root_path: &Path, repo_kind: RepoKind, display_progress: bool) -> StatusResult<()> {
+    // Send IPC request early so the server starts processing while we do local work.
+    let mut conn = if repo_kind == RepoKind::WithSubmodules {
+        Some(send_status_request(root_path)?)
+    } else {
+        None
+    };
+
     let repo = Repository::open(root_path)?;
 
     let mut opts = git2::StatusOptions::new();
@@ -650,14 +661,13 @@ pub fn status(root_path: &Path, repo_kind: RepoKind, display_progress: bool) -> 
     }
 
     let non_submodule_statuses = repo.statuses(Some(&mut opts))?;
-
     let new_submodule_paths = new_submodule_paths(&repo)?;
 
-    let submodule_statuses = if repo_kind == RepoKind::WithSubmodules {
-        request_status(root_path, display_progress)?
-    } else {
-        Vec::new()
+    let submodule_statuses = match conn {
+        Some(ref mut c) => recv_status_response(c, display_progress)?,
+        None => Vec::new(),
     };
+
     display_status(
         &repo,
         &non_submodule_statuses,

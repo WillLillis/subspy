@@ -11,7 +11,10 @@ use rstest_reuse::{self, template};
 use subspy::{
     StatusSummary,
     connection::watch_server::watch,
-    connection::{client::request_shutdown, client::request_status, ipc_name},
+    connection::{
+        client::{recv_status_response, request_shutdown, send_status_request},
+        ipc_name,
+    },
 };
 use tempfile::TempDir;
 
@@ -182,7 +185,8 @@ impl TestHarness {
 
     /// Request the current status from the watch server.
     pub fn status(&self) -> Vec<(String, StatusSummary)> {
-        request_status(&self.root_path, false).expect("request_status failed")
+        let mut conn = send_status_request(&self.root_path).expect("send_status_request failed");
+        recv_status_response(&mut conn, false).expect("recv_status_response failed")
     }
 
     /// Poll status until it matches the expected predicate, or panic on timeout.
@@ -370,9 +374,10 @@ impl TestHarness {
         loop {
             let name = ipc_name(&self.root_path).unwrap();
             if Stream::connect(name).is_ok() {
-                // Server is listening. Do a full request_status() to
+                // Server is listening. Do a full status request to
                 // wait for initial indexing to complete.
-                let _ = request_status(&self.root_path, false);
+                let mut conn = send_status_request(&self.root_path).unwrap();
+                let _ = recv_status_response(&mut conn, false);
                 return;
             }
             assert!(

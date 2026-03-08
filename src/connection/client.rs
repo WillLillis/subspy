@@ -146,30 +146,39 @@ fn server_not_started(e: &std::io::Error) -> bool {
     )
 }
 
-/// Requests the statuses of the submodules within `path` from the watch server
+/// Sends a status request to the watch server for `root_path`.
+///
+/// Connects to the server (spawning if needed) and sends a `ClientMessage::Status`
+/// request. Returns the live connection so that the caller can perform other work
+/// before reading the response with [`recv_status_response`].
 ///
 /// # Errors
 ///
-/// Returns error if the ipc channel cannot be created, or communication over said channel fails
-///
-/// # Panics
-///
-/// Panics if a malformed response from the watch server is received
-pub fn request_status(
-    root_path: &Path,
-    display_progress: bool,
-) -> StatusResult<Vec<(String, StatusSummary)>> {
+/// Returns error if the ipc channel cannot be created or the request cannot be sent.
+pub fn send_status_request(root_path: &Path) -> StatusResult<BufReader<Stream>> {
     let mut conn = connect_to_server(root_path)?;
     let status_req = ClientMessage::Status(std::process::id());
     let mut req_msg = [0; 8]; // 4 byte variant index + 4 byte u32 pid (fixint)
     let req_msg_len = bincode::encode_into_slice(&status_req, &mut req_msg, BINCODE_CFG)?;
     write_full_message(&mut conn, &req_msg[..req_msg_len])?;
+    Ok(conn)
+}
 
+/// Drains any `Indexing` progress messages from `conn` (updating the progress bar if
+/// `display_progress` is true), and returns the final `Status` payload.
+///
+/// # Errors
+///
+/// Returns error if communication over the channel fails or an unexpected message
+/// is received.
+pub fn recv_status_response(
+    conn: &mut BufReader<Stream>,
+    display_progress: bool,
+) -> StatusResult<Vec<(String, StatusSummary)>> {
     let progress_bar = display_progress.then(|| create_progress_bar(0, "Indexing in progress..."));
-    // TODO: Get some impirical data on the actual buffer size we need
     let mut buffer = Vec::with_capacity(1024);
     loop {
-        read_full_message(&mut conn, &mut buffer)?;
+        read_full_message(conn, &mut buffer)?;
 
         let (resp_msg, _): (ServerMessage, usize) =
             bincode::borrow_decode_from_slice(&buffer, BINCODE_CFG)?;
