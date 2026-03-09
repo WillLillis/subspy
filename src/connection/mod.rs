@@ -12,6 +12,7 @@ use interprocess::local_socket::{
     GenericFilePath, GenericNamespaced, Listener, ListenerOptions, Name, NameType as _, Stream,
     ToFsName as _, ToNsName as _,
 };
+use rustc_hash::FxHasher;
 
 use crate::StatusSummary;
 
@@ -106,11 +107,15 @@ pub fn read_full_message(
 /// Returns the `interprocess::local_socket::name::Name` used to communicate between
 /// the watch server and request clients for a given git project at `path`.
 ///
+/// NOTE: The hash is deterministic across builds so that a client compiled from
+/// one build can talk to a server compiled from another. `FxHasher` is stable
+/// across Rust toolchain versions (unlike `DefaultHasher`).
+///
 /// # Errors
 ///
 /// Returns `std::io::Error` if socket name isn't supported by the given platform
 pub fn ipc_name(path: &Path) -> std::io::Result<Name<'_>> {
-    let mut hasher = std::hash::DefaultHasher::new();
+    let mut hasher = FxHasher::default();
     path.hash(&mut hasher);
     let hash = hasher.finish();
     let base_name = hash.to_string();

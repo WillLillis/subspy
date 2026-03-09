@@ -40,6 +40,7 @@ interprocess = "2.2.3"
 log = "0.4.29"
 notify = "8.2.0"
 rayon = "1.10"
+rustc-hash = "2"
 thiserror = "2.0.17"
 thread_local = "1.1"
 
