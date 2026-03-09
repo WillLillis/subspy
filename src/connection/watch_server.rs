@@ -20,7 +20,10 @@ use notify::{
 
 use crate::{
     DOT_GIT, DOT_GITMODULES, StatusSummary,
-    connection::{BINCODE_CFG, DebugState, ServerMessage, create_listener, write_full_message},
+    connection::{
+        BINCODE_CFG, DebugState, ServerMessage, create_listener, ipc_name_string,
+        write_full_message,
+    },
     create_progress_bar,
     watch::{LockFileError, WatchError, WatchResult},
 };
@@ -670,6 +673,7 @@ impl WatchServer {
             skip_set,
             root_rebasing: self.root_rebasing,
             root_path: self.root_path.display().to_string(),
+            socket_name: ipc_name_string(&self.root_path),
             submodule_statuses,
             in_flight: in_flight_tasks,
             progress_queues,
@@ -1176,7 +1180,7 @@ impl WatchServer {
         in_flight: &Arc<(Mutex<InFlightTracker>, Condvar)>,
     ) {
         let state = self.gather_debug_state(in_flight);
-        let msg = ServerMessage::DebugInfo(state);
+        let msg = ServerMessage::DebugInfo(Box::new(state));
         match bincode::encode_to_vec(msg, BINCODE_CFG) {
             Ok(serialized) => {
                 if let Err(e) = write_full_message(conn, &serialized) {

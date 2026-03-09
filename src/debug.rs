@@ -33,6 +33,7 @@ impl fmt::Display for DebugState {
         writeln!(f, "Server PID: {}", self.server_pid)?;
         writeln!(f, "Worker threads: {}", self.rayon_threads)?;
         writeln!(f, "Root path: {}", self.root_path)?;
+        writeln!(f, "Socket: {}", self.socket_name)?;
         writeln!(f, "Root rebasing: {}", self.root_rebasing)?;
         writeln!(f, "Watcher count: {}", self.watcher_count)?;
         write!(f, "Progress subscribers: ")?;

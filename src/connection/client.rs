@@ -236,7 +236,7 @@ pub fn request_debug(root_path: &Path) -> DebugResult<DebugState> {
         bincode::borrow_decode_from_slice(&buffer, BINCODE_CFG)?;
 
     match resp {
-        ServerMessage::DebugInfo(state) => Ok(state),
+        ServerMessage::DebugInfo(state) => Ok(*state),
         other => {
             error!("Unexpected response from server during debug request: {other:?}");
             Err(std::io::Error::new(

@@ -41,7 +41,7 @@ pub enum ServerMessage {
     Status(Vec<(String, StatusSummary)>),
     Indexing { curr: u32, total: u32 },
     ShutdownAck,
-    DebugInfo(DebugState),
+    DebugInfo(Box<DebugState>),
 }
 
 /// Diagnostic snapshot of the watch server's internal state
@@ -55,6 +55,7 @@ pub struct DebugState {
     pub skip_set: Vec<String>,
     pub root_rebasing: bool,
     pub root_path: String,
+    pub socket_name: String,
     pub submodule_statuses: Option<Vec<(String, StatusSummary)>>,
     /// In-flight rayon tasks: `(relative_path, state)` where state is "active" or "dirty"
     pub in_flight: Option<Vec<(String, String)>>,
@@ -115,14 +116,24 @@ pub fn read_full_message(
 ///
 /// Returns `std::io::Error` if socket name isn't supported by the given platform
 pub fn ipc_name(path: &Path) -> std::io::Result<Name<'_>> {
+    let name = ipc_name_string(path);
+    if GenericNamespaced::is_supported() {
+        name.to_ns_name::<GenericNamespaced>()
+    } else {
+        name.to_fs_name::<GenericFilePath>()
+    }
+}
+
+/// Returns the raw socket name string for a given repository path.
+#[must_use]
+pub fn ipc_name_string(path: &Path) -> String {
     let mut hasher = FxHasher::default();
     path.hash(&mut hasher);
     let hash = hasher.finish();
-    let base_name = hash.to_string();
     if GenericNamespaced::is_supported() {
-        format!("{base_name}.sock").to_ns_name::<GenericNamespaced>()
+        format!("{hash}.sock")
     } else {
-        format!("/tmp/{base_name}.sock").to_fs_name::<GenericFilePath>()
+        format!("/tmp/{hash}.sock")
     }
 }
 
