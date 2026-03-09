@@ -106,6 +106,11 @@ The client and server must be built from the same version of `subspy`. The IPC p
 and no guarantees are made regarding compatibility in between versions. After upgrading, stop any running
 watch servers before using the new binary.
 
+#### Limitations
+
+- Watch servers for nested submodules (submodules which contain submodules of their own) is not supported.
+`subspy` must be run from the top-level of the repository.
+
 #### Future Improvements
 
 - [ ] crates.io releases if desired
