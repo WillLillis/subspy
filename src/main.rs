@@ -1,6 +1,6 @@
 use std::{env::current_dir, io, io::IsTerminal as _, path::PathBuf, process};
 
-use anstyle::{AnsiColor, Color, Style};
+use anstyle::AnsiColor;
 use clap::{Args, Command, FromArgMatches as _, Subcommand, ValueEnum};
 use etcetera::{BaseStrategy, HomeDirError};
 use flexi_logger::{FileSpec, Logger, WriteMode};
@@ -11,6 +11,7 @@ use subspy::{
     DOT_GIT, DOT_GITMODULES, RepoKind,
     connection::{client::request_reindex, spawn_daemon, watch_server::watch},
     debug::{DebugError, debug},
+    paint,
     reindex::ReindexError,
     shutdown::{ShutdownError, shutdown},
     status::{StatusError, status},
@@ -274,11 +275,6 @@ fn get_project_path(path: Option<PathBuf>) -> RunResult<(PathBuf, RepoKind)> {
             })?,
         }
     }
-}
-
-fn paint(color: Option<impl Into<Color>>, text: &str) -> String {
-    let style = Style::new().fg_color(color.map(Into::into));
-    format!("{style}{text}{style:#}")
 }
 
 pub fn main() {

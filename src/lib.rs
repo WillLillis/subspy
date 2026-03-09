@@ -111,12 +111,12 @@ impl From<git2::SubmoduleStatus> for StatusSummary {
     }
 }
 
-pub(crate) fn paint(color: Option<impl Into<Color>>, text: &str) -> String {
+pub fn paint(color: Option<impl Into<Color>>, text: &str) -> String {
     let style = Style::new().fg_color(color.map(Into::into));
     format!("{style}{text}{style:#}")
 }
 
-/// Creats a new styled `indicatif::ProgressBar`
+/// Creates a new styled `indicatif::ProgressBar`
 fn create_progress_bar(len: u64, prefix: impl Into<Cow<'static, str>>) -> indicatif::ProgressBar {
     ProgressBar::new(len)
         .with_style(
