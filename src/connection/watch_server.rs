@@ -10,6 +10,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+use rustc_hash::FxHashMap;
+
 use git2::Repository;
 use interprocess::local_socket::{Stream, traits::ListenerExt as _};
 use log::{error, info, trace};
@@ -65,8 +67,6 @@ type ServerWatcher = notify::RecommendedWatcher;
 struct WatchListItem {
     watch_path: PathBuf,
     relative_path: String,
-    /// Cached path to the submodule's `index.lock` file. `None` for root watchers.
-    lock_file_path: Option<PathBuf>,
     receiver: WatchReceiver,
     watcher: ServerWatcher,
 }
@@ -75,14 +75,12 @@ impl WatchListItem {
     const fn new(
         relative_path: String,
         watch_path: PathBuf,
-        lock_file_path: Option<PathBuf>,
         receiver: WatchReceiver,
         watcher: ServerWatcher,
     ) -> Self {
         Self {
             watch_path,
             relative_path,
-            lock_file_path,
             receiver,
             watcher,
         }
@@ -130,6 +128,9 @@ struct WatchServer {
     progress_subscribers: Arc<ProgressSubscribers>,
     /// The last watcher error that triggered a reindex, if any.
     last_watcher_error: Option<String>,
+    /// Maps a submodule's `.git/modules/<name>` path to its watcher index.
+    /// Used by `submod_for_event` to avoid a linear scan over all watchers.
+    modules_path_to_index: FxHashMap<PathBuf, usize>,
 }
 
 /// Summarizes an event received from a watcher. Create with `get_event_type`
@@ -337,6 +338,7 @@ impl WatchServer {
             progress_queue: Arc::new(Mutex::new(HashMap::new())),
             progress_subscribers: Arc::new(Mutex::new(HashSet::new())),
             last_watcher_error: None,
+            modules_path_to_index: FxHashMap::default(),
         }
     }
 
@@ -434,7 +436,6 @@ impl WatchServer {
         self.watchers.push(WatchListItem::new(
             DOT_GITMODULES.to_owned(),
             self.root_gitmodules_path.clone(),
-            None,
             rx,
             watcher,
         ));
@@ -455,7 +456,6 @@ impl WatchServer {
         self.watchers.push(WatchListItem::new(
             DOT_GIT.to_owned(),
             self.root_git_path.clone(),
-            None,
             rx,
             watcher,
         ));
@@ -538,11 +538,11 @@ impl WatchServer {
                 let sub_start = std::time::Instant::now();
                 let repo = tl_repo.get_or_try(|| Repository::open(root_path))?;
 
-                let lock_path = match self.get_index_lock_path(&relative_path) {
+                let modules_path = match self.get_modules_path(&relative_path) {
                     Ok(p) => p,
                     Err(e) => {
                         error!(
-                            "Failed to get lock file path for submodule {relative_path} - {e}, skipping...",
+                            "Failed to get modules path for submodule {relative_path} - {e}, skipping...",
                         );
                         Err(e)?
                     }
@@ -550,8 +550,8 @@ impl WatchServer {
                 // This is definitely a race condition, and is not meant to catch "active" rebases
                 // while the status map is being populated. Instead, the intention is for "stalled"
                 // rebases (i.e. that has hit a conflict that must be manually resolved) so that we
-                // can properly skip updateing this submodule until its rebase has been completed.
-                let is_in_rebase = lock_path.parent().unwrap().join("rebase-merge").exists();
+                // can properly skip updating this submodule until its rebase has been completed.
+                let is_in_rebase = modules_path.join("rebase-merge").exists();
 
                 #[cfg(target_os = "windows")]
                 let relative_path = relative_path.replace('\\', "/");
@@ -559,7 +559,12 @@ impl WatchServer {
                 let status = if is_in_rebase {
                     StatusSummary::NEW_COMMITS
                 } else {
-                    get_submod_status(repo, &relative_path, &lock_path, None)?
+                    get_submod_status(
+                        repo,
+                        &relative_path,
+                        &modules_path.join("index.lock"),
+                        None,
+                    )?
                 };
 
                 let count = completed.fetch_add(1, Ordering::Relaxed) + 1;
@@ -578,27 +583,27 @@ impl WatchServer {
                     sub_start.elapsed().as_millis(),
                 );
 
-                Ok((relative_path, full_path, lock_path, status, is_in_rebase))
+                Ok((relative_path, full_path, modules_path, status, is_in_rebase))
             })
             .collect();
         let results = results?;
 
         status_guard.clear();
-        for (relative_path, full_path, lock_path, status, is_in_rebase) in results {
+        if place_submod_watches {
+            self.modules_path_to_index.clear();
+        }
+        for (relative_path, full_path, modules_path, status, is_in_rebase) in results {
             status_guard.insert(relative_path.clone(), status);
             if is_in_rebase {
                 self.skip_set.insert(relative_path.clone());
             }
             if place_submod_watches {
+                let index = self.watchers.len();
+                self.modules_path_to_index.insert(modules_path, index);
                 let (rx, watcher) =
                     Self::place_watch(&full_path, notify::RecursiveMode::Recursive)?;
-                self.watchers.push(WatchListItem::new(
-                    relative_path,
-                    full_path,
-                    Some(lock_path),
-                    rx,
-                    watcher,
-                ));
+                self.watchers
+                    .push(WatchListItem::new(relative_path, full_path, rx, watcher));
             }
         }
         drop(status_guard);
@@ -796,21 +801,14 @@ impl WatchServer {
     }
 
     /// Finds the watcher index of the submodule whose `.git/modules` path matches the event.
+    /// Walks ancestor paths of each event path and checks the `modules_path_to_index` map.
     #[inline]
     fn submod_for_event(&self, event: &Event) -> Option<usize> {
-        self.watchers
-            .iter()
-            .enumerate()
-            .skip(ROOT_WATCHER_COUNT)
-            .find_map(|(i, watcher)| {
-                let submod_modules_path =
-                    watcher.lock_file_path.as_ref().unwrap().parent().unwrap();
-                event
-                    .paths
-                    .iter()
-                    .any(|p| p.starts_with(submod_modules_path))
-                    .then_some(i)
-            })
+        event.paths.iter().find_map(|p| {
+            p.ancestors()
+                .find_map(|ancestor| self.modules_path_to_index.get(ancestor))
+                .copied()
+        })
     }
 
     #[inline]
@@ -947,17 +945,18 @@ impl WatchServer {
         }
     }
 
-    /// Returns the path to the `index.lock` file for a submodule
-    fn get_index_lock_path(&self, submod_rel_path: &str) -> WatchResult<PathBuf> {
+    /// Returns the path to the submodule's `.git/modules/` entry (e.g.
+    /// `.git/modules/libs/foo` for a submodule at `libs/foo`).
+    fn get_modules_path(&self, submod_rel_path: &str) -> WatchResult<PathBuf> {
         // NOTE: There is a hypothetical bug here where if two submodules were renamed
-        // to eachother's names _and_ their `.git/modules` entries weren't updates (i.e.,
-        // only the relative path in each submodule's `.git` file), the two lock paths
-        // will be swapped. This is highly unlikely to cuase a bug in real use, and until
-        // its proven to I would prefer to not pessimize the common case with a full read
+        // to eachother's names _and_ their `.git/modules` entries weren't updated (i.e.,
+        // only the relative path in each submodule's `.git` file), the two paths
+        // will be swapped. This is highly unlikely to cause a bug in real use, and until
+        // it's proven to I would prefer to not pessimize the common case with a full read
         // and parse of the `.git` file.
         let alleged_submod_path = self.root_modules_path.join(submod_rel_path);
         if alleged_submod_path.exists() {
-            return Ok(alleged_submod_path.join("index.lock"));
+            return Ok(alleged_submod_path);
         }
 
         // The submodule was renamed at some point but its `.git` directory inside
@@ -977,9 +976,9 @@ impl WatchServer {
                 )
             })?
             .trim();
-        let full_submod_path =
-            dunce::canonicalize(self.root_path.join(submod_rel_path).join(actual_rel_path))?;
-        Ok(full_submod_path.join("index.lock"))
+        Ok(dunce::canonicalize(
+            self.root_path.join(submod_rel_path).join(actual_rel_path),
+        )?)
     }
 
     /// Attempts to spawn a rayon task to update the status of the submodule at watcher `index`.
