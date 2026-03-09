@@ -18,7 +18,7 @@ There are a few potential workarounds you should try before using this tool, inc
 SubSpy provides a solution to this issue by placing recursive filesystem watches on your repository's `.git` folder, `.gitmodules`
 file, and all submodule directories. The status for all submodules is cached by an initial indexing operation and updated
 any time a change is detected in one of these locations. For sufficiently many submodules, `subspy status` is usually
-100-200x faster than `git status`.
+100-200x faster than `git status` on Windows, and 20-40x faster on Linux.
 
 ### Usage
 
@@ -56,12 +56,16 @@ Note that the project's current Minimum Supported Rust Version (MSRV) is 1.87.0.
 
 #### Outrageous Anecdotal Performance Claims
 
-I developed this tool to remove an annoyance at work. Here's a comparison between `subspy status` and `git status` on a
-repo with >200 submodules, running on Windows 11 with git bash. The `subspy` measurement was taken twice and both times
-are shown. The first measures the time to start the watch server, connect to it, and display the status. The second connects
-to the existing server and display the status.  The `git` measurement was taken after already running `git status` to "preheat"
-any caching mechanisms git may have in place. Note that making changes to a repository may increase the runtime of the next
-`git status` invocation, while `subspy status`'s should remain constant.
+For both of the following data points, the `subspy` measurement was taken twice and both times are shown. The first
+measures the time to start the watch server, connect to it, and display the status. The second measures the time to connect
+to the existing server and display the status. The `git` measurement was taken after already running `git status` to "preheat"
+any caching mechanisms git may have in place. Note that making changes within or performing git operations on a repository
+may increase the runtime of the next `git status` invocation, while `subspy status`'s should remain constant.
+
+- Windows:
+
+Subspy is most useful on Windows, where git is the slowest. Here's a comparison between `subspy status` and `git status`
+on a private repo with >200 submodules, running on Windows 11 with git bash.
 
 ```sh
 ~/very_large_project/ > time subspy status # Spawns a new watch server
@@ -78,6 +82,22 @@ sys     0m0.000s
 real    0m15.667s
 user    0m0.015s
 sys     0m0.000s
+```
+
+- Linux:
+
+Git's performance is typically acceptable on Linux platforms. Testing on [boost](https://github.com/boostorg/boost), we
+see a much smaller performance gain:
+
+```sh
+~/boost/ > time subspy status # Spawns a new watch server
+subspy status  0.01s user 0.00s system 3% cpu 0.375 total
+
+~/boost/ > time subspy status # Connects to previously spawned server
+subspy status  0.01s user 0.00s system 97% cpu 0.012 total
+
+~/boost/ > time git status
+git st  0.07s user 0.21s system 104% cpu 0.264 total
 ```
 
 #### Future Improvements
