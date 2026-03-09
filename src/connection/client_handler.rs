@@ -100,15 +100,6 @@ fn dispatch_client_message(
     };
     // 4 byte variant index + 4 byte u32 + 1 byte bool (fixint)
     let mut buffer = [0u8; 9];
-    if msg_len > buffer.len() {
-        Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!(
-                "Client message too large: {msg_len} bytes > {}",
-                buffer.len()
-            ),
-        ))?;
-    }
     conn.read_exact(&mut buffer[..msg_len])?;
     let (msg, _): (ClientMessage, usize) =
         bincode::borrow_decode_from_slice(&buffer[..msg_len], BINCODE_CFG)?;

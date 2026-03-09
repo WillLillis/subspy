@@ -100,8 +100,12 @@ subspy status  0.01s user 0.00s system 97% cpu 0.012 total
 git st  0.07s user 0.21s system 104% cpu 0.264 total
 ```
 
+#### Compatibility
+
+The client and server must be built from the same version of `subspy`. The IPC protocol is not versioned,
+and no guarantees are made regarding compatibility in between versions. After upgrading, stop any running
+watch servers before using the new binary.
+
 #### Future Improvements
 
 - [ ] crates.io releases if desired
-
-#### Known Issues
