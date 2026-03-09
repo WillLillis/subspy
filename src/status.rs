@@ -324,7 +324,7 @@ fn print_staged_changes(
     }
 
     for (submod_path, _) in submodule_statuses.iter().filter(|(_, st)| {
-        st.contains(StatusSummary::STAGED) && !st.eq(&StatusSummary::LOCK_FAILURE)
+        st.contains(StatusSummary::STAGED) && !st.contains(StatusSummary::LOCK_FAILURE)
     }) {
         if !header {
             println!("{STAGED_HEADER}");
@@ -352,7 +352,7 @@ fn print_unstaged_changes(
 ) -> bool {
     let has_submod_changes = submodule_statuses
         .iter()
-        .any(|(_, st)| !st.eq(&StatusSummary::STAGED));
+        .any(|(_, st)| !st.eq(&StatusSummary::STAGED) && !st.contains(StatusSummary::LOCK_FAILURE));
     let mut header = false;
 
     for entry in non_submod.iter() {
@@ -393,10 +393,9 @@ fn print_unstaged_changes(
         }
     }
 
-    for (submod_path, submod_status) in submodule_statuses
-        .iter()
-        .filter(|(_, st)| !st.eq(&StatusSummary::STAGED) && !st.eq(&StatusSummary::LOCK_FAILURE))
-    {
+    for (submod_path, submod_status) in submodule_statuses.iter().filter(|(_, st)| {
+        !st.eq(&StatusSummary::STAGED) && !st.contains(StatusSummary::LOCK_FAILURE)
+    }) {
         if !header {
             println!("{}", unstaged_header(rm_in_workdir, true));
             header = true;
@@ -463,7 +462,7 @@ fn print_lock_file_errors(submodule_statuses: &[(String, StatusSummary)]) {
     let mut footer = false;
     for (submod_path, _) in submodule_statuses
         .iter()
-        .filter(|(_, st)| st.eq(&StatusSummary::LOCK_FAILURE))
+        .filter(|(_, st)| st.contains(StatusSummary::LOCK_FAILURE))
     {
         if !footer {
             println!();
