@@ -1,7 +1,7 @@
 use std::{
     io::{BufReader, Read},
     path::Path,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use indicatif::{ProgressBar, ProgressStyle};
@@ -134,13 +134,21 @@ fn connect_to_server(root_path: &Path) -> StatusResult<BufReader<Stream>> {
     spinner.enable_steady_tick(Duration::from_millis(80));
 
     let name = ipc_name(root_path)?;
+    let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         match Stream::connect(name.clone()) {
             Ok(conn) => {
                 spinner.finish_and_clear();
                 return Ok(BufReader::new(conn));
             }
-            Err(e) if server_not_started(&e) => {}
+            Err(e) if server_not_started(&e) => {
+                if Instant::now() >= deadline {
+                    spinner.abandon_with_message(
+                        "Watch server failed to start within 10s".to_string(),
+                    );
+                    Err(e)?;
+                }
+            }
             Err(e) => {
                 spinner.abandon_with_message("Failed to connect to watch server".to_string());
                 Err(e)?;
