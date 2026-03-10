@@ -273,6 +273,7 @@ fn print_staged_changes(
     non_submod: &Statuses<'_>,
     submodule_statuses: &[(String, StatusSummary)],
     new_submodule_paths: &[String],
+    deleted_submodule_paths: &[String],
 ) -> bool {
     let mut header = false;
 
@@ -320,6 +321,17 @@ fn print_staged_changes(
         println!(
             "{}",
             paint(Some(AnsiColor::Green), &format!("\tnew file:   {path}"))
+        );
+    }
+
+    for path in deleted_submodule_paths {
+        if !header {
+            println!("{STAGED_HEADER}");
+            header = true;
+        }
+        println!(
+            "{}",
+            paint(Some(AnsiColor::Green), &format!("\tdeleted:    {path}"))
         );
     }
 
@@ -554,11 +566,13 @@ fn display_status(
     non_submodule_statuses: &Statuses<'_>,
     submodule_statuses: &[(String, StatusSummary)],
     new_submodule_paths: &[String],
+    deleted_submodule_paths: &[String],
 ) -> StatusResult<()> {
     // Fast path: nothing dirty
     if non_submodule_statuses.is_empty()
         && submodule_statuses.is_empty()
         && new_submodule_paths.is_empty()
+        && deleted_submodule_paths.is_empty()
     {
         match get_rebase_info(repo)? {
             Some(ref info) => print_rebase_header(info),
@@ -582,6 +596,7 @@ fn display_status(
         non_submodule_statuses,
         submodule_statuses,
         new_submodule_paths,
+        deleted_submodule_paths,
     );
     let has_conflicts = print_unmerged_paths(repo)?;
     let changed_in_workdir =
@@ -633,6 +648,43 @@ pub fn new_submodule_paths(repo: &Repository) -> StatusResult<Vec<String>> {
     Ok(paths)
 }
 
+/// Returns the relative paths of submodules staged for deletion.
+///
+/// These are submodules whose gitlink is in the HEAD commit but has been removed
+/// from the index (via `git rm`), the symmetric counterpart to [`new_submodule_paths`].
+///
+/// # Errors
+///
+/// Returns `Err` if the HEAD tree cannot be walked or the index cannot be read.
+pub fn deleted_submodule_paths(repo: &Repository) -> StatusResult<Vec<String>> {
+    let Some(head_tree) = repo.head().ok().and_then(|h| h.peel_to_tree().ok()) else {
+        return Ok(Vec::new());
+    };
+    let index = repo.index()?;
+
+    let mut deleted = Vec::new();
+    head_tree.walk(git2::TreeWalkMode::PreOrder, |root, entry| {
+        if entry.filemode() == i32::from(git2::FileMode::Commit) {
+            let Some(name) = entry.name() else {
+                return git2::TreeWalkResult::Skip;
+            };
+            let path = if root.is_empty() {
+                name.to_string()
+            } else {
+                format!("{root}{name}")
+            };
+            if index.get_path(Path::new(&path), 0).is_none() {
+                deleted.push(path);
+            }
+            git2::TreeWalkResult::Skip
+        } else {
+            git2::TreeWalkResult::Ok
+        }
+    })?;
+
+    Ok(deleted)
+}
+
 /// Retrieves and displays the statuses for the repository at `path`.
 ///
 /// # Errors
@@ -661,6 +713,7 @@ pub fn status(root_path: &Path, repo_kind: RepoKind, display_progress: bool) -> 
 
     let non_submodule_statuses = repo.statuses(Some(&mut opts))?;
     let new_submodule_paths = new_submodule_paths(&repo)?;
+    let deleted_submodule_paths = deleted_submodule_paths(&repo)?;
 
     let submodule_statuses = match conn {
         Some(ref mut c) => recv_status_response(c, display_progress)?,
@@ -672,6 +725,7 @@ pub fn status(root_path: &Path, repo_kind: RepoKind, display_progress: bool) -> 
         &non_submodule_statuses,
         &submodule_statuses,
         &new_submodule_paths,
+        &deleted_submodule_paths,
     )?;
 
     Ok(())

@@ -238,6 +238,15 @@ impl TestHarness {
         assert_eq!(actual, expected, "new_submodule_paths mismatch");
     }
 
+    /// Assert that `deleted_submodule_paths` returns exactly the given paths.
+    pub fn assert_deleted_submodule_paths(&self, expected: &[&str]) {
+        let repo = Repository::open(&self.root_path).expect("Failed to open root repo");
+        let actual =
+            subspy::status::deleted_submodule_paths(&repo).expect("deleted_submodule_paths failed");
+        let expected: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
+        assert_eq!(actual, expected, "deleted_submodule_paths mismatch");
+    }
+
     /// Run a git command in the root repo directory.
     pub fn git_in_root(&self, args: &[&str]) {
         let root = self.root_path.display().to_string();

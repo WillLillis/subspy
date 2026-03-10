@@ -63,7 +63,32 @@ fn remove_submodule_without_commit_detected_by_server(_run: u32) {
         !statuses.iter().any(|(name, _)| name == "sub_b")
     });
 
+    // The staged gitlink deletion should be detected
+    harness.assert_deleted_submodule_paths(&["sub_b"]);
+
     // sub_a should be unaffected
+    harness.assert_submodule_status("sub_a", StatusSummary::CLEAN);
+}
+
+#[apply(common::repeat)]
+fn remove_submodule_without_commit_shows_deleted_path(_run: u32) {
+    let harness = common::HarnessBuilder::new()
+        .submodule("sub_a")
+        .submodule("sub_b")
+        .submodule("sub_c")
+        .build();
+    harness.assert_all_clean();
+
+    // No deletions yet
+    harness.assert_deleted_submodule_paths(&[]);
+
+    // Stage removal of two submodules
+    harness.git_in_root(&["rm", "-f", "sub_b"]);
+    harness.git_in_root(&["rm", "-f", "sub_c"]);
+
+    harness.assert_deleted_submodule_paths(&["sub_b", "sub_c"]);
+
+    // sub_a should not appear as deleted
     harness.assert_submodule_status("sub_a", StatusSummary::CLEAN);
 }
 
