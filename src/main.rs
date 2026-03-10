@@ -246,7 +246,13 @@ impl Start {
 ///
 /// If found, returns the path to the repository and the kind of repository.
 fn get_project_path(path: Option<PathBuf>) -> RunResult<(PathBuf, RepoKind)> {
-    let path = path.unwrap_or_else(|| current_dir().unwrap());
+    let path = match path {
+        Some(p) => p,
+        None => current_dir().map_err(|error| RunError::ProjectPath {
+            path: PathBuf::from("."),
+            error,
+        })?,
+    };
     let true_path = dunce::canonicalize(&path).map_err(|error| RunError::ProjectPath {
         path: path.clone(),
         error,
