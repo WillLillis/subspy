@@ -52,6 +52,10 @@ pub fn request_reindex(
     loop {
         conn.read_exact(&mut len_buf)?;
         let msg_len = u32::from_le_bytes(len_buf) as usize;
+        debug_assert!(
+            msg_len <= buffer.len(),
+            "Server message length {msg_len} exceeds buffer size"
+        );
         conn.read_exact(&mut buffer[..msg_len])?;
         let Ok((ServerMessage::Indexing { curr, total }, _)): Result<(ServerMessage, usize), _> =
             bincode::borrow_decode_from_slice(&buffer[..msg_len], BINCODE_CFG)
@@ -94,6 +98,10 @@ pub fn request_shutdown(root_path: &Path) -> ShutdownResult<()> {
     conn.read_exact(&mut len_buf)?;
     let msg_len = u32::from_le_bytes(len_buf) as usize;
     let mut buffer = [0u8; 4];
+    debug_assert!(
+        msg_len <= buffer.len(),
+        "Server message length {msg_len} exceeds buffer size"
+    );
     conn.read_exact(&mut buffer[..msg_len])?;
     let (resp, _): (ServerMessage, usize) =
         bincode::borrow_decode_from_slice(&buffer[..msg_len], BINCODE_CFG)?;
