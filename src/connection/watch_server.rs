@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap, HashSet, VecDeque},
+    collections::{BTreeMap, VecDeque},
     fs,
     io::BufReader,
     path::{Path, PathBuf},
@@ -10,7 +10,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use git2::Repository;
 use interprocess::local_socket::{Stream, traits::ListenerExt as _};
@@ -51,10 +51,10 @@ const REINDEX_DEBOUNCE: Duration = Duration::from_millis(200);
 pub(super) type StatusMap = Mutex<BTreeMap<String, StatusSummary>>;
 
 /// Type alias for the progress queue mutex
-pub(super) type ProgressMap = Mutex<HashMap<u32, VecDeque<ProgressUpdate>>>;
+pub(super) type ProgressMap = Mutex<FxHashMap<u32, VecDeque<ProgressUpdate>>>;
 
 /// Set of client PIDs that should receive progress updates during indexing
-pub(super) type ProgressSubscribers = Mutex<HashSet<u32>>;
+pub(super) type ProgressSubscribers = Mutex<FxHashSet<u32>>;
 
 /// Message receiver type for a watcher
 type WatchReceiver = crossbeam_channel::Receiver<Result<notify::Event, notify::Error>>;
@@ -94,7 +94,7 @@ struct WatchServer {
     /// Filesystem watchers
     watchers: WatchList,
     /// Which submodules to skip indexing (due to being in a rebase operation)
-    skip_set: HashSet<String>,
+    skip_set: FxHashSet<String>,
     /// Whether a rebase is in progress in the root repository
     root_rebasing: bool,
 
@@ -247,16 +247,9 @@ impl TaskState {
 }
 
 /// Tracks which submodule watcher indices have in-flight rayon tasks.
+#[derive(Default)]
 struct InFlightTracker {
-    tasks: HashMap<usize, TaskState>,
-}
-
-impl InFlightTracker {
-    fn new() -> Self {
-        Self {
-            tasks: HashMap::new(),
-        }
-    }
+    tasks: FxHashMap<usize, TaskState>,
 }
 
 /// Signals cancellation to all in-flight rayon tasks, then blocks until they have
@@ -323,7 +316,7 @@ impl WatchServer {
 
         Self {
             watchers: Vec::new(),
-            skip_set: HashSet::new(),
+            skip_set: FxHashSet::default(),
             root_rebasing: false,
             root_path: root_path.to_path_buf(),
             root_index_path,
@@ -335,8 +328,8 @@ impl WatchServer {
             root_head_lock_path,
             control_rx,
             submod_statuses: Arc::new(Mutex::new(BTreeMap::new())),
-            progress_queue: Arc::new(Mutex::new(HashMap::new())),
-            progress_subscribers: Arc::new(Mutex::new(HashSet::new())),
+            progress_queue: Arc::new(Mutex::new(FxHashMap::default())),
+            progress_subscribers: Arc::new(Mutex::new(FxHashSet::default())),
             last_watcher_error: None,
             modules_path_to_index: FxHashMap::default(),
         }
@@ -996,7 +989,7 @@ impl WatchServer {
         index: usize,
         in_flight: &Arc<(Mutex<InFlightTracker>, Condvar)>,
         tl_repo: &Arc<thread_local::ThreadLocal<Repository>>,
-        pending_lock_retries: &Arc<Mutex<HashSet<usize>>>,
+        pending_lock_retries: &Arc<Mutex<FxHashSet<usize>>>,
     ) {
         pending_lock_retries
             .lock()
@@ -1219,13 +1212,14 @@ impl WatchServer {
 
         // Shared state for parallel submodule status updates
         let in_flight: Arc<(Mutex<InFlightTracker>, Condvar)> =
-            Arc::new((Mutex::new(InFlightTracker::new()), Condvar::new()));
+            Arc::new((Mutex::new(InFlightTracker::default()), Condvar::new()));
         let tl_repo: Arc<thread_local::ThreadLocal<Repository>> =
             Arc::new(thread_local::ThreadLocal::new());
         // Watcher indices whose rayon task failed a non-blocking lock acquisition.
         // When the corresponding `index.lock` is removed (lock released), the event
         // loop re-fires the status read.
-        let pending_lock_retries: Arc<Mutex<HashSet<usize>>> = Arc::new(Mutex::new(HashSet::new()));
+        let pending_lock_retries: Arc<Mutex<FxHashSet<usize>>> =
+            Arc::new(Mutex::new(FxHashSet::default()));
         // Set when `.gitmodules` changes. Defers the full reindex until a
         // subsequent git operation produces a root event.
         let mut needs_watcher_update = false;
