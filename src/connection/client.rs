@@ -12,13 +12,14 @@ use crate::{
     StatusSummary,
     connection::{
         BINCODE_CFG, ClientMessage, DebugState, ServerMessage, ipc_name, read_full_message,
-        spawn_daemon, write_full_message,
+        write_full_message,
     },
     create_progress_bar,
     debug::DebugResult,
     reindex::ReindexResult,
     shutdown::ShutdownResult,
     status::StatusResult,
+    watch::spawn_daemon,
 };
 
 /// Sends a reindex request to the watch server for `root_path`

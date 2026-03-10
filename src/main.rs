@@ -9,13 +9,12 @@ use thiserror::Error;
 
 use subspy::{
     DOT_GIT, DOT_GITMODULES, RepoKind,
-    connection::{client::request_reindex, spawn_daemon, watch_server::watch},
     debug::{DebugError, debug},
     paint,
-    reindex::ReindexError,
+    reindex::{ReindexError, reindex},
     shutdown::{ShutdownError, shutdown},
     status::{StatusError, status},
-    watch::WatchError,
+    watch::{WatchError, spawn_daemon, watch_project},
 };
 
 #[derive(Subcommand, Debug)]
@@ -196,7 +195,7 @@ impl Reindex {
             return Err(RunError::server_path(true_path));
         }
         let display_progress = std::io::stderr().is_terminal();
-        Ok(request_reindex(
+        Ok(reindex(
             true_path.as_path(),
             self.replace_watchers,
             display_progress,
@@ -230,7 +229,10 @@ impl Start {
         }
 
         if self.foreground {
-            Ok(watch(true_path.as_path(), std::io::stderr().is_terminal())?)
+            Ok(watch_project(
+                true_path.as_path(),
+                std::io::stderr().is_terminal(),
+            )?)
         } else {
             let level_str = self.log_level.map(|l| l.to_string());
             spawn_daemon(&true_path, level_str.as_deref()).map_err(WatchError::from)?;
