@@ -127,7 +127,7 @@ pub fn request_shutdown(root_path: &Path) -> ShutdownResult<()> {
 /// it succeeds or the user terminates the program.
 fn connect_to_server(root_path: &Path) -> StatusResult<BufReader<Stream>> {
     let name = ipc_name(root_path)?;
-    match Stream::connect(name) {
+    match Stream::connect(name.clone()) {
         Ok(conn) => return Ok(BufReader::new(conn)),
         Err(e) if server_not_started(&e) => {}
         Err(e) => Err(e)?,
@@ -141,7 +141,6 @@ fn connect_to_server(root_path: &Path) -> StatusResult<BufReader<Stream>> {
     spinner.set_message("Starting watch server...");
     spinner.enable_steady_tick(Duration::from_millis(80));
 
-    let name = ipc_name(root_path)?;
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         match Stream::connect(name.clone()) {
