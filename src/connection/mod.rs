@@ -66,7 +66,7 @@ pub struct DebugState {
     pub last_watcher_error: Option<String>,
 }
 
-/// Writes all of `msg` to `conn`, followed by `MSG_DELIM`
+/// Writes all of `msg` to `conn`, preprended by the  length as a LE u32.
 ///
 /// # Errors
 ///
@@ -80,9 +80,7 @@ pub fn write_full_message(conn: &mut BufReader<Stream>, msg: &[u8]) -> std::io::
     Ok(())
 }
 
-/// Reads from `conn` into `buffer` until the delimiter `MSG_DELIM` is found.
-/// `buffer` is cleared immediately. After reading, `MSG_DELIM` is stripped from `buffer`
-/// before returning.
+/// Reads from `conn` into `buffer` expecting the message length as a LE u32 first.
 ///
 /// # Errors
 ///
@@ -107,10 +105,6 @@ pub fn read_full_message(
 
 /// Returns the `interprocess::local_socket::name::Name` used to communicate between
 /// the watch server and request clients for a given git project at `path`.
-///
-/// NOTE: The hash is deterministic across builds so that a client compiled from
-/// one build can talk to a server compiled from another. `FxHasher` is stable
-/// across Rust toolchain versions (unlike `DefaultHasher`).
 ///
 /// # Errors
 ///

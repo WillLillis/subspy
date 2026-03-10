@@ -551,12 +551,12 @@ fn get_upstream_status(repo: &Repository) -> StatusResult<Option<(String, &'stat
 // Basic logic originally adapted from https://github.com/rust-lang/git2-rs/blob/master/examples/status.rs
 fn display_status(
     repo: &Repository,
-    non_submodule_statues: &Statuses<'_>,
+    non_submodule_statuses: &Statuses<'_>,
     submodule_statuses: &[(String, StatusSummary)],
     new_submodule_paths: &[String],
 ) -> StatusResult<()> {
     // Fast path: nothing dirty
-    if non_submodule_statues.is_empty()
+    if non_submodule_statuses.is_empty()
         && submodule_statuses.is_empty()
         && new_submodule_paths.is_empty()
     {
@@ -574,19 +574,19 @@ fn display_status(
         None => print_normal_header(repo)?,
     }
 
-    let rm_in_workdir = non_submodule_statues
+    let rm_in_workdir = non_submodule_statuses
         .iter()
         .any(|e| e.status().contains(git2::Status::WT_DELETED));
 
     let changes_in_index = print_staged_changes(
-        non_submodule_statues,
+        non_submodule_statuses,
         submodule_statuses,
         new_submodule_paths,
     );
     let has_conflicts = print_unmerged_paths(repo)?;
     let changed_in_workdir =
-        print_unstaged_changes(non_submodule_statues, submodule_statuses, rm_in_workdir);
-    let has_untracked = print_untracked_files(non_submodule_statues);
+        print_unstaged_changes(non_submodule_statuses, submodule_statuses, rm_in_workdir);
+    let has_untracked = print_untracked_files(non_submodule_statuses);
 
     print_summary(
         changes_in_index,
