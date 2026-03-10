@@ -282,11 +282,11 @@ fn print_staged_changes(
         .filter(|e| e.status() != git2::Status::CURRENT)
     {
         let istatus = match entry.status() {
-            s if s.contains(git2::Status::INDEX_NEW) => "new file: ",
-            s if s.contains(git2::Status::INDEX_MODIFIED) => "modified: ",
-            s if s.contains(git2::Status::INDEX_DELETED) => "deleted: ",
-            s if s.contains(git2::Status::INDEX_RENAMED) => "renamed: ",
-            s if s.contains(git2::Status::INDEX_TYPECHANGE) => "typechange:",
+            s if s.contains(git2::Status::INDEX_NEW) => "new file:   ",
+            s if s.contains(git2::Status::INDEX_MODIFIED) => "modified:   ",
+            s if s.contains(git2::Status::INDEX_DELETED) => "deleted:    ",
+            s if s.contains(git2::Status::INDEX_RENAMED) => "renamed:    ",
+            s if s.contains(git2::Status::INDEX_TYPECHANGE) => "typechange: ",
             _ => continue,
         };
         if !header {
@@ -300,14 +300,14 @@ fn print_staged_changes(
                 "{}",
                 paint(
                     Some(AnsiColor::Green),
-                    &format!("\t{istatus}  {} -> {}", old.display(), new.display()),
+                    &format!("\t{istatus}{} -> {}", old.display(), new.display()),
                 )
             ),
             (old, new) => println!(
                 "{}",
                 paint(
                     Some(AnsiColor::Green),
-                    &format!("\t{istatus}  {}", old.or(new).unwrap().display()),
+                    &format!("\t{istatus}{}", old.or(new).unwrap().display()),
                 )
             ),
         }
@@ -375,10 +375,10 @@ fn print_unstaged_changes(
             continue;
         }
         let istatus = match entry.status() {
-            s if s.contains(git2::Status::WT_MODIFIED) => "modified: ",
-            s if s.contains(git2::Status::WT_DELETED) => "deleted: ",
-            s if s.contains(git2::Status::WT_RENAMED) => "renamed: ",
-            s if s.contains(git2::Status::WT_TYPECHANGE) => "typechange:",
+            s if s.contains(git2::Status::WT_MODIFIED) => "modified:   ",
+            s if s.contains(git2::Status::WT_DELETED) => "deleted:    ",
+            s if s.contains(git2::Status::WT_RENAMED) => "renamed:    ",
+            s if s.contains(git2::Status::WT_TYPECHANGE) => "typechange: ",
             _ => continue,
         };
         if !header {
@@ -392,14 +392,14 @@ fn print_unstaged_changes(
                 "{}",
                 paint(
                     Some(AnsiColor::Red),
-                    &format!("\t{istatus}  {} -> {}", old.display(), new.display()),
+                    &format!("\t{istatus}{} -> {}", old.display(), new.display()),
                 )
             ),
             (old, new) => println!(
                 "{}",
                 paint(
                     Some(AnsiColor::Red),
-                    &format!("\t{istatus}  {}", old.or(new).unwrap().display()),
+                    &format!("\t{istatus}{}", old.or(new).unwrap().display()),
                 )
             ),
         }
