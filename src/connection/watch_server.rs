@@ -591,6 +591,7 @@ impl WatchServer {
         status_guard.clear();
         if place_submod_watches {
             self.modules_path_to_index.clear();
+            self.skip_set.clear();
         }
         for (relative_path, full_path, modules_path, status, is_in_rebase) in results {
             status_guard.insert(relative_path.clone(), status);
