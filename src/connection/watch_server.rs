@@ -508,10 +508,8 @@ impl WatchServer {
             .collect();
 
         let n_submodules = submod_info.len() as u32;
-        let progress_bar = display_progress.then_some(create_progress_bar(
-            u64::from(n_submodules),
-            "Indexing submodules",
-        ));
+        let progress_bar = display_progress
+            .then(|| create_progress_bar(u64::from(n_submodules), "Indexing submodules"));
 
         broadcast_progress(
             &self.progress_subscribers,
