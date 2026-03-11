@@ -66,7 +66,7 @@ pub struct DebugState {
     pub last_watcher_error: Option<String>,
 }
 
-/// Writes all of `msg` to `conn`, preprended by the  length as a LE u32.
+/// Writes all of `msg` to `conn`, prepended by the length as a LE u32.
 ///
 /// # Errors
 ///

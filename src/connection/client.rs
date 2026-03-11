@@ -125,7 +125,7 @@ pub fn request_shutdown(root_path: &Path) -> ShutdownResult<()> {
 /// On the happy path (server already running), this is a single `Stream::connect`
 /// call with no overhead. If the connection fails with `ConnectionRefused` or
 /// `NotFound`, a new server is spawned and the connection is retried until
-/// it succeeds or the user terminates the program.
+/// it succeeds, the user terminates the program, or 10 seconds pass.
 fn connect_to_server(root_path: &Path) -> StatusResult<BufReader<Stream>> {
     let name = ipc_name(root_path)?;
     match Stream::connect(name.clone()) {

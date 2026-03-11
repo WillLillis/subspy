@@ -293,8 +293,11 @@ fn print_staged_changes(
             println!("{STAGED_HEADER}");
             header = true;
         }
-        let old_path = entry.head_to_index().unwrap().old_file().path();
-        let new_path = entry.head_to_index().unwrap().new_file().path();
+        let Some(index) = entry.head_to_index() else {
+            continue;
+        };
+        let old_path = index.old_file().path();
+        let new_path = index.new_file().path();
         match (old_path, new_path) {
             (Some(old), Some(new)) if old != new => println!(
                 "{}",
@@ -368,13 +371,14 @@ fn print_unstaged_changes(
     let mut header = false;
 
     for entry in non_submod.iter() {
-        if entry.status() == git2::Status::CURRENT || entry.index_to_workdir().is_none() {
+        let status = entry.status();
+        if status == git2::Status::CURRENT || status.contains(git2::Status::CONFLICTED) {
             continue;
         }
-        if entry.status().contains(git2::Status::CONFLICTED) {
+        let Some(workdir) = entry.index_to_workdir() else {
             continue;
-        }
-        let istatus = match entry.status() {
+        };
+        let istatus = match status {
             s if s.contains(git2::Status::WT_MODIFIED) => "modified:   ",
             s if s.contains(git2::Status::WT_DELETED) => "deleted:    ",
             s if s.contains(git2::Status::WT_RENAMED) => "renamed:    ",
@@ -385,8 +389,8 @@ fn print_unstaged_changes(
             println!("{}", unstaged_header(rm_in_workdir, has_submod_changes));
             header = true;
         }
-        let old_path = entry.index_to_workdir().unwrap().old_file().path();
-        let new_path = entry.index_to_workdir().unwrap().new_file().path();
+        let old_path = workdir.old_file().path();
+        let new_path = workdir.new_file().path();
         match (old_path, new_path) {
             (Some(old), Some(new)) if old != new => println!(
                 "{}",
@@ -439,11 +443,16 @@ fn print_untracked_files(non_submod: &Statuses<'_>) -> bool {
         .iter()
         .filter(|e| e.status() == git2::Status::WT_NEW)
     {
+        let Some(file) = entry
+            .index_to_workdir()
+            .and_then(|idx| idx.old_file().path())
+        else {
+            continue;
+        };
         if !header {
             println!("{UNTRACKED_HEADER}");
             header = true;
         }
-        let file = entry.index_to_workdir().unwrap().old_file().path().unwrap();
         println!(
             "\t{}",
             paint(Some(AnsiColor::Red), &format!("{}", file.display()))

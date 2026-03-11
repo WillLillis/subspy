@@ -64,11 +64,11 @@ pub(super) fn broadcast_progress(
     }
 }
 
-/// Handles an incoming client connection on the rayon thread pool.
+/// Handles an incoming client connection on a dedicated OS thread.
 /// Errors are logged rather than propagated, since each connection is handled independently.
 #[expect(
     clippy::needless_pass_by_value,
-    reason = "owned values required for 'static rayon::spawn closure"
+    reason = "owned values required for 'static std::thread::spawn closure"
 )]
 pub(super) fn handle_client_connection(
     conn: Stream,
@@ -204,7 +204,7 @@ fn handle_reindex_request(
 
 /// Attempts to send an index progress message to `conn` for `client_pid`.
 /// Return indicates whether indexing is determined to be complete (a message
-/// is received where `current_idx == length`)
+/// is sent where `curr == total`)
 ///
 /// # Errors
 ///

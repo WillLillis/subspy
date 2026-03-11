@@ -136,9 +136,9 @@ struct WatchServer {
 /// Summarizes an event received from a watcher. Create with `get_event_type`
 #[derive(Debug, Copy, Clone)]
 enum EventType {
-    /// Something changed in `.git/` or `.gitmodules`, reindex needed
+    /// Something changed in `.git/` or `.gitmodules` that may affect submodule statuses
     RootGitOperation,
-    /// A change occurred in one of the watched submodules's source
+    /// A change occurred in one of the watched submodule's source
     SubmoduleChange,
     /// A change occurred in one of the watched submodule's `.git/` subdirectory
     SubmoduleGitOperation,
@@ -378,8 +378,7 @@ impl WatchServer {
         Ok(())
     }
 
-    /// Places a watcher of type `mode` on `watch_path`. The watcher created is stored in
-    /// `self.watchers` along with `rel_path`. Returns the watcher and its transmitter.
+    /// Places a watcher of type `mode` on `watch_path`. Returns the receiver and watcher.
     ///
     /// # Errors
     ///
@@ -457,8 +456,8 @@ impl WatchServer {
         Ok(())
     }
 
-    /// Gathers the status for all submodules within the given repository, places watchers
-    /// on their directories, and places those watchers in `self.watchers`.
+    /// Gathers the status for all submodules within the given repository. When
+    /// `place_submod_watches` is true, also places watchers on their directories.
     ///
     /// # Errors
     ///
@@ -830,9 +829,8 @@ impl WatchServer {
         // renaming `index.lock`->`index`. If it doesn't exist at the time of the check, we'll get
         // an "incorrect" false. We _could_ check via the metadata and handle errors that way, but
         // in reality this should be just fine.
-        !p.is_dir()
-            && p.file_name()
-                .is_some_and(|name| name.eq("index") || name.eq("HEAD"))
+        p.file_name()
+            .is_some_and(|name| name.eq("index") || name.eq("HEAD"))
     }
 
     /// Converts a watcher's event and relative path to a relevant `EventType`, if possible
