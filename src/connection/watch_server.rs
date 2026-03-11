@@ -997,7 +997,6 @@ impl WatchServer {
         &self,
         index: usize,
         in_flight: &Arc<(Mutex<InFlightTracker>, Condvar)>,
-        tl_repo: &Arc<thread_local::ThreadLocal<Repository>>,
         pending_lock_retries: &Arc<Mutex<FxHashSet<usize>>>,
     ) {
         pending_lock_retries
@@ -1024,12 +1023,17 @@ impl WatchServer {
 
         let in_flight = Arc::clone(in_flight);
         let statuses = Arc::clone(&self.submod_statuses);
-        let tl_repo = Arc::clone(tl_repo);
         let root_path = self.root_path.clone();
         let pending_retries = Arc::clone(pending_lock_retries);
 
         rayon::spawn(move || {
-            let repo = match tl_repo.get_or_try(|| Repository::open(&root_path)) {
+            // Open a fresh Repository for each task. A long-lived (e.g.
+            // thread-local) handle caches HEAD, the index, and internal
+            // submodule state; after a parent commit these caches go stale,
+            // causing `submodule_status` to report a phantom INDEX_MODIFIED
+            // (STAGED) flag. Opening fresh is cheap (config + refdb setup,
+            // no I/O beyond stat) and guarantees we always read current state.
+            let repo = match Repository::open(&root_path) {
                 Ok(r) => r,
                 Err(e) => {
                     error!("Failed to open repository for submodule update: {e}");
@@ -1096,17 +1100,6 @@ impl WatchServer {
             loop {
                 if cancel.load(Ordering::Relaxed) {
                     break;
-                }
-
-                // Refresh the in-memory index from disk if it changed.
-                // The thread-local Repository caches the index after the
-                // first load; without this, a task spawned from a
-                // RootGitOperation (e.g. `git add <submodule>`) would
-                // read the stale pre-add index and miss the staged gitlink.
-                // `read(false)` only stats the file and is essentially free
-                // when the index hasn't changed.
-                if let Ok(mut idx) = repo.index() {
-                    let _ = idx.read(false);
                 }
 
                 let read_ok =
@@ -1222,8 +1215,6 @@ impl WatchServer {
         // Shared state for parallel submodule status updates
         let in_flight: Arc<(Mutex<InFlightTracker>, Condvar)> =
             Arc::new((Mutex::new(InFlightTracker::default()), Condvar::new()));
-        let tl_repo: Arc<thread_local::ThreadLocal<Repository>> =
-            Arc::new(thread_local::ThreadLocal::new());
         // Watcher indices whose rayon task failed a non-blocking lock acquisition.
         // When the corresponding `index.lock` is removed (lock released), the event
         // loop re-fires the status read.
@@ -1341,7 +1332,6 @@ impl WatchServer {
                                         self.try_spawn_submod_update(
                                             i,
                                             &in_flight,
-                                            &tl_repo,
                                             &pending_lock_retries,
                                         );
                                     }
@@ -1361,7 +1351,6 @@ impl WatchServer {
                                 self.try_spawn_submod_update(
                                     index,
                                     &in_flight,
-                                    &tl_repo,
                                     &pending_lock_retries,
                                 );
                             }
@@ -1370,12 +1359,7 @@ impl WatchServer {
                             if let Some(i) = self.submod_for_event(&event)
                                 && !self.skip_set.contains(&self.watchers[i].relative_path)
                             {
-                                self.try_spawn_submod_update(
-                                    i,
-                                    &in_flight,
-                                    &tl_repo,
-                                    &pending_lock_retries,
-                                );
+                                self.try_spawn_submod_update(i, &in_flight, &pending_lock_retries);
                             }
                         }
                         // Rebases generate an incredible volume of events, and during such an
@@ -1397,12 +1381,7 @@ impl WatchServer {
                         Some(EventType::SubmoduleRebaseEnd) => {
                             if let Some(i) = self.submod_for_event(&event) {
                                 self.skip_set.remove(&self.watchers[i].relative_path);
-                                self.try_spawn_submod_update(
-                                    i,
-                                    &in_flight,
-                                    &tl_repo,
-                                    &pending_lock_retries,
-                                );
+                                self.try_spawn_submod_update(i, &in_flight, &pending_lock_retries);
                             }
                         }
                         Some(EventType::SubmoduleLockRelease) => {
@@ -1413,12 +1392,7 @@ impl WatchServer {
                                     .expect("pending_lock_retries mutex poisoned")
                                     .remove(&i)
                             {
-                                self.try_spawn_submod_update(
-                                    i,
-                                    &in_flight,
-                                    &tl_repo,
-                                    &pending_lock_retries,
-                                );
+                                self.try_spawn_submod_update(i, &in_flight, &pending_lock_retries);
                             }
                         }
                         None => {}
