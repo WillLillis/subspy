@@ -112,6 +112,96 @@ fn commit_then_stage_gitlink(_run: u32) {
 }
 
 #[apply(common::repeat)]
+fn parent_commit_clears_staged(_run: u32) {
+    let harness = common::HarnessBuilder::new().submodule("sub_a").build();
+    harness.assert_all_clean();
+
+    // Commit in submodule so the gitlink diverges from parent's index
+    harness.write_file("sub_a", "feature.txt", "new feature\n");
+    harness.assert_submodule_status("sub_a", StatusSummary::UNTRACKED_CONTENT);
+    harness.commit_in_submodule("sub_a", "Add feature");
+    harness.assert_submodule_status("sub_a", StatusSummary::NEW_COMMITS);
+
+    // Stage the gitlink in the parent
+    harness.stage_submodule("sub_a");
+    harness.assert_submodule_status("sub_a", StatusSummary::STAGED);
+
+    // Commit in the parent -> gitlink now matches HEAD, STAGED should clear
+    harness.git_in_root(&["commit", "-m", "Update sub_a"]);
+    harness.assert_all_clean();
+}
+
+#[apply(common::repeat)]
+fn parent_commit_clears_staged_with_dirty_worktree(_run: u32) {
+    let harness = common::HarnessBuilder::new().submodule("sub_a").build();
+    harness.assert_all_clean();
+
+    // Commit in submodule
+    harness.write_file("sub_a", "feature.txt", "new feature\n");
+    harness.assert_submodule_status("sub_a", StatusSummary::UNTRACKED_CONTENT);
+    harness.commit_in_submodule("sub_a", "Add feature");
+    harness.assert_submodule_status("sub_a", StatusSummary::NEW_COMMITS);
+
+    // Dirty the worktree *after* the commit
+    harness.write_file("sub_a", "README.md", "modified\n");
+    harness.assert_submodule_status(
+        "sub_a",
+        StatusSummary::NEW_COMMITS | StatusSummary::MODIFIED_CONTENT,
+    );
+
+    // Stage the gitlink in the parent
+    harness.stage_submodule("sub_a");
+    harness.assert_submodule_status(
+        "sub_a",
+        StatusSummary::STAGED | StatusSummary::MODIFIED_CONTENT,
+    );
+
+    // Commit in the parent -> STAGED clears, MODIFIED_CONTENT remains
+    harness.git_in_root(&["commit", "-m", "Update sub_a"]);
+    harness.assert_submodule_status("sub_a", StatusSummary::MODIFIED_CONTENT);
+}
+
+#[apply(common::repeat)]
+fn parent_commit_clears_staged_with_staged_submodule_files(_run: u32) {
+    let harness = common::HarnessBuilder::new().submodule("sub_a").build();
+    harness.assert_all_clean();
+
+    // Commit in submodule
+    harness.write_file("sub_a", "feature.txt", "new feature\n");
+    harness.assert_submodule_status("sub_a", StatusSummary::UNTRACKED_CONTENT);
+    harness.commit_in_submodule("sub_a", "Add feature");
+    harness.assert_submodule_status("sub_a", StatusSummary::NEW_COMMITS);
+
+    // Dirty the worktree and stage a file *inside* the submodule's own index
+    harness.write_file("sub_a", "README.md", "modified\n");
+    harness.assert_submodule_status(
+        "sub_a",
+        StatusSummary::NEW_COMMITS | StatusSummary::MODIFIED_CONTENT,
+    );
+    harness.write_file("sub_a", "extra.txt", "extra\n");
+    harness.assert_submodule_status(
+        "sub_a",
+        StatusSummary::NEW_COMMITS | StatusSummary::MODIFIED_CONTENT | StatusSummary::UNTRACKED_CONTENT,
+    );
+    harness.stage_file("sub_a", "extra.txt");
+    harness.assert_submodule_status(
+        "sub_a",
+        StatusSummary::NEW_COMMITS | StatusSummary::MODIFIED_CONTENT,
+    );
+
+    // Stage the gitlink in the parent
+    harness.stage_submodule("sub_a");
+    harness.assert_submodule_status(
+        "sub_a",
+        StatusSummary::STAGED | StatusSummary::MODIFIED_CONTENT,
+    );
+
+    // Commit in the parent -> STAGED clears, MODIFIED_CONTENT remains
+    harness.git_in_root(&["commit", "-m", "Update sub_a"]);
+    harness.assert_submodule_status("sub_a", StatusSummary::MODIFIED_CONTENT);
+}
+
+#[apply(common::repeat)]
 fn stage_and_unstage_file(_run: u32) {
     let harness = common::HarnessBuilder::new().submodule("sub_a").build();
     harness.assert_all_clean();
