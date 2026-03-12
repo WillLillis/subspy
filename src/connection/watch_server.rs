@@ -116,6 +116,8 @@ struct WatchServer {
     root_lock_path: PathBuf,
     /// `<root_path>/.git/HEAD.lock`
     root_head_lock_path: PathBuf,
+    /// `<root_path>/.git/refs/heads`
+    root_refs_heads_path: PathBuf,
 
     /// Receiver for control messages from the listener thread
     control_rx: crossbeam_channel::Receiver<ControlMessage>,
@@ -313,6 +315,7 @@ impl WatchServer {
         let root_modules_path = root_git_path.join("modules");
         let root_lock_path = root_git_path.join("index.lock");
         let root_head_lock_path = root_git_path.join("HEAD.lock");
+        let root_refs_heads_path = root_git_path.join("refs").join("heads");
 
         Self {
             watchers: Vec::new(),
@@ -326,6 +329,7 @@ impl WatchServer {
             root_modules_path,
             root_lock_path,
             root_head_lock_path,
+            root_refs_heads_path,
             control_rx,
             submod_statuses: Arc::new(Mutex::new(BTreeMap::new())),
             progress_queue: Arc::new(Mutex::new(FxHashMap::default())),
@@ -859,6 +863,7 @@ impl WatchServer {
                         || p.eq(&self.root_lock_path)
                         || p.eq(&self.root_head_path)
                         || p.eq(&self.root_head_lock_path)
+                        || p.starts_with(&self.root_refs_heads_path)
                 });
             if !is_git_dir_rename {
                 let is_root_watcher = rel_path.eq(DOT_GIT) || rel_path.eq(DOT_GITMODULES);
@@ -897,18 +902,18 @@ impl WatchServer {
                 } else {
                     None
                 }
-            } else if event
-                .paths
-                .iter()
-                .any(|p| p.eq(&self.root_index_path) || p.eq(&self.root_head_path))
-            {
-                // Git's atomic update pattern for `index` and `HEAD`: write
-                // to the `.lock` file, delete the original, rename `.lock`->
-                // target. The `Remove` event for the transient deletion is
-                // ignored, acting on it would race with the immediately
-                // following rename. All other events (writes, renames) are
-                // classified as `RootGitOperation` and handled in the event
-                // loop by spawning lock-free rayon tasks to re-check
+            } else if event.paths.iter().any(|p| {
+                p.eq(&self.root_index_path)
+                    || p.eq(&self.root_head_path)
+                    || p.starts_with(&self.root_refs_heads_path)
+            }) {
+                // Git's atomic update pattern for `index`, `HEAD`, and branch
+                // refs: write to the `.lock` file, delete the original, rename
+                // `.lock`-> target. The `Remove` event for the transient
+                // deletion is ignored, acting on it would race with the
+                // immediately following rename. All other events (writes,
+                // renames) are classified as `RootGitOperation` and handled in
+                // the event loop by spawning lock-free rayon tasks to re-check
                 // submodule statuses.
                 //
                 // Detecting HEAD changes is critical for `git checkout`:
@@ -917,6 +922,13 @@ impl WatchServer {
                 // HEAD (producing STAGED | NEW_COMMITS). When the HEAD
                 // rename fires shortly after, it triggers a second round of
                 // rayon tasks that correct the status.
+                //
+                // Detecting branch ref changes (under `refs/heads/`) is
+                // critical for `git commit`: the index rename fires first,
+                // but HEAD still points at the old commit, so rayon tasks
+                // see a stale INDEX_MODIFIED (STAGED). The branch ref
+                // rename fires shortly after and triggers a corrective
+                // round.
                 if matches!(event.kind, EventKind::Remove(_)) {
                     None
                 } else {
