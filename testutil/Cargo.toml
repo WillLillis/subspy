@@ -1,0 +1,14 @@
+[package]
+name = "testutil"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+git2 = { version = "0.20.3", features = [
+    "vendored-libgit2",
+    "vendored-openssl",
+] }
+interprocess = "2.2.3"
+subspy = { path = ".." }
+tempfile = "3"

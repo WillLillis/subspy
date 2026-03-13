@@ -1,0 +1,15 @@
+[package]
+name = "xtask"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+clap = { version = "4.5.53", features = ["derive"] }
+git2 = { version = "0.20.3", features = [
+    "vendored-libgit2",
+    "vendored-openssl",
+] }
+rand = "0.9"
+subspy = { path = ".." }
+testutil = { path = "../testutil" }

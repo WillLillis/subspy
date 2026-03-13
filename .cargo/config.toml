@@ -3,3 +3,6 @@
 # watch limits, so we enforce serial execution.
 [env]
 RUST_TEST_THREADS = "1"
+
+[alias]
+xtask = "run --package xtask --"
