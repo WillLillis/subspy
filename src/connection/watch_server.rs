@@ -1050,27 +1050,6 @@ impl WatchServer {
         let pending_retries = Arc::clone(pending_lock_retries);
 
         rayon::spawn(move || {
-            // Open a fresh Repository for each task. A long-lived (e.g.
-            // thread-local) handle caches HEAD, the index, and internal
-            // submodule state; after a parent commit these caches go stale,
-            // causing `submodule_status` to report a phantom INDEX_MODIFIED
-            // (STAGED) flag. Opening fresh is cheap (config + refdb setup,
-            // no I/O beyond stat) and guarantees we always read current state.
-            let repo = match Repository::open(&root_path) {
-                Ok(r) => r,
-                Err(e) => {
-                    error!("Failed to open repository for submodule update: {e}");
-                    let (mutex, condvar) = &*in_flight;
-                    mutex
-                        .lock()
-                        .expect("InFlightTracker mutex poisoned")
-                        .tasks
-                        .remove(&index);
-                    condvar.notify_one();
-                    return;
-                }
-            };
-
             // ## Lock-free submodule status reads
             //
             // No `index.lock` is acquired here. `submodule_status()` is a
@@ -1120,10 +1099,25 @@ impl WatchServer {
             //    `Modify(Name(From)) index.lock` is also classified as
             //    `SubmoduleLockRelease` for rename events where only the
             //    source path is reported.)
+            let mut cleaned_up = false;
             loop {
                 if cancel.load(Ordering::Relaxed) {
                     break;
                 }
+
+                // Open a fresh Repository on every iteration. git2 caches
+                // the index and refdb in-memory after first access, so
+                // reusing a handle across dirty retries would read stale
+                // data when the index changed between iterations (e.g.
+                // rapid `git add` calls staging different gitlinks).
+                // Opening is cheap (config + refdb setup, no heavy I/O).
+                let repo = match Repository::open(&root_path) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        error!("Failed to open repository for submodule update: {e}");
+                        break;
+                    }
+                };
 
                 let read_ok =
                     match repo.submodule_status(&relative_path, git2::SubmoduleIgnore::None) {
@@ -1150,21 +1144,9 @@ impl WatchServer {
                         }
                     };
 
-                let (mutex, _) = &*in_flight;
-                let mut tracker = mutex.lock().expect("InFlightTracker mutex poisoned");
-                if let Some(task) = tracker.tasks.get_mut(&index)
-                    && matches!(task, TaskState::Dirty(_))
-                {
-                    // Another event arrived while we were processing, demote back
-                    // to Active and re-check.
-                    let cancel = task.cancellation_flag().clone();
-                    *task = TaskState::Active(cancel);
-                    continue;
-                }
-                drop(tracker);
-
-                // Exiting: if the read failed, register for a retry via
-                // `SubmoduleLockRelease` in the event loop.
+                // Handle pending_retries before acquiring the tracker lock.
+                // This preserves lock ordering (pending_retries->tracker),
+                // matching `try_spawn_submod_update` to avoid deadlocks.
                 if !read_ok && !cancel.load(Ordering::Relaxed) {
                     pending_retries
                         .lock()
@@ -1177,15 +1159,40 @@ impl WatchServer {
                         .expect("pending_retries mutex poisoned")
                         .remove(&index);
                 }
+
+                // Dirty check + task removal under a single lock hold.
+                //
+                // This is critical: if these were separate critical sections,
+                // the event loop could mark the task Dirty in the gap between
+                // the check and the removal. The task would then remove
+                // itself without re-reading, silently dropping the event.
+                let (mutex, _) = &*in_flight;
+                let mut tracker = mutex.lock().expect("InFlightTracker mutex poisoned");
+                if let Some(task) = tracker.tasks.get_mut(&index)
+                    && matches!(task, TaskState::Dirty(_))
+                {
+                    // Another event arrived while we were processing, demote
+                    // back to Active and re-check.
+                    let cancel = task.cancellation_flag().clone();
+                    *task = TaskState::Active(cancel);
+                    continue;
+                }
+                tracker.tasks.remove(&index);
+                drop(tracker);
+                cleaned_up = true;
                 break;
             }
 
-            // Always clean up the in-flight tracker entry, regardless of
-            // whether we exited via cancellation or normal completion.
-            let (mutex, condvar) = &*in_flight;
-            let mut tracker = mutex.lock().expect("InFlightTracker mutex poisoned");
-            tracker.tasks.remove(&index);
-            drop(tracker);
+            // Early exits (cancellation, repo-open failure) skip the
+            // atomic dirty-check-and-remove above. Clean up the tracker
+            // entry so `wait_for_in_flight` doesn't block indefinitely.
+            if !cleaned_up {
+                let (mutex, _) = &*in_flight;
+                let mut tracker = mutex.lock().expect("InFlightTracker mutex poisoned");
+                tracker.tasks.remove(&index);
+                drop(tracker);
+            }
+            let (_, condvar) = &*in_flight;
             condvar.notify_one();
         });
     }
