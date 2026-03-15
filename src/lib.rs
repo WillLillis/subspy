@@ -26,8 +26,25 @@ pub enum RepoKind {
     Submodule,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord, Hash, Encode, BorrowDecode)]
+#[derive(Clone, Copy, Eq, PartialEq, PartialOrd, Ord, Hash, Encode, BorrowDecode)]
 pub struct StatusSummary(u32);
+
+impl std::fmt::Debug for StatusSummary {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.is_empty() {
+            return write!(f, "CLEAN");
+        }
+        let mut first = true;
+        for (name, _) in self.iter_names() {
+            if !first {
+                write!(f, " | ")?;
+            }
+            first = false;
+            write!(f, "{name}")?;
+        }
+        Ok(())
+    }
+}
 
 bitflags! {
     /// Represents the status of a submodule
