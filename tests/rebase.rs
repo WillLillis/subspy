@@ -146,3 +146,65 @@ fn submodule_rebase_with_conflict(_run: u32) {
     // Still NEW_COMMITS because submodule HEAD diverged from parent index
     harness.assert_submodule_status("sub_a", StatusSummary::NEW_COMMITS);
 }
+
+// ---------------------------------------------------------------------------
+// skip_set clearing during reindex
+//
+// When a submodule is rebasing, the server adds it to `skip_set` to suppress
+// event processing (avoiding `index.lock` contention). A client-requested
+// reindex with `replace_watchers=false` must still clear and rebuild
+// `skip_set` from the current filesystem state. Without this, a submodule
+// that was rebasing at the time of the reindex would stay in `skip_set`
+// permanently, and its status would never update again.
+// ---------------------------------------------------------------------------
+
+#[apply(common::repeat)]
+fn reindex_during_submodule_rebase_clears_skip_set(_run: u32) {
+    let mut harness = common::HarnessBuilder::new()
+        .submodule("sub_a")
+        .submodule("sub_b")
+        .no_server()
+        .build();
+
+    // Create conflicting history in sub_a so the rebase pauses
+    harness.commit_in_source_repo(
+        "sub_a",
+        "conflict.txt",
+        "upstream version\n",
+        "upstream commit",
+    );
+
+    harness.write_file("sub_a", "conflict.txt", "local version\n");
+    harness.git_in_submodule("sub_a", &["add", "-A"]);
+    harness.git_in_submodule("sub_a", &["commit", "-m", "local commit"]);
+    harness.git_in_submodule("sub_a", &["fetch", "origin"]);
+
+    harness.start_server();
+    harness.assert_submodule_status("sub_a", StatusSummary::NEW_COMMITS);
+
+    // Start a rebase that will conflict, pausing mid-rebase.
+    // The server adds sub_a to skip_set.
+    let output = harness.git_in_submodule_may_fail("sub_a", &["rebase", "origin/master"]);
+    assert!(
+        !output.status.success(),
+        "Expected rebase to fail with conflict"
+    );
+
+    // Trigger a non-watcher-replacing reindex while sub_a is mid-rebase.
+    // This must clear and rebuild skip_set; sub_a should be re-added
+    // because the rebase marker still exists on disk.
+    harness.request_reindex(false);
+
+    // Resolve the conflict and finish the rebase. The server must detect
+    // the rebase-end event and remove sub_a from skip_set.
+    harness.write_file("sub_a", "conflict.txt", "resolved\n");
+    harness.git_in_submodule("sub_a", &["add", "conflict.txt"]);
+    harness.git_in_submodule("sub_a", &["rebase", "--continue"]);
+
+    // sub_a status should update (not stuck in skip_set)
+    harness.assert_submodule_status("sub_a", StatusSummary::NEW_COMMITS);
+
+    // sub_b should still be independently trackable
+    harness.write_file("sub_b", "new.txt", "hello\n");
+    harness.assert_submodule_status("sub_b", StatusSummary::UNTRACKED_CONTENT);
+}

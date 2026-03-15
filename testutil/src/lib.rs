@@ -11,7 +11,7 @@ use subspy::{
     StatusSummary,
     connection::watch_server::watch,
     connection::{
-        client::{recv_status_response, request_shutdown, send_status_request},
+        client::{recv_status_response, request_reindex, request_shutdown, send_status_request},
         ipc_name,
     },
 };
@@ -30,6 +30,7 @@ pub struct HarnessBuilder {
 }
 
 impl HarnessBuilder {
+    #[allow(clippy::new_without_default)]
     pub const fn new() -> Self {
         Self {
             submodule_names: Vec::new(),
@@ -371,6 +372,11 @@ impl TestHarness {
         );
         self.server_thread = Some(start_watch_server(&self.root_path));
         self.wait_for_server_ready();
+    }
+
+    /// Request a reindex from the watch server.
+    pub fn request_reindex(&self, replace_watchers: bool) {
+        request_reindex(&self.root_path, replace_watchers, false).expect("Reindex request failed");
     }
 
     /// Shut down the watch server and wait for the thread to exit.
