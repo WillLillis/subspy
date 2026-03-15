@@ -526,11 +526,15 @@ impl WatchServer {
         let progress_queue = &self.progress_queue;
         let tl_repo = thread_local::ThreadLocal::new();
 
-        let results: WatchResult<Vec<_>> = submod_info
+        let results: Vec<_> = submod_info
             .into_par_iter()
-            .map(|(relative_path, full_path)| {
+            .map(|(relative_path, full_path)| -> WatchResult<(String, PathBuf, PathBuf, StatusSummary, bool)> {
                 let sub_start = std::time::Instant::now();
-                let repo = tl_repo.get_or_try(|| Repository::open(root_path))?;
+                let repo = tl_repo.get_or_try(|| Repository::open(root_path))
+                    .map_err(|e| {
+                        error!("Failed to open repository while indexing {relative_path}: {e}");
+                        e
+                    })?;
 
                 let modules_path = match self.get_modules_path(&relative_path) {
                     Ok(p) => p,
@@ -553,12 +557,18 @@ impl WatchServer {
                 let status = if is_in_rebase {
                     StatusSummary::NEW_COMMITS
                 } else {
-                    get_submod_status(
+                    match get_submod_status(
                         repo,
                         &relative_path,
                         &modules_path.join("index.lock"),
                         None,
-                    )?
+                    ) {
+                        Ok(st) => st,
+                        Err(e) => {
+                            error!("Failed to get {relative_path} status while populating status map: {e}");
+                            Err(e)?
+                        }
+                    }
                 };
 
                 let count = completed.fetch_add(1, Ordering::Relaxed) + 1;
@@ -579,8 +589,8 @@ impl WatchServer {
 
                 Ok((relative_path, full_path, modules_path, status, is_in_rebase))
             })
+            .filter_map(|res| res.ok())
             .collect();
-        let results = results?;
 
         status_guard.clear();
         self.skip_set.clear();
