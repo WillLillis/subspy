@@ -837,6 +837,25 @@ impl WatchServer {
             .is_some_and(|name| name.eq("index") || name.eq("HEAD"))
     }
 
+    /// Returns `true` if `p` is a branch ref path under a known submodule's
+    /// `.git/modules/<name>/refs/heads/`. Uses `modules_path_to_index` to
+    /// correctly handle multi-component submodule names (e.g. `libs/foo`).
+    ///
+    /// Detecting branch ref renames in submodules is critical for `git commit`:
+    /// the ref update is the most reliable post-commit signal. Without it, the
+    /// server can get stuck reporting pre-commit status (e.g. stale
+    /// `MODIFIED_CONTENT` from staged changes that were just committed).
+    fn is_submod_refs_heads(&self, p: &Path) -> bool {
+        p.ancestors().any(|ancestor| {
+            self.modules_path_to_index.contains_key(ancestor)
+                && p.strip_prefix(ancestor).is_ok_and(|rel| {
+                    let mut c = rel.components();
+                    c.next().is_some_and(|a| a.as_os_str() == "refs")
+                        && c.next().is_some_and(|b| b.as_os_str() == "heads")
+                })
+        })
+    }
+
     /// Converts a watcher's event and relative path to a relevant `EventType`, if possible
     fn get_event_type(&self, event: &Event, rel_path: &str) -> Option<EventType> {
         if !event_is_relevant(event) {
@@ -854,11 +873,11 @@ impl WatchServer {
                 && matches!(event.kind, EventKind::Modify(ModifyKind::Name(_)))
                 && event.paths.iter().any(|p| {
                     (p.starts_with(&self.root_modules_path)
-                        && p.file_name().is_some_and(|n| {
+                        && (p.file_name().is_some_and(|n| {
                             n.to_str().is_some_and(|name| {
                                 matches!(name, "index" | "index.lock" | "HEAD" | "HEAD.lock")
                             })
-                        }))
+                        }) || self.is_submod_refs_heads(p)))
                         || p.eq(&self.root_index_path)
                         || p.eq(&self.root_lock_path)
                         || p.eq(&self.root_head_path)
@@ -880,7 +899,11 @@ impl WatchServer {
                 .iter()
                 .any(|p| p.starts_with(&self.root_modules_path))
             {
-                if event.paths.iter().any(|p| Self::is_index_or_head_path(p)) {
+                if event
+                    .paths
+                    .iter()
+                    .any(|p| Self::is_index_or_head_path(p) || self.is_submod_refs_heads(p))
+                {
                     // NOTE: We don't take the same `Remove` defensive measures for submodule
                     // `index`/`HEAD` operations as we do with the root repository. This is because
                     // the event loop continues to run (as opposed to breaking out for a reindex),
