@@ -276,6 +276,90 @@ fn cancel_submod_update(index: usize, state: &(Mutex<InFlightTracker>, Condvar))
     }
 }
 
+/// Deferral state for `.gitmodules` changes within [`GitmodulesTracker`].
+enum GitmodulesDeferral {
+    /// No `.gitmodules` change is pending.
+    Idle,
+    /// `.gitmodules` changed; waiting for the first root event from the
+    /// same git operation.
+    Pending,
+    /// First root event consumed. Stores the tracker cookie (if any) to
+    /// skip subsequent events from the same rename operation.
+    Consumed(Option<usize>),
+}
+
+/// Tracks deferred reindex state after `.gitmodules` changes.
+///
+/// When `.gitmodules` is modified, we can't reindex immediately because the
+/// git operation (e.g. `git submodule add`, `git rm -f`) also produces index
+/// rename events as part of the same command. Triggering a reindex on those
+/// would acquire `index.lock` before the user's next command can run.
+///
+/// This state machine:
+/// 1. Records that a watcher update is needed ([`Self::on_gitmodules_changed`])
+/// 2. Skips events from the same git operation (via matching tracker cookie)
+/// 3. Resets a debounce deadline on events from subsequent operations
+/// 4. Falls back to a deadline-based reindex if no further root events arrive
+struct GitmodulesTracker {
+    state: GitmodulesDeferral,
+    /// Fallback deadline: if no subsequent root event arrives before this
+    /// instant, `handle_events` returns `ReindexEvent`.
+    deadline: Option<Instant>,
+}
+
+impl GitmodulesTracker {
+    #[inline]
+    const fn new() -> Self {
+        Self {
+            state: GitmodulesDeferral::Idle,
+            deadline: None,
+        }
+    }
+
+    /// Returns the current reindex deadline, if any.
+    #[inline]
+    const fn deadline(&self) -> Option<Instant> {
+        self.deadline
+    }
+
+    /// Called when `.gitmodules` itself changes. Resets the tracker to begin
+    /// deferring the reindex until a subsequent operation completes.
+    #[inline]
+    const fn on_gitmodules_changed(&mut self) {
+        self.state = GitmodulesDeferral::Pending;
+        self.deadline = None;
+    }
+
+    /// Called when a non-`.gitmodules` root git event arrives. Updates the
+    /// deferral state based on whether the event belongs to the same git
+    /// operation that modified `.gitmodules`.
+    #[inline]
+    fn on_root_event(&mut self, event: &Event) {
+        match self.state {
+            GitmodulesDeferral::Idle => {}
+            GitmodulesDeferral::Pending => {
+                // First root event after .gitmodules changed-> this is the
+                // index rename from the same git operation. Record its
+                // tracker cookie and start a debounce timer as a fallback
+                // (in case no subsequent git command produces a root event,
+                // e.g. `git submodule add` without a follow-up `git commit`).
+                self.state = GitmodulesDeferral::Consumed(event.attrs.tracker());
+                self.deadline = Some(Instant::now() + REINDEX_DEBOUNCE);
+            }
+            GitmodulesDeferral::Consumed(Some(cookie)) if event.attrs.tracker() == Some(cookie) => {
+                // Same rename operation (matching tracker cookie)-> skip.
+            }
+            GitmodulesDeferral::Consumed(_) => {
+                // Event from a subsequent git operation. Reset the debounce
+                // timer rather than reindexing immediately: the operation
+                // may still be in progress (e.g. `git commit` has renamed
+                // the index but has not yet updated the branch ref).
+                self.deadline = Some(Instant::now() + REINDEX_DEBOUNCE);
+            }
+        }
+    }
+}
+
 /// Returns the converted `StatusSummary` status for the submodule at `relative_path` guarded by
 /// `lock_path`. If the lock file at `lock_path` cannot be acquired, returns
 /// `Ok(StatusSummary::LOCK_FAILURE)`.
@@ -1260,23 +1344,11 @@ impl WatchServer {
         // loop re-fires the status read.
         let pending_lock_retries: Arc<Mutex<FxHashSet<usize>>> =
             Arc::new(Mutex::new(FxHashSet::default()));
-        // Set when `.gitmodules` changes. Defers the full reindex until a
-        // subsequent git operation produces a root event.
-        let mut needs_watcher_update = false;
-        // Tracks whether the root event(s) from the same git operation that
-        // modified `.gitmodules` have been consumed. The index rename
-        // (`index.lock`->`index`) can produce multiple events sharing the
-        // same tracker cookie. All must be skipped to avoid acquiring
-        // `index.lock` before the user's next command.
-        let mut gitmodules_op_consumed = false;
-        let mut gitmodules_rename_tracker: Option<usize> = None;
-        // Fallback deadline for reindex when no subsequent root event arrives
-        // after the same-operation events have been consumed.
-        let mut reindex_deadline: Option<Instant> = None;
+        let mut gitmodules = GitmodulesTracker::new();
 
         loop {
             #[allow(clippy::single_match_else)]
-            let oper = if let Some(deadline) = reindex_deadline {
+            let oper = if let Some(deadline) = gitmodules.deadline() {
                 match sel.select_deadline(deadline) {
                     Ok(oper) => oper,
                     Err(_) => {
@@ -1314,59 +1386,10 @@ impl WatchServer {
                         Some(EventType::RootGitOperation) => {
                             if !self.root_rebasing {
                                 if rel_path == DOT_GITMODULES {
-                                    // .gitmodules changed. The submodule set may
-                                    // have changed. Don't reindex immediately: the
-                                    // git operation that modified .gitmodules (e.g.
-                                    // `git submodule add`, `git rm -f`) also produces
-                                    // index rename event(s) as part of the same
-                                    // command. Triggering a reindex on those events
-                                    // would acquire `index.lock` before the user's
-                                    // next command (e.g. `git commit`) can run.
-                                    //
-                                    // Track the rename cookie so all events from the
-                                    // same rename are skipped, then reindex on the
-                                    // first event from a different operation.
-                                    needs_watcher_update = true;
-                                    gitmodules_op_consumed = false;
-                                    gitmodules_rename_tracker = None;
-                                    // Cancel any pending debounce-> this new
-                                    // .gitmodules event resets the deferral.
-                                    reindex_deadline = None;
-                                } else if needs_watcher_update {
-                                    if !gitmodules_op_consumed {
-                                        // First root event after .gitmodules changed,
-                                        // so this is the index rename from the same
-                                        // git operation. Record its tracker cookie
-                                        // and skip.
-                                        gitmodules_op_consumed = true;
-                                        gitmodules_rename_tracker = event.attrs.tracker();
-                                        // Start a debounce timer as a fallback: if no
-                                        // subsequent git command produces a root event
-                                        // (e.g. `git submodule add` without a follow-up
-                                        // `git commit`), the timeout ensures we still
-                                        // reindex.
-                                        reindex_deadline = Some(Instant::now() + REINDEX_DEBOUNCE);
-                                    } else if gitmodules_rename_tracker.is_some()
-                                        && event.attrs.tracker() == gitmodules_rename_tracker
-                                    {
-                                        // Same rename operation (matching tracker
-                                        // cookie)-> skip this event too.
-                                    } else {
-                                        // Event from a subsequent git operation.
-                                        // Reset the debounce timer rather than
-                                        // reindexing immediately: the operation
-                                        // may still be in progress (e.g. `git
-                                        // commit` has renamed the index but has
-                                        // not yet updated the branch ref).
-                                        // Reindexing mid-operation can hit a
-                                        // GIT_ENOTFOUND (-3) assert in
-                                        // git_submodule_lookup when HEAD and
-                                        // the index are temporarily out of sync.
-                                        reindex_deadline = Some(Instant::now() + REINDEX_DEBOUNCE);
-                                    }
+                                    gitmodules.on_gitmodules_changed();
+                                } else {
+                                    gitmodules.on_root_event(&event);
                                 }
-                                // Re-check all submodule statuses via the lock-free
-                                // rayon task path.
                                 for i in ROOT_WATCHER_COUNT..self.watchers.len() {
                                     if !self.skip_set.contains(&self.watchers[i].relative_path) {
                                         self.try_spawn_submod_update(
