@@ -7,6 +7,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 
 pub mod connection;
 pub mod debug;
+pub mod list;
 pub mod reindex;
 pub mod shutdown;
 pub mod status;
@@ -58,6 +59,9 @@ bitflags! {
     }
 }
 
+/// Formats the summary for the `status` command. `STAGED` is intentionally
+/// omitted here because the `status` display handles staging separately;
+/// see [`list::status_text`] for a variant that includes it.
 impl std::fmt::Display for StatusSummary {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if self.eq(&Self::CLEAN) {

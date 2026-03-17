@@ -10,6 +10,7 @@ use thiserror::Error;
 use subspy::{
     DOT_GIT, DOT_GITMODULES, RepoKind,
     debug::{DebugError, debug},
+    list::{ListError, list},
     paint,
     reindex::{ReindexError, reindex},
     shutdown::{ShutdownError, shutdown},
@@ -29,6 +30,8 @@ enum Commands {
     Reindex(Reindex),
     /// Dump the internal state of the watch server
     Debug(DebugDump),
+    /// List submodule metadata
+    List(List),
 }
 
 impl Commands {
@@ -39,6 +42,7 @@ impl Commands {
             Self::Status(cmd) => cmd.log_level,
             Self::Start(cmd) => cmd.log_level,
             Self::Debug(cmd) => cmd.log_level,
+            Self::List(cmd) => cmd.log_level,
         }
     }
 }
@@ -90,6 +94,36 @@ struct DebugDump {
 }
 
 #[derive(Args, Debug)]
+#[command(visible_aliases = ["ls", "l"])]
+struct List {
+    /// The directory to list submodule info for
+    #[arg(index = 1)]
+    pub dir: Option<PathBuf>,
+    /// The log level to use for the requesting client
+    #[arg(short, long)]
+    pub log_level: Option<LogLevel>,
+    #[expect(
+        clippy::doc_markdown,
+        reason = "placeholder names render in clap help text"
+    )]
+    /// Custom format string with {placeholder} substitution.
+    ///
+    /// Available placeholders: {name}, {path}, {commit}, {commit_long},
+    /// {head}, {head_long}, {branch}, {head_branch}, {status}.
+    /// Extra text inside braces is preserved and padded as a unit, e.g.
+    /// {[name]} outputs [value] with alignment applied to the whole [value].
+    /// Escape sequences: \n (newline), \t (tab), \\ (backslash), \{ and \} (literal braces).
+    #[arg(short, long, verbatim_doc_comment)]
+    pub format: Option<String>,
+    /// Omit the header row
+    #[arg(long)]
+    pub no_header: bool,
+    /// Skip the watch server and compute all fields locally via libgit2
+    #[arg(long)]
+    pub no_server: bool,
+}
+
+#[derive(Args, Debug)]
 #[command(visible_aliases = ["watch", "w"])]
 struct Start {
     /// The directory containing the repository's `.gitmodules` file
@@ -122,6 +156,8 @@ pub enum RunError {
     Shutdown(#[from] ShutdownError),
     #[error(transparent)]
     Debug(#[from] DebugError),
+    #[error(transparent)]
+    List(#[from] ListError),
     #[error("Unable to determine home directory: {0}")]
     Home(#[from] HomeDirError),
     #[error(transparent)]
@@ -218,6 +254,19 @@ impl Status {
         let (true_path, repo_kind) = get_project_path(self.dir)?;
         let display_progress = std::io::stderr().is_terminal();
         Ok(status(true_path.as_path(), repo_kind, display_progress)?)
+    }
+}
+
+impl List {
+    fn run(self) -> RunResult<()> {
+        let (true_path, repo_kind) = get_project_path(self.dir)?;
+        let no_server = self.no_server || repo_kind != RepoKind::WithSubmodules;
+        Ok(list(
+            true_path.as_path(),
+            self.format.as_deref(),
+            !self.no_header,
+            no_server,
+        )?)
     }
 }
 
@@ -343,6 +392,7 @@ fn run() -> RunResult<()> {
         Commands::Stop(shutdown_options) => shutdown_options.run(),
         Commands::Reindex(reindex_options) => reindex_options.run(),
         Commands::Debug(debug_options) => debug_options.run(),
+        Commands::List(list_options) => list_options.run(),
     };
 
     if is_watcher {

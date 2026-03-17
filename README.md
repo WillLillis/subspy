@@ -32,6 +32,7 @@ Commands:
   stop     Shutdown a watch server
   reindex  Reindex a watch server [aliases: re, r]
   debug    Dump the internal state of the watch server [aliases: dbg, d]
+  list     List submodule metadata [aliases: ls, l]
 
 Options:
   -h, --help  Print help
