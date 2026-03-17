@@ -1,4 +1,4 @@
-use std::{borrow::Cow, fmt::Write as _, io::IsTerminal as _, path::Path};
+use std::{borrow::Cow, fmt::Write as _, io::IsTerminal as _, path::Path, path::PathBuf};
 
 use git2::Repository;
 use thiserror::Error;
@@ -105,7 +105,9 @@ const PLACEHOLDERS: [&str; 9] = [
     "status",
 ];
 
-/// Indices of the two placeholders that require expensive per-submodule I/O.
+/// Indices into [`PLACEHOLDERS`] for fields that require per-submodule I/O.
+const IDX_HEAD: usize = 4;
+const IDX_HEAD_LONG: usize = 5;
 const IDX_HEAD_BRANCH: usize = 7;
 const IDX_STATUS: usize = 8;
 
@@ -155,62 +157,145 @@ fn validate_template(template: &str) -> ListResult<[bool; 9]> {
     Ok(used)
 }
 
+/// Resolves the `.git` directory for a submodule. Handles both `.git`
+/// directories (normal repos) and `.git` files containing a `gitdir:` pointer
+/// (the common case for submodules).
+fn resolve_git_dir(submod_path: &Path) -> Option<PathBuf> {
+    let dot_git = submod_path.join(".git");
+    if dot_git.is_file() {
+        // Submodule .git files contain a relative gitdir pointer
+        // (e.g. "gitdir: ../../.git/modules/name")
+        let content = std::fs::read_to_string(&dot_git).ok()?;
+        let path_str = content.strip_prefix("gitdir: ")?.trim_end();
+        Some(submod_path.join(path_str))
+    } else if dot_git.is_dir() {
+        Some(dot_git)
+    } else {
+        None
+    }
+}
+
+/// Resolves a git ref (e.g. `refs/heads/main`) to an OID by checking loose
+/// refs first, then falling back to `packed-refs`.
+fn resolve_ref(git_dir: &Path, ref_target: &str) -> Option<git2::Oid> {
+    // Loose ref
+    let ref_path = git_dir.join(ref_target);
+    if let Ok(content) = std::fs::read_to_string(&ref_path) {
+        return git2::Oid::from_str(content.trim_end()).ok();
+    }
+    // Packed refs
+    let packed = std::fs::read_to_string(git_dir.join("packed-refs")).ok()?;
+    for line in packed.lines() {
+        if line.starts_with('#') || line.starts_with('^') {
+            continue;
+        }
+        let (oid_str, name) = line.split_once(' ')?;
+        if name == ref_target {
+            return git2::Oid::from_str(oid_str).ok();
+        }
+    }
+    None
+}
+
+/// Reads a submodule's HEAD to get its current OID and branch name (if on a
+/// branch). Returns `(None, None)` if the submodule isn't checked out.
+fn read_submodule_head(submod_path: &Path) -> (Option<git2::Oid>, Option<String>) {
+    let Some(git_dir) = resolve_git_dir(submod_path) else {
+        return (None, None);
+    };
+    let Ok(content) = std::fs::read_to_string(git_dir.join("HEAD")) else {
+        return (None, None);
+    };
+    let content = content.trim_end();
+    content.strip_prefix("ref: ").map_or_else(
+        // Detached HEAD-> raw OID
+        || (git2::Oid::from_str(content).ok(), None),
+        |ref_target| {
+            let branch = ref_target
+                .strip_prefix("refs/heads/")
+                .map(|s| s.to_string());
+            let oid = resolve_ref(&git_dir, ref_target);
+            (oid, branch)
+        },
+    )
+}
+
+/// Parses `.gitmodules` to extract submodule name, path, and branch without
+/// going through `repo.submodules()` (which triggers expensive per-submodule
+/// config snapshot parsing in libgit2).
+fn parse_gitmodules(root_path: &Path) -> ListResult<Vec<(String, String, Option<String>)>> {
+    let gitmodules_path = root_path.join(".gitmodules");
+    if !gitmodules_path.exists() {
+        return Ok(Vec::new());
+    }
+    let config = git2::Config::open(&gitmodules_path)?;
+    let mut entries = Vec::new();
+
+    let mut iter = config.entries(Some("submodule\\..*\\.path"))?;
+    while let Some(entry) = iter.next() {
+        let entry = entry?;
+        let key = entry.name().expect("non-UTF-8 key in .gitmodules");
+        // Guaranteed by the regex filter on entries()
+        let name = key
+            .strip_prefix("submodule.")
+            .and_then(|s| s.strip_suffix(".path"))
+            .unwrap();
+        let path = entry
+            .value()
+            .expect("non-UTF-8 path in .gitmodules")
+            .to_string();
+        let branch_key = format!("submodule.{name}.branch");
+        let branch = config.get_string(&branch_key).ok();
+        entries.push((name.to_string(), path, branch));
+    }
+    Ok(entries)
+}
+
 /// Collects metadata for every submodule in the repository at `root_path`.
 ///
-/// Cheap fields (name, path, hashes, branch) are extracted serially since
-/// `git2::Submodule` is not `Send`. Expensive per-submodule I/O — opening
-/// each submodule repo for `head_branch` and computing `submodule_status()`
-/// for the `--no-server` path — is parallelized via rayon.
+/// Parses `.gitmodules` directly and reads the parent's `HEAD` tree for
+/// committed OIDs, bypassing `repo.submodules()` to avoid libgit2's
+/// per-submodule config snapshot overhead. Per-submodule I/O (reading the
+/// submodule's HEAD for workdir OID/branch, computing status) is
+/// parallelized via rayon.
 ///
-/// `need_head_branch` and `need_local_status` control whether the expensive
+/// `need_submod_head` and `need_local_status` control whether the expensive
 /// operations run at all, allowing callers to skip them when the template
 /// doesn't use the corresponding placeholders.
 fn gather_info(
     root_path: &Path,
     server_statuses: Option<&[(String, StatusSummary)]>,
-    need_head_branch: bool,
+    need_submod_head: bool,
     need_local_status: bool,
 ) -> ListResult<Vec<SubmoduleInfo>> {
     use rayon::prelude::*;
 
-    let repo = Repository::open(root_path)?;
-    let submodules = match repo.submodules() {
-        Ok(s) => s,
-        Err(e) if e.code() == git2::ErrorCode::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(e.into()),
-    };
+    let gitmodule_entries = parse_gitmodules(root_path)?;
 
-    // Extract cheap fields serially (git2::Submodule is not Send)
-    let partial: Vec<_> = submodules
-        .iter()
-        .map(|submod| {
-            let name = submod.name().unwrap_or("?").to_string();
-            let path_str = submod.path().to_str().unwrap_or("?").to_string();
-            let commit = submod.head_id();
-            let head = submod.workdir_id();
-            let branch = submod.branch().map(String::from);
-            (name, path_str, commit, head, branch)
+    // Look up committed OIDs from the parent's HEAD tree
+    let repo = Repository::open(root_path)?;
+    let head_tree = repo.head()?.peel_to_tree()?;
+    let partial: Vec<_> = gitmodule_entries
+        .into_iter()
+        .map(|(name, path_str, branch)| {
+            let commit = head_tree
+                .get_path(Path::new(&path_str))
+                .ok()
+                .map(|e| e.id());
+            (name, path_str, commit, branch)
         })
         .collect();
 
     let tl_repo = thread_local::ThreadLocal::new();
 
-    // Resolve expensive fields in parallel
-    partial
+    // Resolve per-submodule fields in parallel
+    let mut infos: Vec<SubmoduleInfo> = partial
         .into_par_iter()
-        .map(|(name, path_str, commit, head, branch)| {
-            let head_branch = if need_head_branch {
-                let full_path = root_path.join(&path_str);
-                Repository::open(&full_path).ok().and_then(|sub_repo| {
-                    let head_ref = sub_repo.head().ok()?;
-                    if head_ref.is_branch() {
-                        head_ref.shorthand().map(|s| s.to_string())
-                    } else {
-                        None
-                    }
-                })
+        .map(|(name, path_str, commit, branch)| {
+            let (head, head_branch) = if need_submod_head {
+                read_submodule_head(&root_path.join(&path_str))
             } else {
-                None
+                (None, None)
             };
 
             let status = match server_statuses {
@@ -239,7 +324,10 @@ fn gather_info(
                 status,
             })
         })
-        .collect()
+        .collect::<ListResult<Vec<_>>>()?;
+
+    infos.sort_unstable_by(|a, b| a.name.cmp(&b.name));
+    Ok(infos)
 }
 
 /// Expands `{...}` placeholders in `template` by calling `resolve` for each
@@ -415,12 +503,12 @@ pub fn list(
         Some(recv_status_response(&mut conn, display_progress)?)
     };
 
-    let need_head_branch = used[IDX_HEAD_BRANCH];
+    let need_submod_head = used[IDX_HEAD] || used[IDX_HEAD_LONG] || used[IDX_HEAD_BRANCH];
     let need_local_status = used[IDX_STATUS] && server_statuses.is_none();
     let infos = gather_info(
         root_path,
         server_statuses.as_deref(),
-        need_head_branch,
+        need_submod_head,
         need_local_status,
     )?;
     let output = format_output(&infos, template, header);
