@@ -37,6 +37,9 @@ use super::{
 
 /// `.git/` and `.gitmodules`
 const ROOT_WATCHER_COUNT: usize = 2;
+// Root watch indices are stable across re-indexes
+const DOT_GITMODULES_WATCHER_IDX: usize = 0;
+const DOT_GIT_WATCHER_IDX: usize = 1;
 
 const MAX_LOCKFILE_BACKOFF: Duration = Duration::from_millis(100);
 const LOCKFILE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -93,8 +96,8 @@ type WatchList = Vec<WatchListItem>;
 struct WatchServer {
     /// Filesystem watchers
     watchers: WatchList,
-    /// Which submodules to skip indexing (due to being in a rebase operation)
-    skip_set: FxHashSet<String>,
+    /// Watcher indices of submodules to skip updating (due to being in a rebase)
+    skip_set: FxHashSet<usize>,
     /// Whether a rebase is in progress in the root repository
     root_rebasing: bool,
 
@@ -676,18 +679,23 @@ impl WatchServer {
             .filter_map(|res| res.ok())
             .collect();
 
+        let mut results = results;
+        results.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+
         status_guard.clear();
         self.skip_set.clear();
         if place_submod_watches {
             self.modules_path_to_index.clear();
         }
-        for (relative_path, full_path, modules_path, status, is_in_rebase) in results {
+        for (i, (relative_path, full_path, modules_path, status, is_in_rebase)) in
+            results.into_iter().enumerate()
+        {
             status_guard.insert(relative_path.clone(), status);
+            let index = ROOT_WATCHER_COUNT + i;
             if is_in_rebase {
-                self.skip_set.insert(relative_path.clone());
+                self.skip_set.insert(index);
             }
             if place_submod_watches {
-                let index = self.watchers.len();
                 self.modules_path_to_index.insert(modules_path, index);
                 let (rx, watcher) =
                     Self::place_watch(&full_path, notify::RecursiveMode::Recursive)?;
@@ -718,7 +726,11 @@ impl WatchServer {
             })
             .collect();
 
-        let skip_set: Vec<String> = self.skip_set.iter().cloned().collect();
+        let skip_set: Vec<String> = self
+            .skip_set
+            .iter()
+            .filter_map(|&idx| self.watchers.get(idx).map(|w| w.relative_path.clone()))
+            .collect();
 
         let submodule_statuses = try_lock_for(&self.submod_statuses, DEBUG_LOCK_TIMEOUT)
             .map(|guard| guard.iter().map(|(k, v)| (k.clone(), *v)).collect());
@@ -913,7 +925,7 @@ impl WatchServer {
     }
 
     // NOTE: There's an interesting edge case here. In _theory_, all we need to do is respond
-    // to changes to `.git/index`. However, when a new commit/branch is checked ou, the files
+    // to changes to `.git/index`. However, when a new commit/branch is checked out, the files
     // within the repo are modified _before_ `.git/HEAD` is, and `.git/index` is modified
     // sometime before `HEAD` as well. This leads to a race condition where the watch server
     // re-indexes a submodule after `.git/index` (or one of the actual source files) was
@@ -957,8 +969,8 @@ impl WatchServer {
         })
     }
 
-    /// Converts a watcher's event and relative path to a relevant `EventType`, if possible
-    fn get_event_type(&self, event: &Event, rel_path: &str) -> Option<EventType> {
+    /// Converts a watcher event to a relevant `EventType`, if possible
+    fn get_event_type(&self, event: &Event, watcher_idx: usize) -> Option<EventType> {
         if !event_is_relevant(event) {
             // File renames within submodule source trees are legitimate changes, but we
             // can't allow Modify(Name) events through globally because git's
@@ -970,7 +982,7 @@ impl WatchServer {
             // dropped. Root index renames (`index.lock`->`index`) also need
             // detection so that operations like `git add <submodule>` in the
             // parent repo are visible.
-            let is_git_dir_rename = rel_path.eq(DOT_GIT)
+            let is_git_dir_rename = watcher_idx == DOT_GIT_WATCHER_IDX
                 && matches!(event.kind, EventKind::Modify(ModifyKind::Name(_)))
                 && event.paths.iter().any(|p| {
                     (p.starts_with(&self.root_modules_path)
@@ -986,7 +998,8 @@ impl WatchServer {
                         || p.starts_with(&self.root_refs_heads_path)
                 });
             if !is_git_dir_rename {
-                let is_root_watcher = rel_path.eq(DOT_GIT) || rel_path.eq(DOT_GITMODULES);
+                // Root watches are kept at indices 0 and 1
+                let is_root_watcher = watcher_idx < ROOT_WATCHER_COUNT;
                 if is_root_watcher || !matches!(event.kind, EventKind::Modify(ModifyKind::Name(_)))
                 {
                     return None;
@@ -994,7 +1007,7 @@ impl WatchServer {
             }
         }
 
-        if rel_path.eq(DOT_GIT) {
+        if watcher_idx == DOT_GIT_WATCHER_IDX {
             if event
                 .paths
                 .iter()
@@ -1065,7 +1078,7 @@ impl WatchServer {
             } else {
                 None
             }
-        } else if rel_path.eq(DOT_GITMODULES) {
+        } else if watcher_idx == DOT_GITMODULES_WATCHER_IDX {
             Some(EventType::RootGitOperation)
         } else {
             Some(EventType::SubmoduleChange)
@@ -1076,7 +1089,7 @@ impl WatchServer {
     /// `.git/modules/libs/foo` for a submodule at `libs/foo`).
     fn get_modules_path(&self, submod_rel_path: &str) -> WatchResult<PathBuf> {
         // NOTE: There is a hypothetical bug here where if two submodules were renamed
-        // to eachother's names _and_ their `.git/modules` entries weren't updated (i.e.,
+        // to each other's names _and_ their `.git/modules` entries weren't updated (i.e.,
         // only the relative path in each submodule's `.git` file), the two paths
         // will be swapped. This is highly unlikely to cause a bug in real use, and until
         // it's proven to I would prefer to not pessimize the common case with a full read
@@ -1387,87 +1400,80 @@ impl WatchServer {
                 }
             }
             match oper.recv(&self.watchers[index].receiver)? {
-                Ok(event) => {
-                    let rel_path = self.watchers[index].relative_path.as_str();
-                    match self.get_event_type(&event, rel_path) {
-                        Some(EventType::RootGitOperation) => {
-                            if !self.root_rebasing {
-                                if rel_path == DOT_GITMODULES {
-                                    gitmodules.on_gitmodules_changed();
-                                } else {
-                                    gitmodules.on_root_event(&event);
-                                }
-                                for i in ROOT_WATCHER_COUNT..self.watchers.len() {
-                                    if !self.skip_set.contains(&self.watchers[i].relative_path) {
-                                        self.try_spawn_submod_update(
-                                            i,
-                                            &in_flight,
-                                            &pending_lock_retries,
-                                        );
-                                    }
+                Ok(event) => match self.get_event_type(&event, index) {
+                    Some(EventType::RootGitOperation) => {
+                        if !self.root_rebasing {
+                            if index == DOT_GITMODULES_WATCHER_IDX {
+                                gitmodules.on_gitmodules_changed();
+                            } else {
+                                gitmodules.on_root_event(&event);
+                            }
+                            for i in ROOT_WATCHER_COUNT..self.watchers.len() {
+                                if !self.skip_set.contains(&i) {
+                                    self.try_spawn_submod_update(
+                                        i,
+                                        &in_flight,
+                                        &pending_lock_retries,
+                                    );
                                 }
                             }
                         }
-                        Some(EventType::RootRebaseStart) => {
-                            self.root_rebasing = true;
-                        }
-                        Some(EventType::RootRebaseEnd) => {
-                            wait_for_in_flight(&in_flight);
-                            self.root_rebasing = false;
-                            return Ok(HandleEventsExit::ReindexEvent);
-                        }
-                        Some(EventType::SubmoduleChange) => {
-                            if !self.skip_set.contains(rel_path) {
-                                self.try_spawn_submod_update(
-                                    index,
-                                    &in_flight,
-                                    &pending_lock_retries,
-                                );
-                            }
-                        }
-                        Some(EventType::SubmoduleGitOperation) => {
-                            if let Some(i) = self.submod_for_event(&event)
-                                && !self.skip_set.contains(&self.watchers[i].relative_path)
-                            {
-                                self.try_spawn_submod_update(i, &in_flight, &pending_lock_retries);
-                            }
-                        }
-                        // Rebases generate an incredible volume of events, and during such an
-                        // operation git continually acquires and releases `index.lock`. This,
-                        // paired with the changes to the submodule's source files leads to too much
-                        // contention for `index.lock`, which leads to the rebase failing partway
-                        // through when git fails to acquire `index.lock`. Instead, we pause
-                        // updating the relevant submodule until the rebase is completed.
-                        Some(EventType::SubmoduleRebaseStart) => {
-                            if let Some(i) = self.submod_for_event(&event) {
-                                cancel_submod_update(i, &in_flight);
-                                self.skip_set.insert(self.watchers[i].relative_path.clone());
-                                self.submod_statuses.lock().expect("Mutex poisoned").insert(
-                                    self.watchers[i].relative_path.clone(),
-                                    StatusSummary::NEW_COMMITS,
-                                );
-                            }
-                        }
-                        Some(EventType::SubmoduleRebaseEnd) => {
-                            if let Some(i) = self.submod_for_event(&event) {
-                                self.skip_set.remove(&self.watchers[i].relative_path);
-                                self.try_spawn_submod_update(i, &in_flight, &pending_lock_retries);
-                            }
-                        }
-                        Some(EventType::SubmoduleLockRelease) => {
-                            if let Some(i) = self.submod_for_event(&event)
-                                && !self.skip_set.contains(&self.watchers[i].relative_path)
-                                && pending_lock_retries
-                                    .lock()
-                                    .expect("pending_lock_retries mutex poisoned")
-                                    .remove(&i)
-                            {
-                                self.try_spawn_submod_update(i, &in_flight, &pending_lock_retries);
-                            }
-                        }
-                        None => {}
                     }
-                }
+                    Some(EventType::RootRebaseStart) => {
+                        self.root_rebasing = true;
+                    }
+                    Some(EventType::RootRebaseEnd) => {
+                        wait_for_in_flight(&in_flight);
+                        self.root_rebasing = false;
+                        return Ok(HandleEventsExit::ReindexEvent);
+                    }
+                    Some(EventType::SubmoduleChange) => {
+                        if !self.skip_set.contains(&index) {
+                            self.try_spawn_submod_update(index, &in_flight, &pending_lock_retries);
+                        }
+                    }
+                    Some(EventType::SubmoduleGitOperation) => {
+                        if let Some(i) = self.submod_for_event(&event)
+                            && !self.skip_set.contains(&i)
+                        {
+                            self.try_spawn_submod_update(i, &in_flight, &pending_lock_retries);
+                        }
+                    }
+                    // Rebases generate an incredible volume of events, and during such an
+                    // operation git continually acquires and releases `index.lock`. This,
+                    // paired with the changes to the submodule's source files leads to too much
+                    // contention for `index.lock`, which leads to the rebase failing partway
+                    // through when git fails to acquire `index.lock`. Instead, we pause
+                    // updating the relevant submodule until the rebase is completed.
+                    Some(EventType::SubmoduleRebaseStart) => {
+                        if let Some(i) = self.submod_for_event(&event) {
+                            cancel_submod_update(i, &in_flight);
+                            self.skip_set.insert(i);
+                            self.submod_statuses.lock().expect("Mutex poisoned").insert(
+                                self.watchers[i].relative_path.clone(),
+                                StatusSummary::NEW_COMMITS,
+                            );
+                        }
+                    }
+                    Some(EventType::SubmoduleRebaseEnd) => {
+                        if let Some(i) = self.submod_for_event(&event) {
+                            self.skip_set.remove(&i);
+                            self.try_spawn_submod_update(i, &in_flight, &pending_lock_retries);
+                        }
+                    }
+                    Some(EventType::SubmoduleLockRelease) => {
+                        if let Some(i) = self.submod_for_event(&event)
+                            && !self.skip_set.contains(&i)
+                            && pending_lock_retries
+                                .lock()
+                                .expect("pending_lock_retries mutex poisoned")
+                                .remove(&i)
+                        {
+                            self.try_spawn_submod_update(i, &in_flight, &pending_lock_retries);
+                        }
+                    }
+                    None => {}
+                },
                 Err(e) => {
                     wait_for_in_flight(&in_flight);
                     return Ok(self.handle_watcher_error(index, &e));
