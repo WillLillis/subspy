@@ -112,7 +112,7 @@ struct List {
     /// {head}, {head_long}, {branch}, {head_branch}, {status}.
     /// Extra text inside braces is preserved and padded as a unit, e.g.
     /// {[name]} outputs [value] with alignment applied to the whole [value].
-    /// Escape sequences: \n (newline), \t (tab), \\ (backslash), \{ and \} (literal braces).
+    /// Escape sequences: \n (newline), \r (carriage return), \t (tab), \\ (backslash), \{ and \} (literal braces).
     #[arg(short, long, verbatim_doc_comment)]
     pub format: Option<String>,
     /// Omit the header row

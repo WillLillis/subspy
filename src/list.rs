@@ -17,10 +17,43 @@ pub enum ListError {
     Git(#[from] git2::Error),
     #[error(transparent)]
     Status(#[from] StatusError),
-    #[error("Unknown placeholder: {{{0}}}")]
-    UnknownPlaceholder(String),
-    #[error("Unclosed '{{' in format string")]
-    UnclosedBrace,
+    #[error(transparent)]
+    UnknownPlaceholder(UnknownPlaceholderError),
+    #[error(transparent)]
+    UnclosedBrace(UnclosedBraceError),
+}
+
+#[derive(Debug, Error)]
+pub struct UnknownPlaceholderError {
+    template: String,
+    content_range: std::ops::Range<usize>,
+}
+
+impl std::fmt::Display for UnknownPlaceholderError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "Unknown placeholder:")?;
+        writeln!(f, "{}", self.template)?;
+        let col = self.template[..self.content_range.start].chars().count();
+        let width = self.template[self.content_range.clone()].chars().count();
+        writeln!(f, "{}{}", " ".repeat(col), "^".repeat(width))?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Error)]
+pub struct UnclosedBraceError {
+    template: String,
+    index: usize,
+}
+
+impl std::fmt::Display for UnclosedBraceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "Unclosed '{{' in format string:")?;
+        writeln!(f, "{}", self.template)?;
+        let col = self.template[..self.index].chars().count();
+        writeln!(f, "{}^", " ".repeat(col))?;
+        Ok(())
+    }
 }
 
 const DEFAULT_FORMAT: &str =
@@ -125,6 +158,27 @@ fn find_placeholder(content: &str) -> Option<(usize, &'static str)> {
         .max_by_key(|(_, p)| p.len())
 }
 
+/// Returns the _byte_ index of the first unescaped instance of `needle` inside
+/// `haystack`, if present.
+fn find_unescaped(haystack: &str, needle: char) -> Option<usize> {
+    let mut is_escaped = false;
+    for (i, c) in haystack.char_indices() {
+        if is_escaped {
+            is_escaped = false;
+            continue;
+        }
+        if c == '\\' {
+            is_escaped = true;
+            continue;
+        }
+        if c == needle {
+            return Some(i);
+        }
+    }
+
+    None
+}
+
 /// Validates `template` and returns which placeholders it uses.
 ///
 /// Checks that every `{...}` block contains a recognized placeholder and
@@ -133,27 +187,44 @@ fn find_placeholder(content: &str) -> Option<(usize, &'static str)> {
 /// a per-placeholder boolean indicating which are present in the template.
 fn validate_template(template: &str) -> ListResult<[bool; 9]> {
     let mut used = [false; 9];
-    let bytes = template.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'\\' && i + 1 < bytes.len() {
-            // Skip escaped characters (including \{ and \})
-            i += 2;
-        } else if bytes[i] == b'{' {
+    let mut is_escaped = false;
+    let mut skip_until = 0;
+    for (i, c) in template.char_indices() {
+        if i < skip_until {
+            continue;
+        }
+        if is_escaped {
+            is_escaped = false;
+            continue;
+        }
+        if c == '\\' {
+            is_escaped = true;
+            continue;
+        }
+        if c == '{' {
             let start = i + 1;
-            let Some(end) = template[start..].find('}') else {
-                return Err(ListError::UnclosedBrace);
+            let Some(end) = find_unescaped(&template[start..], '}') else {
+                return Err(ListError::UnclosedBrace(UnclosedBraceError {
+                    template: template.to_string(),
+                    index: i,
+                }));
             };
             let content = &template[start..start + end];
             match find_placeholder(content) {
                 Some((idx, _)) => used[idx] = true,
-                None => return Err(ListError::UnknownPlaceholder(content.to_string())),
+                None => {
+                    return Err(ListError::UnknownPlaceholder(UnknownPlaceholderError {
+                        template: template.to_string(),
+                        content_range: start..start + end,
+                    }));
+                }
             }
-            i = start + end + 1;
-        } else {
-            i += 1;
+            // Skip past the closing brace so characters inside the
+            // placeholder block aren't re-scanned.
+            skip_until = start + end + 1;
         }
     }
+
     Ok(used)
 }
 
@@ -177,6 +248,9 @@ fn resolve_git_dir(submod_path: &Path) -> Option<PathBuf> {
 
 /// Resolves a git ref (e.g. `refs/heads/main`) to an OID by checking loose
 /// refs first, then falling back to `packed-refs`.
+///
+/// Does not follow symbolic refs (chains of `ref:` indirection). This is fine
+/// for branch tips under `refs/heads/`, which are always direct OIDs.
 fn resolve_ref(git_dir: &Path, ref_target: &str) -> Option<git2::Oid> {
     // Loose ref
     let ref_path = git_dir.join(ref_target);
@@ -189,7 +263,9 @@ fn resolve_ref(git_dir: &Path, ref_target: &str) -> Option<git2::Oid> {
         if line.starts_with('#') || line.starts_with('^') {
             continue;
         }
-        let (oid_str, name) = line.split_once(' ')?;
+        let Some((oid_str, name)) = line.split_once(' ') else {
+            continue;
+        };
         if name == ref_target {
             return git2::Oid::from_str(oid_str).ok();
         }
@@ -208,7 +284,7 @@ fn read_submodule_head(submod_path: &Path) -> (Option<git2::Oid>, Option<String>
     };
     let content = content.trim_end();
     content.strip_prefix("ref: ").map_or_else(
-        // Detached HEAD-> raw OID
+        // Detached HEAD -> raw OID
         || (git2::Oid::from_str(content).ok(), None),
         |ref_target| {
             let branch = ref_target
@@ -268,6 +344,8 @@ fn gather_info(
     need_submod_head: bool,
     need_local_status: bool,
 ) -> ListResult<Vec<SubmoduleInfo>> {
+    use std::collections::HashMap;
+
     use rayon::prelude::*;
 
     let gitmodule_entries = parse_gitmodules(root_path)?;
@@ -286,6 +364,8 @@ fn gather_info(
         })
         .collect();
 
+    let status_map: Option<HashMap<&str, StatusSummary>> =
+        server_statuses.map(|statuses| statuses.iter().map(|(p, s)| (p.as_str(), *s)).collect());
     let tl_repo = thread_local::ThreadLocal::new();
 
     // Resolve per-submodule fields in parallel
@@ -298,12 +378,11 @@ fn gather_info(
                 (None, None)
             };
 
-            let status = match server_statuses {
-                Some(statuses) => Some(
-                    statuses
-                        .iter()
-                        .find(|(p, _)| p == &path_str)
-                        .map_or(StatusSummary::CLEAN, |(_, s)| *s),
+            let status = match &status_map {
+                Some(map) => Some(
+                    map.get(path_str.as_str())
+                        .copied()
+                        .unwrap_or(StatusSummary::CLEAN),
                 ),
                 None if need_local_status => {
                     let repo = tl_repo.get_or_try(|| Repository::open(root_path))?;
@@ -335,7 +414,7 @@ fn gather_info(
 /// the placeholder inside the braces (e.g. the parens in `{(name)}`) is
 /// preserved via `replacen` and padded as a unit according to `widths`.
 ///
-/// Also interprets backslash escapes: `\n`, `\t`, `\\`, `\{`, `\}`.
+/// Also interprets backslash escapes: `\n`, `\r`, `\t`, `\\`, `\{`, `\}`.
 ///
 /// Assumes `template` has already been validated by [`validate_template`].
 fn expand_template<'a>(
@@ -350,9 +429,10 @@ fn expand_template<'a>(
         match bytes[i] {
             b'{' => {
                 let start = i + 1;
-                // Safety: template was validated by validate_template
-                let end = template[start..].find('}').unwrap();
-                let content = &template[start..start + end];
+                let template_start = &template[start..];
+                // Safety: template was validated by `validate_template`
+                let end = find_unescaped(template_start, '}').unwrap();
+                let content = &template_start[..end];
                 let (idx, name) = find_placeholder(content).unwrap();
                 let value = resolve(name);
                 let display = if content.len() == name.len() {
@@ -389,6 +469,10 @@ fn expand_template<'a>(
                     output.push('}');
                     i += 2;
                 }
+                Some(b'r') => {
+                    output.push('\r');
+                    i += 2;
+                }
                 _ => {
                     output.push('\\');
                     i += 1;
@@ -420,12 +504,13 @@ fn compute_placeholder_widths(template: &str, submod_info: &[SubmoduleInfo]) -> 
             i += 2;
         } else if bytes[i] == b'{' {
             let start = i + 1;
-            // Safety: template was validated by validate_template
-            let end = template[start..].find('}').unwrap();
+            // Safety: template was validated by `validate_template`
+            let end = find_unescaped(&template[start..], '}').unwrap();
             let content = &template[start..start + end];
             if let Some((idx, name)) = find_placeholder(content) {
                 used[idx] = true;
-                overhead[idx] = content.len() - name.len();
+                // NOTE:  `name.len()` is fine here since all placeholders are ASCII
+                overhead[idx] = content.chars().count() - name.len();
             }
             i = start + end + 1;
         } else {
@@ -444,8 +529,8 @@ fn compute_placeholder_widths(template: &str, submod_info: &[SubmoduleInfo]) -> 
     for info in submod_info {
         for (idx, &placeholder) in PLACEHOLDERS.iter().enumerate() {
             if used[idx] {
-                widths[idx] =
-                    widths[idx].max(info.resolve_placeholder(placeholder).len() + overhead[idx]);
+                widths[idx] = widths[idx]
+                    .max(info.resolve_placeholder(placeholder).chars().count() + overhead[idx]);
             }
         }
     }
