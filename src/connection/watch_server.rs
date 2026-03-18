@@ -940,6 +940,13 @@ impl WatchServer {
     /// server can get stuck reporting pre-commit status (e.g. stale
     /// `MODIFIED_CONTENT` from staged changes that were just committed).
     fn is_submod_refs_heads(&self, p: &Path) -> bool {
+        // Cheap pre-filter: if the path doesn't contain a "refs" component it
+        // can't be a refs/heads update.  This avoids the expensive ancestor
+        // walk + HashMap lookups for the vast majority of .git/modules events
+        // (object files, pack files, logs, etc.).
+        if !p.components().any(|c| c.as_os_str() == "refs") {
+            return false;
+        }
         p.ancestors().any(|ancestor| {
             self.modules_path_to_index.contains_key(ancestor)
                 && p.strip_prefix(ancestor).is_ok_and(|rel| {
