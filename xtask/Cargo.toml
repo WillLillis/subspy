@@ -6,10 +6,13 @@ publish = false
 
 [dependencies]
 clap = { version = "4.5.53", features = ["derive"] }
+etcetera = "0.11.0"
+flexi_logger = "0.31.7"
 git2 = { version = "0.20.3", features = [
     "vendored-libgit2",
     "vendored-openssl",
 ] }
+log = "0.4.29"
 rand = "0.9"
 subspy = { path = ".." }
 testutil = { path = "../testutil" }

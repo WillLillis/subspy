@@ -1,11 +1,15 @@
 use std::{
     collections::{HashMap, HashSet},
     fmt,
-    time::Duration,
+    io::Write as _,
+    time::{Duration, Instant},
 };
 
 use clap::Parser;
+use etcetera::BaseStrategy as _;
+use flexi_logger::{FileSpec, Logger, WriteMode};
 use git2::Repository;
+use log::error;
 use rand::{Rng, SeedableRng, rngs::StdRng, seq::IndexedRandom};
 use subspy::StatusSummary;
 use subspy::connection::client::request_debug;
@@ -34,6 +38,20 @@ struct FuzzArgs {
     /// Polling interval in milliseconds when waiting for server to settle.
     #[arg(long, default_value_t = 25)]
     poll_ms: u64,
+
+    /// Write timing and git stats CSVs for performance analysis.
+    // To plot the results:
+    //   python3 -m venv /tmp/plot_venv
+    //   /tmp/plot_venv/bin/pip install matplotlib
+    //   /tmp/plot_venv/bin/python3 xtask/plot_timing.py timing.csv
+    //   /tmp/plot_venv/bin/python3 xtask/plot_git_stats.py git_stats.csv
+    #[arg(long)]
+    collect_stats: bool,
+
+    /// On failure, keep the server alive for inspection until the user
+    /// confirms exit.
+    #[arg(long)]
+    pause_on_failure: bool,
 }
 
 /// Operations the fuzzer can perform against the watch server.
@@ -218,6 +236,20 @@ const W_RESET_MIXED: u32 = 2;
 const W_CHECKOUT_BRANCH: u32 = 3;
 const W_RAPID_FIRE: u32 = 3;
 const HISTORY_LEN: usize = 100;
+const REPACK_INTERVAL: u32 = 10_000;
+
+struct VerifyTiming {
+    ground_truth_ms: u128,
+    server_us: u128,
+    polls: u32,
+}
+
+struct GitStats {
+    ref_count: u32,
+    pack_count: u32,
+    pack_bytes: u64,
+    loose_count: u32,
+}
 
 struct FuzzerState {
     rng: StdRng,
@@ -313,6 +345,85 @@ impl FuzzerState {
 
     fn submodule_names(&self) -> Vec<String> {
         self.untracked_files.keys().cloned().collect()
+    }
+
+    /// Expires reflogs and repacks all objects in the root repo and each
+    /// submodule. Reflog expiry drops references to old commits (from amends,
+    /// resets, etc.), and `repack -a -d` then consolidates only the remaining
+    /// reachable objects into a single pack. Without the expiry, reflogs keep
+    /// old commit chains alive and pack size grows without bound.
+    fn repack(&self) {
+        self.harness
+            .git_in_root(&["reflog", "expire", "--expire=now", "--all"]);
+        self.harness.git_in_root(&["repack", "-a", "-d"]);
+        self.harness.git_in_root(&["prune"]);
+        for sub in self.submodule_names() {
+            // Delete old fuzz branches to keep ref count bounded. Each
+            // SubmoduleUpdate creates a new fuzz_br_N; the old ones keep
+            // history reachable and slow down git2.
+            let output = self
+                .harness
+                .git_in_submodule_may_fail(&sub, &["branch", "--list", "fuzz_br_*"]);
+            let current = self
+                .harness
+                .git_in_submodule_may_fail(&sub, &["rev-parse", "--abbrev-ref", "HEAD"]);
+            let current_branch = String::from_utf8_lossy(&current.stdout);
+            let current_branch = current_branch.trim();
+            for line in String::from_utf8_lossy(&output.stdout).lines() {
+                let branch = line.trim().trim_start_matches("* ");
+                if !branch.is_empty() && branch != current_branch {
+                    self.harness
+                        .git_in_submodule(&sub, &["branch", "-D", branch]);
+                }
+            }
+            self.harness.git_in_submodule(&sub, &["repack", "-a", "-d"]);
+        }
+    }
+
+    /// Collects git repository diagnostics for the root repo.
+    fn git_stats(&self) -> GitStats {
+        let root = self.harness.root_path();
+        let git_dir = root.join(".git");
+
+        // Count refs (branches + tags + other)
+        let output = testutil::git_may_fail(&[
+            "-C",
+            &root.display().to_string(),
+            "for-each-ref",
+            "--format=x",
+        ]);
+        let ref_count = String::from_utf8_lossy(&output.stdout).lines().count() as u32;
+
+        // Count and size pack files
+        let objects_dir = git_dir.join("objects");
+        let pack_dir = objects_dir.join("pack");
+        let (mut pack_count, mut pack_bytes) = (0u32, 0u64);
+        if let Ok(entries) = std::fs::read_dir(&pack_dir) {
+            for entry in entries.flatten() {
+                if entry.path().extension().is_some_and(|e| e == "pack") {
+                    pack_count += 1;
+                    pack_bytes += entry.metadata().map_or(0, |m| m.len());
+                }
+            }
+        }
+
+        // Count loose objects
+        let mut loose_count = 0u32;
+        for hex in "0123456789abcdef".chars() {
+            for hex2 in "0123456789abcdef".chars() {
+                let shard = objects_dir.join(format!("{hex}{hex2}"));
+                if let Ok(entries) = std::fs::read_dir(shard) {
+                    loose_count += entries.count() as u32;
+                }
+            }
+        }
+
+        GitStats {
+            ref_count,
+            pack_count,
+            pack_bytes,
+            loose_count,
+        }
     }
 
     fn pick_submodule(&mut self) -> String {
@@ -908,25 +1019,35 @@ impl FuzzerState {
     }
 
     /// Wait for the server status to match ground truth.
-    /// Returns Ok(()) on match, Err with details on timeout.
-    fn verify(&self) -> Result<(), String> {
+    /// When `timed` is true, returns timing data for performance analysis.
+    fn verify(&self, timed: bool) -> Result<Option<VerifyTiming>, String> {
+        let gt_start = Instant::now();
         let expected = self.ground_truth();
+        let ground_truth_ms = gt_start.elapsed().as_millis();
+
         let timeout = testutil::DEFAULT_TIMEOUT;
-        let start = std::time::Instant::now();
+        let start = Instant::now();
+        let mut polls = 0u32;
 
         loop {
+            let srv_start = Instant::now();
             let mut actual = self.harness.status();
+            let server_us = srv_start.elapsed().as_micros();
+            polls += 1;
+
             // Filter out LOCK_FAILURE — transient, not a real mismatch
             actual.retain(|(_, s)| !s.contains(StatusSummary::LOCK_FAILURE));
             actual.sort_by(|a, b| a.0.cmp(&b.0));
 
             if actual == expected {
-                return Ok(());
+                return Ok(timed.then_some(VerifyTiming {
+                    ground_truth_ms,
+                    server_us,
+                    polls,
+                }));
             }
 
             if start.elapsed() >= timeout {
-                // Re-compute ground truth at the moment of failure to confirm
-                // it's stable (not a transient git2 read)
                 let expected2 = self.ground_truth();
                 let cli_check = self.cli_cross_check();
                 return Err(format!(
@@ -965,32 +1086,112 @@ fn main() {
     let args = FuzzArgs::parse();
     let seed = args.seed.unwrap_or_else(rand::random);
 
+    let mut log_file_dir = etcetera::choose_base_strategy().unwrap().cache_dir();
+    log_file_dir.push("subspy");
+    Logger::with(flexi_logger::LogSpecification::info())
+        .log_to_file(FileSpec::default().directory(log_file_dir))
+        .write_mode(WriteMode::BufferAndFlush)
+        .start()
+        .unwrap();
+
+    let default_panic_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        error!("Panic: {info}");
+        log::logger().flush();
+        default_panic_hook(info);
+    }));
+
     println!("=== subspy fuzzer ===");
     println!("seed:       {seed}");
     println!("steps:      {}", args.steps);
     println!("submodules: {}", args.submodules);
     println!("max_burst:  {}", args.max_burst);
     println!("poll_ms:    {}", args.poll_ms);
+    println!("stats:      {}", args.collect_stats);
     println!();
 
     let mut state = FuzzerState::new(&args, seed);
+    let collect_stats = args.collect_stats;
+    let pause_on_failure = args.pause_on_failure;
 
     // Verify initial state is clean
-    if let Err(e) = state.verify() {
+    if let Err(e) = state.verify(false) {
         dump_failure(&state, 0, &e);
-        std::process::exit(1);
+        wait_and_exit(pause_on_failure);
     }
     println!("[step 0] initial state verified clean");
 
+    let mut csv = collect_stats.then(|| {
+        let mut f = std::fs::File::create("timing.csv").expect("failed to create timing.csv");
+        writeln!(f, "step,op_ms,ground_truth_ms,server_us,polls").unwrap();
+        f
+    });
+    let mut stats_csv = collect_stats.then(|| {
+        let mut f = std::fs::File::create("git_stats.csv").expect("failed to create git_stats.csv");
+        writeln!(f, "step,refs,packs,pack_kb,loose").unwrap();
+        f
+    });
+
+    if let Some(stats_csv) = &mut stats_csv {
+        let s = state.git_stats();
+        writeln!(
+            stats_csv,
+            "0,{},{},{},{}",
+            s.ref_count,
+            s.pack_count,
+            s.pack_bytes / 1024,
+            s.loose_count
+        )
+        .unwrap();
+    }
+
     for step in 1..=args.steps {
+        let t0 = Instant::now();
         let op = state.step();
+        let op_ms = t0.elapsed().as_millis();
+
         println!("[step {step}] {op}");
         state.history[state.history_idx % HISTORY_LEN] = Some(op);
         state.history_idx += 1;
 
-        if let Err(e) = state.verify() {
-            dump_failure(&state, step, &e);
-            std::process::exit(1);
+        match state.verify(collect_stats) {
+            Ok(timing) => {
+                if let Some((csv, timing)) = csv.as_mut().zip(timing) {
+                    writeln!(
+                        csv,
+                        "{step},{op_ms},{},{},{}",
+                        timing.ground_truth_ms, timing.server_us, timing.polls
+                    )
+                    .unwrap();
+                }
+            }
+            Err(e) => {
+                dump_failure(&state, step, &e);
+                wait_and_exit(pause_on_failure);
+            }
+        }
+
+        if step % REPACK_INTERVAL == 0 {
+            if let Some(stats_csv) = &mut stats_csv {
+                let s = state.git_stats();
+                println!(
+                    "[step {step}] repack (refs={}, packs={}, pack_kb={}, loose={})",
+                    s.ref_count,
+                    s.pack_count,
+                    s.pack_bytes / 1024,
+                    s.loose_count
+                );
+                writeln!(
+                    stats_csv,
+                    "{step},{},{},{},{}",
+                    s.ref_count,
+                    s.pack_count,
+                    s.pack_bytes / 1024,
+                    s.loose_count
+                )
+                .unwrap();
+            }
+            state.repack();
         }
     }
 
@@ -999,6 +1200,21 @@ fn main() {
         "All {steps} steps passed with seed {seed}.",
         steps = args.steps
     );
+}
+
+fn wait_and_exit(pause: bool) -> ! {
+    if pause {
+        eprintln!("Server is still running. Type 'quit' and press Enter to shut down.");
+        let mut input = String::new();
+        loop {
+            input.clear();
+            let _ = std::io::stdin().read_line(&mut input);
+            if input.trim().eq_ignore_ascii_case("quit") {
+                break;
+            }
+        }
+    }
+    std::process::exit(1);
 }
 
 fn dump_failure(state: &FuzzerState, failed_step: u32, error: &str) {

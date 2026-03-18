@@ -1719,7 +1719,10 @@ name = "xtask"
 version = "0.0.0"
 dependencies = [
  "clap",
+ "etcetera",
+ "flexi_logger",
  "git2",
+ "log",
  "rand 0.9.2",
  "subspy",
  "testutil",
