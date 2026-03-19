@@ -1013,11 +1013,19 @@ impl WatchServer {
                 .iter()
                 .any(|p| p.starts_with(&self.root_modules_path))
             {
-                if event
-                    .paths
-                    .iter()
-                    .any(|p| Self::is_index_or_head_path(p) || self.is_submod_refs_heads(p))
-                {
+                if event.paths.iter().any(|p| {
+                    Self::is_index_or_head_path(p)
+                        || self.is_submod_refs_heads(p)
+                        // On Linux, inotify may only report the MOVED_FROM
+                        // half of a `.lock` → target rename. The filename is
+                        // "index.lock"/"HEAD.lock" rather than "index"/"HEAD",
+                        // so `is_index_or_head_path` misses it. Treat a
+                        // rename of these lock files as a completed git
+                        // operation so the server re-reads submodule status.
+                        || (matches!(event.kind, EventKind::Modify(ModifyKind::Name(_)))
+                            && p.file_name()
+                                .is_some_and(|n| n == "index.lock" || n == "HEAD.lock"))
+                }) {
                     // NOTE: We don't take the same `Remove` defensive measures for submodule
                     // `index`/`HEAD` operations as we do with the root repository. This is because
                     // the event loop continues to run (as opposed to breaking out for a reindex),
@@ -1027,13 +1035,11 @@ impl WatchServer {
                     Some(EventType::SubmoduleRebaseStart)
                 } else if self.is_submod_rebase_end_event(event) {
                     Some(EventType::SubmoduleRebaseEnd)
-                } else if matches!(
-                    event.kind,
-                    EventKind::Remove(_) | EventKind::Modify(ModifyKind::Name(_))
-                ) && event
-                    .paths
-                    .iter()
-                    .any(|p| p.file_name().is_some_and(|n| n == "index.lock"))
+                } else if matches!(event.kind, EventKind::Remove(_))
+                    && event
+                        .paths
+                        .iter()
+                        .any(|p| p.file_name().is_some_and(|n| n == "index.lock"))
                 {
                     Some(EventType::SubmoduleLockRelease)
                 } else {
