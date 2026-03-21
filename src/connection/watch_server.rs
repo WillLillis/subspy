@@ -280,6 +280,7 @@ fn cancel_submod_update(index: usize, state: &(Mutex<InFlightTracker>, Condvar))
 }
 
 /// Deferral state for `.gitmodules` changes within [`GitmodulesTracker`].
+#[derive(Clone, Copy)]
 enum GitmodulesDeferral {
     /// No `.gitmodules` change is pending.
     Idle,
@@ -296,13 +297,15 @@ enum GitmodulesDeferral {
 /// When `.gitmodules` is modified, we can't reindex immediately because the
 /// git operation (e.g. `git submodule add`, `git rm -f`) also produces index
 /// rename events as part of the same command. Triggering a reindex on those
-/// would acquire `index.lock` before the user's next command can run.
+/// would acquire `index.lock` before the git operation completes, causing git
+/// to fail.
 ///
 /// This state machine:
 /// 1. Records that a watcher update is needed ([`Self::on_gitmodules_changed`])
 /// 2. Skips events from the same git operation (via matching tracker cookie)
 /// 3. Resets a debounce deadline on events from subsequent operations
 /// 4. Falls back to a deadline-based reindex if no further root events arrive
+#[derive(Clone, Copy)]
 struct GitmodulesTracker {
     state: GitmodulesDeferral,
     /// Fallback deadline: if no subsequent root event arrives before this
@@ -615,48 +618,57 @@ impl WatchServer {
 
         let results: Vec<_> = submod_info
             .into_par_iter()
-            .map(|(relative_path, full_path)| -> WatchResult<(String, PathBuf, PathBuf, StatusSummary, bool)> {
+            .map(|(relative_path, full_path)| {
                 let sub_start = std::time::Instant::now();
-                let repo = tl_repo.get_or_try(|| Repository::open(root_path))
-                    .map_err(|e| {
-                        error!("Failed to open repository while indexing {relative_path}: {e}");
-                        e
-                    })?;
-
-                let modules_path = match self.get_modules_path(&relative_path) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        error!(
-                            "Failed to get modules path for submodule {relative_path} - {e}, skipping...",
-                        );
-                        Err(e)?
-                    }
-                };
-                // This is definitely a race condition, and is not meant to catch "active" rebases
-                // while the status map is being populated. Instead, the intention is for "stalled"
-                // rebases (i.e. that has hit a conflict that must be manually resolved) so that we
-                // can properly skip updating this submodule until its rebase has been completed.
-                let is_in_rebase = modules_path.join("rebase-merge").exists();
 
                 #[cfg(target_os = "windows")]
                 let relative_path = relative_path.replace('\\', "/");
 
-                let status = if is_in_rebase {
-                    StatusSummary::NEW_COMMITS
-                } else {
-                    match get_submod_status(
-                        repo,
-                        &relative_path,
-                        &modules_path.join("index.lock"),
-                        None,
-                    ) {
-                        Ok(st) => st,
+                // TODO: This would be better as a `try` block if that's ever stabilized
+                // (https://github.com/rust-lang/rust/issues/31436)
+                // (`.git/modules/` path, status, is in rebase)
+                let inner: WatchResult<(PathBuf, StatusSummary, bool)> = (|| {
+                    let repo = tl_repo.get_or_try(|| Repository::open(root_path))
+                        .map_err(|e| {
+                            error!("Failed to open repository while indexing {relative_path}: {e}");
+                            e
+                        })?;
+
+                    let modules_path = match self.get_modules_path(&relative_path) {
+                        Ok(p) => p,
                         Err(e) => {
-                            error!("Failed to get {relative_path} status while populating status map: {e}");
+                            error!(
+                                "Failed to get modules path for submodule {relative_path} - {e}, skipping...",
+                            );
                             Err(e)?
                         }
-                    }
-                };
+                    };
+                    // This is definitely a race condition, and is not meant to catch "active"
+                    // rebases while the status map is being populated. Instead, the intention is
+                    // for "stalled" rebases (i.e. that has hit a conflict that must be manually
+                    // resolved) so that we can properly skip updating this submodule until its
+                    // rebase has been completed.
+                    let is_in_rebase = modules_path.join("rebase-merge").exists();
+
+                    let status = if is_in_rebase {
+                        StatusSummary::NEW_COMMITS
+                    } else {
+                        match get_submod_status(
+                            repo,
+                            &relative_path,
+                            &modules_path.join("index.lock"),
+                            None,
+                        ) {
+                            Ok(st) => st,
+                            Err(e) => {
+                                error!("Failed to get {relative_path} status while populating status map: {e}");
+                                Err(e)?
+                            }
+                        }
+                    };
+
+                    Ok((modules_path, status, is_in_rebase))
+                })();
 
                 let count = completed.fetch_add(1, Ordering::Relaxed) + 1;
                 broadcast_progress(
@@ -668,35 +680,43 @@ impl WatchServer {
                     pb.inc(1);
                 }
                 trace!(
-                    "Indexed {} ({:?}) in {}ms",
+                    "Indexed {} in {}ms ({})",
                     full_path.display(),
-                    status,
                     sub_start.elapsed().as_millis(),
+                    if inner.is_ok() { "ok" } else { "error" },
                 );
 
-                Ok((relative_path, full_path, modules_path, status, is_in_rebase))
+                (relative_path, full_path, inner)
             })
-            .filter_map(|res| res.ok())
             .collect();
-
-        let mut results = results;
-        results.sort_unstable_by(|a, b| a.0.cmp(&b.0));
 
         status_guard.clear();
         self.skip_set.clear();
         if place_submod_watches {
             self.modules_path_to_index.clear();
         }
-        for (i, (relative_path, full_path, modules_path, status, is_in_rebase)) in
-            results.into_iter().enumerate()
-        {
-            status_guard.insert(relative_path.clone(), status);
+        // Every submodule occupies a slot in this loop regardless of whether
+        // its status read succeeded. This keeps `index` (= ROOT_WATCHER_COUNT + i)
+        // aligned with watcher positions across calls: rayon preserves order for
+        // indexed iterators, and `repo.submodules()` returns a consistent order.
+        // Skipping failed submodules would shift subsequent indices and misalign
+        // skip_set / modules_path_to_index with the watcher array.
+        for (i, (relative_path, full_path, inner)) in results.into_iter().enumerate() {
             let index = ROOT_WATCHER_COUNT + i;
-            if is_in_rebase {
-                self.skip_set.insert(index);
+            // Only populate status/skip_set/modules_path_to_index on success.
+            // Failed submodules get no status entry but still reserve a watcher
+            // slot — the watcher will generate events that trigger re-reads via
+            // try_spawn_submod_update, so the status will eventually converge.
+            if let Ok((modules_path, status, is_in_rebase)) = inner {
+                status_guard.insert(relative_path.clone(), status);
+                if is_in_rebase {
+                    self.skip_set.insert(index);
+                }
+                if place_submod_watches {
+                    self.modules_path_to_index.insert(modules_path, index);
+                }
             }
             if place_submod_watches {
-                self.modules_path_to_index.insert(modules_path, index);
                 let (rx, watcher) =
                     Self::place_watch(&full_path, notify::RecursiveMode::Recursive)?;
                 self.watchers
