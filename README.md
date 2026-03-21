@@ -4,8 +4,8 @@ A faster `git status` when working in repositories with many submodules.
 
 ### The Problem
 
-Running `git status` at the top level of a repository with many submodules can take minutes, a flow state-breaking pause!
-This problem is exacerbated on Windows, which is hindered by Windows Defender as well as an inefficient [lstat implementation](https://git-scm.com/docs/git-update-index#_using_assume_unchanged_bit).
+Running `git status` at the top level of a repository with many submodules can take tens of seconds to minutes. This performance
+issue is amplified on Windows, which is hindered by Windows Defender as well as an inefficient [lstat implementation](https://git-scm.com/docs/git-update-index#_using_assume_unchanged_bit).
 
 There are a few potential workarounds you should try before using this tool, including 
 
@@ -65,7 +65,8 @@ may increase the runtime of the next `git status` invocation, while `subspy stat
 - Windows:
 
 Subspy is most useful on Windows, where git is the slowest. Here's a comparison between `subspy status` and `git status`
-on a private repo with >200 submodules, running on Windows 11 with git bash.
+on a private repo with >200 submodules, running on Windows 11 with git bash. Note that spawning a process that immediately
+exits already takes ~80ms on the machine this measurement was performed on.
 
 ```sh
 ~/very_large_project/ > time subspy status # Spawns a new watch server
@@ -102,14 +103,16 @@ git st  0.07s user 0.21s system 104% cpu 0.264 total
 
 #### Compatibility
 
-The client and server must be built from the same version of `subspy`. The IPC protocol is not versioned,
-and no guarantees are made regarding compatibility in between versions. After upgrading, stop any running
-watch servers before using the new binary.
+The client and server must be built from the same version of `subspy`. The IPC protocol is not versioned,  and no guarantees
+are made regarding compatibility in between versions. After upgrading, stop any running watch servers before using the new
+binary.
 
 #### Limitations
 
-- Watch servers for nested submodules (submodules which contain submodules of their own) is not supported.
-`subspy` must be run from the top-level of the repository.
+- Watch servers for nested submodules (submodules which contain submodules of their own) is not supported. `subspy` must
+be run from the top-level of the repository.
+- On Linux, each watch server consumes inotify watches. For very large repositories or many concurrent servers, you may
+need to increase the system limit (e.g. `sudo sysctl fs.inotify.max_user_watches=<value>`).
 
 #### Future Improvements
 
