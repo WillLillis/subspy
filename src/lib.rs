@@ -8,9 +8,11 @@ use indicatif::{ProgressBar, ProgressStyle};
 pub mod connection;
 pub mod debug;
 pub mod list;
+pub mod prompt;
 pub mod reindex;
 pub mod shutdown;
 pub mod status;
+pub mod template;
 pub mod watch;
 
 pub const DOT_GITMODULES: &str = ".gitmodules";

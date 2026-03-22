@@ -749,7 +749,17 @@ pub fn status(
     Ok(())
 }
 
-fn compute_local_statuses(
+/// Computes submodule statuses locally via git2 without the watch server.
+///
+/// # Errors
+///
+/// Returns `StatusError` if the lock file cannot be acquired or git2 fails
+/// to read submodule status.
+///
+/// # Panics
+///
+/// Panics if a submodule path contains non-UTF-8.
+pub fn compute_local_statuses(
     root_path: &Path,
     repo: &Repository,
 ) -> StatusResult<Vec<(String, StatusSummary)>> {

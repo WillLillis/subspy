@@ -44,6 +44,39 @@ Options:
 ~/very_large_project/ > subspy stop # Shutdown the watch server
 ```
 
+#### Shell Prompt Integration
+
+The `prompt` subcommand outputs submodule status counts for use in shell prompts. It connects to a running watch server
+and returns immediately. If no server is running, it spawns one in the background and produces no output until the next
+invocation.
+
+The default output is space-separated fields: `<dirty> <staged> <new_commits> <clean> <total>`. A custom format string can
+be provided with `-f`:
+
+```sh
+# Bash / Zsh
+subspy_prompt() {
+  local s
+  s=$(subspy prompt 2>/dev/null) && [ -n "$s" ] && echo " [$s]"
+}
+PS1='...\$(subspy_prompt)...'
+
+# With a custom format
+subspy_prompt() {
+  local s
+  s=$(subspy prompt -f '{dirty}!{new_commits}↑' 2>/dev/null) && [ -n "$s" ] && echo " $s"
+}
+```
+
+For [Starship](https://starship.rs), use a [custom command](https://starship.rs/config/#custom-commands):
+
+```toml
+[custom.subspy]
+command = "subspy prompt -f '{dirty}!{staged}+{new_commits}↑'"
+when = "subspy prompt -f '{dirty}!{staged}+{new_commits}↑'"
+format = "[$output]($style) "
+```
+
 ### Installation
 
 Installing subspy requires the [Rust toolchain](https://rust-lang.org/tools/install/).

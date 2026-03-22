@@ -1,4 +1,4 @@
-use std::{borrow::Cow, fmt::Write as _, io::IsTerminal as _, path::Path, path::PathBuf};
+use std::{borrow::Cow, io::IsTerminal as _, path::Path, path::PathBuf};
 
 use git2::Repository;
 use thiserror::Error;
@@ -7,6 +7,9 @@ use crate::{
     StatusSummary,
     connection::client::{recv_status_response, send_status_request},
     status::StatusError,
+    template::{
+        TemplateError, expand_template, find_placeholder, find_unescaped, validate_template,
+    },
 };
 
 pub type ListResult<T> = Result<T, ListError>;
@@ -18,42 +21,7 @@ pub enum ListError {
     #[error(transparent)]
     Status(#[from] StatusError),
     #[error(transparent)]
-    UnknownPlaceholder(UnknownPlaceholderError),
-    #[error(transparent)]
-    UnclosedBrace(UnclosedBraceError),
-}
-
-#[derive(Debug, Error)]
-pub struct UnknownPlaceholderError {
-    template: String,
-    content_range: std::ops::Range<usize>,
-}
-
-impl std::fmt::Display for UnknownPlaceholderError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        writeln!(f, "Unknown placeholder:")?;
-        writeln!(f, "{}", self.template)?;
-        let col = self.template[..self.content_range.start].chars().count();
-        let width = self.template[self.content_range.clone()].chars().count();
-        writeln!(f, "{}{}", " ".repeat(col), "^".repeat(width))?;
-        Ok(())
-    }
-}
-
-#[derive(Debug, Error)]
-pub struct UnclosedBraceError {
-    template: String,
-    index: usize,
-}
-
-impl std::fmt::Display for UnclosedBraceError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        writeln!(f, "Unclosed '{{' in format string:")?;
-        writeln!(f, "{}", self.template)?;
-        let col = self.template[..self.index].chars().count();
-        writeln!(f, "{}^", " ".repeat(col))?;
-        Ok(())
-    }
+    Template(#[from] TemplateError),
 }
 
 const DEFAULT_FORMAT: &str =
@@ -144,90 +112,6 @@ const IDX_HEAD_LONG: usize = 5;
 const IDX_HEAD_BRANCH: usize = 7;
 const IDX_STATUS: usize = 8;
 
-/// Finds the longest matching placeholder name within `content`.
-///
-/// Returns the placeholder's index in [`PLACEHOLDERS`] and its name, or
-/// `None` if no placeholder matches. The longest match wins so that e.g.
-/// `"commit_long"` is preferred over `"commit"`.
-fn find_placeholder(content: &str) -> Option<(usize, &'static str)> {
-    PLACEHOLDERS
-        .iter()
-        .copied()
-        .enumerate()
-        .filter(|(_, p)| content.contains(p))
-        .max_by_key(|(_, p)| p.len())
-}
-
-/// Returns the _byte_ index of the first unescaped instance of `needle` inside
-/// `haystack`, if present.
-fn find_unescaped(haystack: &str, needle: char) -> Option<usize> {
-    let mut is_escaped = false;
-    for (i, c) in haystack.char_indices() {
-        if is_escaped {
-            is_escaped = false;
-            continue;
-        }
-        if c == '\\' {
-            is_escaped = true;
-            continue;
-        }
-        if c == needle {
-            return Some(i);
-        }
-    }
-
-    None
-}
-
-/// Validates `template` and returns which placeholders it uses.
-///
-/// Checks that every `{...}` block contains a recognized placeholder and
-/// that all braces are closed. Backslash-escaped braces (`\{`, `\}`) are
-/// treated as literal characters, not block delimiters. On success, returns
-/// a per-placeholder boolean indicating which are present in the template.
-fn validate_template(template: &str) -> ListResult<[bool; 9]> {
-    let mut used = [false; 9];
-    let mut is_escaped = false;
-    let mut skip_until = 0;
-    for (i, c) in template.char_indices() {
-        if i < skip_until {
-            continue;
-        }
-        if is_escaped {
-            is_escaped = false;
-            continue;
-        }
-        if c == '\\' {
-            is_escaped = true;
-            continue;
-        }
-        if c == '{' {
-            let start = i + 1;
-            let Some(end) = find_unescaped(&template[start..], '}') else {
-                return Err(ListError::UnclosedBrace(UnclosedBraceError {
-                    template: template.to_string(),
-                    index: i,
-                }));
-            };
-            let content = &template[start..start + end];
-            match find_placeholder(content) {
-                Some((idx, _)) => used[idx] = true,
-                None => {
-                    return Err(ListError::UnknownPlaceholder(UnknownPlaceholderError {
-                        template: template.to_string(),
-                        content_range: start..start + end,
-                    }));
-                }
-            }
-            // Skip past the closing brace so characters inside the
-            // placeholder block aren't re-scanned.
-            skip_until = start + end + 1;
-        }
-    }
-
-    Ok(used)
-}
-
 /// Resolves the `.git` directory for a submodule. Handles both `.git`
 /// directories (normal repos) and `.git` files containing a `gitdir:` pointer
 /// (the common case for submodules).
@@ -299,7 +183,15 @@ fn read_submodule_head(submod_path: &Path) -> (Option<git2::Oid>, Option<String>
 /// Parses `.gitmodules` to extract submodule name, path, and branch without
 /// going through `repo.submodules()` (which triggers expensive per-submodule
 /// config snapshot parsing in libgit2).
-fn parse_gitmodules(root_path: &Path) -> ListResult<Vec<(String, String, Option<String>)>> {
+///
+/// # Errors
+///
+/// Returns `ListError::Git` if `.gitmodules` cannot be parsed.
+///
+/// # Panics
+///
+/// Panics if a `.gitmodules` entry contains non-UTF-8 keys or paths.
+pub fn parse_gitmodules(root_path: &Path) -> ListResult<Vec<(String, String, Option<String>)>> {
     let gitmodules_path = root_path.join(".gitmodules");
     if !gitmodules_path.exists() {
         return Ok(Vec::new());
@@ -409,85 +301,6 @@ fn gather_info(
     Ok(infos)
 }
 
-/// Expands `{...}` placeholders in `template` by calling `resolve` for each
-/// placeholder name found via [`find_placeholder`]. Literal text surrounding
-/// the placeholder inside the braces (e.g. the parens in `{(name)}`) is
-/// preserved via `replacen` and padded as a unit according to `widths`.
-///
-/// Also interprets backslash escapes: `\n`, `\r`, `\t`, `\\`, `\{`, `\}`.
-///
-/// Assumes `template` has already been validated by [`validate_template`].
-fn expand_template<'a>(
-    template: &str,
-    resolve: impl Fn(&str) -> Cow<'a, str>,
-    widths: &[usize; 9],
-) -> String {
-    let mut output = String::new();
-    let bytes = template.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'{' => {
-                let start = i + 1;
-                let template_start = &template[start..];
-                // Safety: template was validated by `validate_template`
-                let end = find_unescaped(template_start, '}').unwrap();
-                let content = &template_start[..end];
-                let (idx, name) = find_placeholder(content).unwrap();
-                let value = resolve(name);
-                let display = if content.len() == name.len() {
-                    value
-                } else {
-                    Cow::Owned(content.replacen(name, &value, 1))
-                };
-                let w = widths[idx];
-                if w > 0 {
-                    let _ = write!(output, "{display:<w$}");
-                } else {
-                    output.push_str(&display);
-                }
-                i = start + end + 1;
-            }
-            b'\\' => match bytes.get(i + 1) {
-                Some(b'n') => {
-                    output.push('\n');
-                    i += 2;
-                }
-                Some(b't') => {
-                    output.push('\t');
-                    i += 2;
-                }
-                Some(b'\\') => {
-                    output.push('\\');
-                    i += 2;
-                }
-                Some(b'{') => {
-                    output.push('{');
-                    i += 2;
-                }
-                Some(b'}') => {
-                    output.push('}');
-                    i += 2;
-                }
-                Some(b'r') => {
-                    output.push('\r');
-                    i += 2;
-                }
-                _ => {
-                    output.push('\\');
-                    i += 1;
-                }
-            },
-            _ => {
-                let ch = template[i..].chars().next().unwrap();
-                output.push(ch);
-                i += ch.len_utf8();
-            }
-        }
-    }
-    output
-}
-
 /// Computes the column width for each placeholder by taking the maximum of
 /// the header label length and all data values, plus any literal overhead
 /// characters inside the braces. Only placeholders that appear in `template`
@@ -507,7 +320,7 @@ fn compute_placeholder_widths(template: &str, submod_info: &[SubmoduleInfo]) -> 
             // Safety: template was validated by `validate_template`
             let end = find_unescaped(&template[start..], '}').unwrap();
             let content = &template[start..start + end];
-            if let Some((idx, name)) = find_placeholder(content) {
+            if let Some((idx, name)) = find_placeholder(content, &PLACEHOLDERS) {
                 used[idx] = true;
                 // NOTE:  `name.len()` is fine here since all placeholders are ASCII
                 overhead[idx] = content.chars().count() - name.len();
@@ -551,6 +364,7 @@ fn format_output(submod_info: &[SubmoduleInfo], template: &str, header: bool) ->
     if header {
         output.push_str(&expand_template(
             template,
+            &PLACEHOLDERS,
             |name| Cow::Owned(name.to_ascii_uppercase()),
             &widths,
         ));
@@ -558,6 +372,7 @@ fn format_output(submod_info: &[SubmoduleInfo], template: &str, header: bool) ->
     for info in submod_info {
         output.push_str(&expand_template(
             template,
+            &PLACEHOLDERS,
             |name| info.resolve_placeholder(name),
             &widths,
         ));
@@ -578,7 +393,7 @@ pub fn list(
     no_server: bool,
 ) -> ListResult<()> {
     let template = format.unwrap_or(DEFAULT_FORMAT);
-    let used = validate_template(template)?;
+    let used = validate_template(template, &PLACEHOLDERS)?;
 
     let server_statuses = if no_server {
         None
