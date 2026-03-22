@@ -1,6 +1,5 @@
 use std::{
     collections::{BTreeMap, VecDeque},
-    fs,
     io::BufReader,
     path::{Path, PathBuf},
     sync::{
@@ -27,7 +26,7 @@ use crate::{
         write_full_message,
     },
     create_progress_bar,
-    watch::{LockFileError, WatchError, WatchResult},
+    watch::{LockFileGuard, WatchResult},
 };
 
 use super::{
@@ -41,8 +40,6 @@ const ROOT_WATCHER_COUNT: usize = 2;
 const DOT_GITMODULES_WATCHER_IDX: usize = 0;
 const DOT_GIT_WATCHER_IDX: usize = 1;
 
-const MAX_LOCKFILE_BACKOFF: Duration = Duration::from_millis(100);
-const LOCKFILE_TIMEOUT: Duration = Duration::from_secs(10);
 const DEBUG_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Fallback timeout for triggering a reindex after `.gitmodules` changes when
@@ -177,61 +174,6 @@ pub(super) enum ControlMessage {
     Reindex { replace_watchers: bool },
     Shutdown { conn: BufReader<Stream> },
     Debug { conn: BufReader<Stream> },
-}
-
-/// RAII guard that acquires a lock file on creation and removes it on drop.
-struct LockFileGuard<'a> {
-    path: &'a Path,
-}
-
-impl<'a> LockFileGuard<'a> {
-    fn acquire(path: &'a Path, cancel: Option<&AtomicBool>) -> WatchResult<Self> {
-        trace!("Acquiring lock file at path: {}", path.display());
-        let start = Instant::now();
-        let mut backoff = Duration::from_millis(1);
-
-        loop {
-            match fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(path)
-            {
-                Ok(_) => break,
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                    if start.elapsed() >= LOCKFILE_TIMEOUT
-                        || cancel.is_some_and(|c| c.load(Ordering::Relaxed))
-                    {
-                        Err(WatchError::LockFileAcquire(LockFileError::new(
-                            path.to_path_buf(),
-                            e,
-                        )))?;
-                    }
-                    trace!("Lock file {} already exists, waiting...", path.display());
-                    std::thread::sleep(backoff);
-                    backoff = (backoff * 2).min(MAX_LOCKFILE_BACKOFF);
-                }
-                Err(e) => Err(WatchError::LockFileAcquire(LockFileError::new(
-                    path.to_path_buf(),
-                    e,
-                )))?,
-            }
-        }
-
-        trace!("Acquired lock file at path: {}", path.display());
-        Ok(Self { path })
-    }
-}
-
-impl Drop for LockFileGuard<'_> {
-    fn drop(&mut self) {
-        trace!("Releasing lock file at path: {}", self.path.display());
-        if let Err(e) = fs::remove_file(self.path) {
-            error!(
-                "Failed to release lock file at {}: {e}",
-                self.path.display()
-            );
-        }
-    }
 }
 
 /// State of an in-flight rayon task for a status reindex.
@@ -376,20 +318,17 @@ fn get_submod_status(
     cancel: Option<&AtomicBool>,
 ) -> WatchResult<StatusSummary> {
     let lock = LockFileGuard::acquire(lock_path, cancel);
-    let status: StatusSummary = match lock {
-        Ok(_) => repo
-            .submodule_status(relative_path, git2::SubmoduleIgnore::None)?
-            .into(),
-        Err(WatchError::LockFileAcquire(_)) => {
-            // Pass failures to acquire the relevant `index.lock` file as pseudo
-            // statuses so they can be displayed to the user to resolve.
-            error!(
-                "Failed to acquire lock file `{}` before retrieving status",
-                lock_path.display()
-            );
-            StatusSummary::LOCK_FAILURE
-        }
-        Err(e) => return Err(e)?,
+    let status: StatusSummary = if lock.is_ok() {
+        repo.submodule_status(relative_path, git2::SubmoduleIgnore::None)?
+            .into()
+    } else {
+        // Pass failures to acquire the relevant `index.lock` file as pseudo
+        // statuses so they can be displayed to the user to resolve.
+        error!(
+            "Failed to acquire lock file `{}` before retrieving status",
+            lock_path.display()
+        );
+        StatusSummary::LOCK_FAILURE
     };
     // Explicitly drop `lock` as soon as possible, rather than at some point after the return
     drop(lock);

@@ -70,6 +70,9 @@ struct Status {
     /// The log level to use for the requesting client
     #[arg(short, long)]
     pub log_level: Option<LogLevel>,
+    /// Skip the watch server and compute status locally via libgit2
+    #[arg(long)]
+    pub no_server: bool,
 }
 
 #[derive(Args, Debug)]
@@ -253,7 +256,13 @@ impl Status {
     fn run(self) -> RunResult<()> {
         let (true_path, repo_kind) = get_project_path(self.dir)?;
         let display_progress = std::io::stderr().is_terminal();
-        Ok(status(true_path.as_path(), repo_kind, display_progress)?)
+        let use_server = !self.no_server && repo_kind == RepoKind::WithSubmodules;
+        Ok(status(
+            true_path.as_path(),
+            repo_kind,
+            display_progress,
+            use_server,
+        )?)
     }
 }
 

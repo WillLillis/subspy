@@ -1,5 +1,11 @@
-use std::path::{Path, PathBuf};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    sync::atomic::{AtomicBool, Ordering},
+    time::{Duration, Instant},
+};
 
+use log::{error, trace};
 use thiserror::Error;
 
 use crate::connection::watch_server::watch;
@@ -45,6 +51,65 @@ impl LockFileError {
     #[must_use]
     pub const fn new(path: PathBuf, error: std::io::Error) -> Self {
         Self { error, path }
+    }
+}
+
+const MAX_LOCKFILE_BACKOFF: Duration = Duration::from_millis(100);
+const LOCKFILE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Creates a lock file at `path` that is removed on drop.
+pub struct LockFileGuard<'a> {
+    path: &'a Path,
+}
+
+impl<'a> LockFileGuard<'a> {
+    /// Creates a lock file at `path`, re-checking with exponential backoff if
+    /// it already exists. If `cancel` is set, the wait is aborted early.
+    ///
+    /// # Errors
+    ///
+    /// Returns `LockFileError` if the lock cannot be acquired within the
+    /// timeout, the wait is cancelled, or the file cannot be created.
+    pub fn acquire(path: &'a Path, cancel: Option<&AtomicBool>) -> Result<Self, LockFileError> {
+        trace!("Acquiring lock file at path: {}", path.display());
+        let start = Instant::now();
+        let mut backoff = Duration::from_millis(1);
+
+        loop {
+            match fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(path)
+            {
+                Ok(_) => break,
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    if start.elapsed() >= LOCKFILE_TIMEOUT
+                        || cancel.is_some_and(|c| c.load(Ordering::Relaxed))
+                    {
+                        return Err(LockFileError::new(path.to_path_buf(), e));
+                    }
+                    trace!("Lock file {} already exists, waiting...", path.display());
+                    std::thread::sleep(backoff);
+                    backoff = (backoff * 2).min(MAX_LOCKFILE_BACKOFF);
+                }
+                Err(e) => return Err(LockFileError::new(path.to_path_buf(), e)),
+            }
+        }
+
+        trace!("Acquired lock file at path: {}", path.display());
+        Ok(Self { path })
+    }
+}
+
+impl Drop for LockFileGuard<'_> {
+    fn drop(&mut self) {
+        trace!("Releasing lock file at path: {}", self.path.display());
+        if let Err(e) = fs::remove_file(self.path) {
+            error!(
+                "Failed to release lock file at {}: {e}",
+                self.path.display()
+            );
+        }
     }
 }
 

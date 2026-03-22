@@ -7,6 +7,7 @@ use crate::{
     RepoKind, StatusSummary,
     connection::client::{recv_status_response, send_status_request},
     paint,
+    watch::{LockFileError, LockFileGuard},
 };
 
 pub type StatusResult<T> = Result<T, StatusError>;
@@ -21,6 +22,8 @@ pub enum StatusError {
     IO(#[from] std::io::Error),
     #[error(transparent)]
     Git(#[from] git2::Error),
+    #[error(transparent)]
+    LockFile(#[from] LockFileError),
 }
 
 const STAGED_HEADER: &str = "Changes to be committed:
@@ -699,9 +702,14 @@ pub fn deleted_submodule_paths(repo: &Repository) -> StatusResult<Vec<String>> {
 /// # Errors
 ///
 /// Returns `Err` if statuses cannot be retrieved from the repository or watch server
-pub fn status(root_path: &Path, repo_kind: RepoKind, display_progress: bool) -> StatusResult<()> {
+pub fn status(
+    root_path: &Path,
+    repo_kind: RepoKind,
+    display_progress: bool,
+    use_server: bool,
+) -> StatusResult<()> {
     // Send IPC request early so the server starts processing while we do local work.
-    let mut conn = if repo_kind == RepoKind::WithSubmodules {
+    let mut conn = if use_server {
         Some(send_status_request(root_path)?)
     } else {
         None
@@ -715,7 +723,7 @@ pub fn status(root_path: &Path, repo_kind: RepoKind, display_progress: bool) -> 
         .include_ignored(false);
 
     // Ignore submodules _only_ if we are the top level, in which case submodule statuses
-    // are provided by the watch server.
+    // are provided by the watch server or computed locally below.
     if repo_kind == RepoKind::WithSubmodules {
         opts.exclude_submodules(true);
     }
@@ -726,6 +734,7 @@ pub fn status(root_path: &Path, repo_kind: RepoKind, display_progress: bool) -> 
 
     let submodule_statuses = match conn {
         Some(ref mut c) => recv_status_response(c, display_progress)?,
+        None if repo_kind == RepoKind::WithSubmodules => compute_local_statuses(root_path, &repo)?,
         None => Vec::new(),
     };
 
@@ -738,4 +747,37 @@ pub fn status(root_path: &Path, repo_kind: RepoKind, display_progress: bool) -> 
     )?;
 
     Ok(())
+}
+
+fn compute_local_statuses(
+    root_path: &Path,
+    repo: &Repository,
+) -> StatusResult<Vec<(String, StatusSummary)>> {
+    use rayon::prelude::*;
+
+    let lock_path = repo.path().join("index.lock");
+    let submodules = {
+        let _lock = LockFileGuard::acquire(&lock_path, None)?;
+        repo.submodules()?
+    };
+    let tl_repo = thread_local::ThreadLocal::new();
+
+    let paths: Vec<&str> = submodules
+        .iter()
+        .map(|s| s.path().to_str().expect("Submodule path is not UTF-8"))
+        .collect();
+
+    let statuses: StatusResult<Vec<_>> = paths
+        .into_par_iter()
+        .map(|path| -> StatusResult<(&str, StatusSummary)> {
+            let repo = tl_repo.get_or_try(|| Repository::open(root_path))?;
+            let st = repo.submodule_status(path, git2::SubmoduleIgnore::None)?;
+            let summary: StatusSummary = st.into();
+            Ok((path, summary))
+        })
+        .filter(|r| !matches!(r, Ok((_, s)) if *s == StatusSummary::CLEAN))
+        .map(|r| r.map(|(path, s)| (path.to_string(), s)))
+        .collect();
+
+    statuses
 }
