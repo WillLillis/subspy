@@ -12,6 +12,7 @@ use subspy::{
     debug::{DebugError, debug},
     list::{ListError, list},
     paint,
+    prompt::{PromptError, prompt},
     reindex::{ReindexError, reindex},
     shutdown::{ShutdownError, shutdown},
     status::{StatusError, status},
@@ -32,6 +33,8 @@ enum Commands {
     Debug(DebugDump),
     /// List submodule metadata
     List(List),
+    /// Submodule status summary for shell prompt integration
+    Prompt(Prompt),
 }
 
 impl Commands {
@@ -43,6 +46,7 @@ impl Commands {
             Self::Start(cmd) => cmd.log_level,
             Self::Debug(cmd) => cmd.log_level,
             Self::List(cmd) => cmd.log_level,
+            Self::Prompt(cmd) => cmd.log_level,
         }
     }
 }
@@ -127,6 +131,29 @@ struct List {
 }
 
 #[derive(Args, Debug)]
+struct Prompt {
+    /// The directory to query submodule status for
+    #[arg(index = 1)]
+    pub dir: Option<PathBuf>,
+    /// The log level to use for the requesting client
+    #[arg(short, long)]
+    pub log_level: Option<LogLevel>,
+    /// Skip the watch server and compute status locally via libgit2
+    #[arg(long)]
+    pub no_server: bool,
+    #[expect(
+        clippy::doc_markdown,
+        reason = "placeholder names render in clap help text"
+    )]
+    /// Format string with {placeholder} substitution.
+    ///
+    /// Available placeholders: {dirty}, {staged}, {new_commits}, {clean}, {total}.
+    /// Escape sequences: \n, \r, \t, \\, \{, \}.
+    #[arg(short, long, verbatim_doc_comment)]
+    pub format: Option<String>,
+}
+
+#[derive(Args, Debug)]
 #[command(visible_aliases = ["watch", "w"])]
 struct Start {
     /// The directory containing the repository's `.gitmodules` file
@@ -161,6 +188,8 @@ pub enum RunError {
     Debug(#[from] DebugError),
     #[error(transparent)]
     List(#[from] ListError),
+    #[error(transparent)]
+    Prompt(#[from] PromptError),
     #[error("Unable to determine home directory: {0}")]
     Home(#[from] HomeDirError),
     #[error(transparent)]
@@ -263,6 +292,15 @@ impl Status {
             display_progress,
             use_server,
         )?)
+    }
+}
+
+impl Prompt {
+    fn run(self) -> RunResult<()> {
+        let (true_path, repo_kind) = get_project_path(self.dir)?;
+        let use_server = !self.no_server && repo_kind == RepoKind::WithSubmodules;
+        prompt(true_path.as_path(), use_server, self.format.as_deref())?;
+        Ok(())
     }
 }
 
@@ -402,6 +440,7 @@ fn run() -> RunResult<()> {
         Commands::Reindex(reindex_options) => reindex_options.run(),
         Commands::Debug(debug_options) => debug_options.run(),
         Commands::List(list_options) => list_options.run(),
+        Commands::Prompt(prompt_options) => prompt_options.run(),
     };
 
     if is_watcher {
