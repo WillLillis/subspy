@@ -56,7 +56,7 @@ const DEFAULT_USED: [bool; 5] = [true; 5];
 ///
 /// Returns `TemplateError` if the format string is invalid. Any non `TemplateError` error
 /// is intentionally swallowed in this function. We cannot display runtime errors in the prompt,
-/// and garbage "placeholder" data is worst than no data.
+/// and garbage "placeholder" data is worse than no data.
 #[allow(clippy::missing_panics_doc)]
 pub fn prompt(
     root_path: &Path,

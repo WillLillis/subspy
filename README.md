@@ -18,7 +18,7 @@ There are a few potential workarounds you should try before using this tool, inc
 SubSpy provides a solution to this issue by placing recursive filesystem watches on your repository's `.git` folder, `.gitmodules`
 file, and all submodule directories. The status for all submodules is cached by an initial indexing operation and updated
 any time a change is detected in one of these locations. For sufficiently many submodules, `subspy status` is usually
-100-200x faster than `git status` on Windows, and 20-40x faster on Linux.
+100-300x faster than `git status` on Windows, and 20-40x faster on Linux.
 
 ### Usage
 
@@ -33,6 +33,7 @@ Commands:
   reindex  Reindex a watch server [aliases: re, r]
   debug    Dump the internal state of the watch server [aliases: dbg, d]
   list     List submodule metadata [aliases: ls, l]
+  prompt   Submodule status summary for shell prompt integration
 
 Options:
   -h, --help  Print help
