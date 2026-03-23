@@ -14,6 +14,8 @@ pub enum DebugError {
     BincodeDecode(#[from] bincode::error::DecodeError),
     #[error(transparent)]
     IO(#[from] std::io::Error),
+    #[error(transparent)]
+    VersionMismatch(#[from] crate::connection::VersionMismatchError),
 }
 
 /// Issues a debug state request to the watch server for `root_path` and prints

@@ -11,7 +11,11 @@ pub enum ReindexError {
     #[error(transparent)]
     BincodeEncode(#[from] bincode::error::EncodeError),
     #[error(transparent)]
+    BincodeDecode(#[from] bincode::error::DecodeError),
+    #[error(transparent)]
     IO(#[from] std::io::Error),
+    #[error(transparent)]
+    VersionMismatch(#[from] crate::connection::VersionMismatchError),
 }
 
 /// Issues a reindex request to the watch server for `root_path`.

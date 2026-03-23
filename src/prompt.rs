@@ -13,8 +13,8 @@ use thiserror::Error;
 use crate::{
     StatusSummary,
     connection::{
-        BINCODE_CFG, ClientMessage, ServerMessage, client::server_not_started, ipc_name,
-        read_full_message, write_full_message,
+        BINCODE_CFG, ClientMessage, ClientRequest, ServerMessage, client::server_not_started,
+        ipc_name, read_full_message, write_full_message,
     },
     list::parse_gitmodules,
     status::compute_local_statuses,
@@ -171,9 +171,9 @@ fn try_get_statuses(root_path: &Path, timeout: Duration) -> Option<Vec<(String, 
     conn.set_recv_timeout(Some(remaining)).ok()?;
     let mut conn = BufReader::new(conn);
 
-    let status_req = ClientMessage::Status(std::process::id());
-    let mut req_msg = [0; 8];
-    let req_msg_len = bincode::encode_into_slice(&status_req, &mut req_msg, BINCODE_CFG).ok()?;
+    let req = ClientRequest::new(ClientMessage::Status(std::process::id()));
+    let mut req_msg = [0; 9];
+    let req_msg_len = bincode::encode_into_slice(&req, &mut req_msg, BINCODE_CFG).ok()?;
     write_full_message(&mut conn, &req_msg[..req_msg_len]).ok()?;
 
     let mut buffer = Vec::with_capacity(4096);
@@ -184,8 +184,9 @@ fn try_get_statuses(root_path: &Path, timeout: Duration) -> Option<Vec<(String, 
         match resp_msg {
             ServerMessage::Status(statuses) => return Some(statuses),
             ServerMessage::Indexing { .. } => {}
-            ServerMessage::ShutdownAck | ServerMessage::DebugInfo(_) => {
-                error!("Unexpected server message in prompt status request");
+            ServerMessage::VersionMismatch { .. }
+            | ServerMessage::ShutdownAck
+            | ServerMessage::DebugInfo(_) => {
                 return None;
             }
         }

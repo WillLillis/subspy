@@ -14,6 +14,8 @@ pub enum ShutdownError {
     BincodeDecode(#[from] bincode::error::DecodeError),
     #[error(transparent)]
     IO(#[from] std::io::Error),
+    #[error(transparent)]
+    VersionMismatch(#[from] crate::connection::VersionMismatchError),
 }
 
 /// Issues a shutdown request to the watch server for `root_path`
