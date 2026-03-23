@@ -39,3 +39,124 @@ pub fn parse_gitmodules(
     }
     Ok(entries)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn write_gitmodules(root: &Path, content: &str) {
+        std::fs::write(root.join(".gitmodules"), content).unwrap();
+    }
+
+    #[test]
+    fn single_submodule() {
+        let tmp = TempDir::new().unwrap();
+        write_gitmodules(
+            tmp.path(),
+            "[submodule \"sub\"]\n\tpath = sub\n\turl = https://example.com/sub.git\n",
+        );
+        let entries = parse_gitmodules(tmp.path()).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].0, "sub");
+        assert_eq!(entries[0].1, "sub");
+        assert_eq!(entries[0].2, None);
+    }
+
+    #[test]
+    fn multiple_submodules() {
+        let tmp = TempDir::new().unwrap();
+        write_gitmodules(
+            tmp.path(),
+            "[submodule \"a\"]\n\tpath = a\n\turl = u\n\
+             [submodule \"b\"]\n\tpath = libs/b\n\turl = u\n",
+        );
+        let entries = parse_gitmodules(tmp.path()).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].0, "a");
+        assert_eq!(entries[0].1, "a");
+        assert_eq!(entries[1].0, "b");
+        assert_eq!(entries[1].1, "libs/b");
+    }
+
+    #[test]
+    fn submodule_with_branch() {
+        let tmp = TempDir::new().unwrap();
+        write_gitmodules(
+            tmp.path(),
+            "[submodule \"sub\"]\n\tpath = sub\n\turl = u\n\tbranch = main\n",
+        );
+        let entries = parse_gitmodules(tmp.path()).unwrap();
+        assert_eq!(entries[0].2, Some("main".to_string()));
+    }
+
+    #[test]
+    fn nested_path() {
+        let tmp = TempDir::new().unwrap();
+        write_gitmodules(
+            tmp.path(),
+            "[submodule \"vendor/lib\"]\n\tpath = vendor/lib\n\turl = u\n",
+        );
+        let entries = parse_gitmodules(tmp.path()).unwrap();
+        assert_eq!(entries[0].0, "vendor/lib");
+        assert_eq!(entries[0].1, "vendor/lib");
+    }
+
+    #[test]
+    fn dotted_name() {
+        let tmp = TempDir::new().unwrap();
+        write_gitmodules(
+            tmp.path(),
+            "[submodule \"my.lib\"]\n\tpath = my.lib\n\turl = u\n",
+        );
+        let entries = parse_gitmodules(tmp.path()).unwrap();
+        assert_eq!(entries[0].0, "my.lib");
+    }
+
+    #[test]
+    fn empty_gitmodules() {
+        let tmp = TempDir::new().unwrap();
+        write_gitmodules(tmp.path(), "");
+        let entries = parse_gitmodules(tmp.path()).unwrap();
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn missing_gitmodules_returns_empty() {
+        let tmp = TempDir::new().unwrap();
+        let entries = parse_gitmodules(tmp.path()).unwrap();
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn boost_gitmodules() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::copy(
+            concat!(env!("CARGO_MANIFEST_DIR"), "/src/testdata/boost_gitmodules"),
+            tmp.path().join(".gitmodules"),
+        )
+        .unwrap();
+        let entries = parse_gitmodules(tmp.path()).unwrap();
+        assert_eq!(entries.len(), 172);
+        // All entries should have non-empty name and path
+        for (name, path, _) in &entries {
+            assert!(!name.is_empty(), "empty name in boost .gitmodules");
+            assert!(!path.is_empty(), "empty path in boost .gitmodules");
+        }
+        // All boost submodules use `branch = .`
+        for (_, _, branch) in &entries {
+            assert_eq!(branch.as_deref(), Some("."));
+        }
+        // Spot check a few known entries
+        assert!(
+            entries
+                .iter()
+                .any(|(n, p, _)| n == "system" && p == "libs/system")
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|(n, p, _)| n == "math" && p == "libs/math")
+        );
+    }
+}

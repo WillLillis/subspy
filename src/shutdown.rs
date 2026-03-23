@@ -20,11 +20,12 @@ pub enum ShutdownError {
     VersionMismatch(#[from] crate::connection::VersionMismatchError),
 }
 
-/// Issues a shutdown request to the watch server for `root_path`
+/// Issues a shutdown request to the watch server for `root_path`.
 ///
 /// # Errors
 ///
-/// Returns `Err` if any failure occurs.
+/// Returns `Err` if connecting to the server, encoding the request,
+/// or receiving the acknowledgement fails.
 pub fn shutdown(root_path: &Path) -> ShutdownResult<()> {
     request_shutdown(root_path)
 }

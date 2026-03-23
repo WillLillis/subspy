@@ -30,14 +30,14 @@ thread_local! {
 }
 
 #[derive(Debug, Clone, Copy, Encode, BorrowDecode)]
-pub struct ProgressUpdate {
-    pub curr: u32,
-    pub total: u32,
+pub(super) struct ProgressUpdate {
+    pub(super) curr: u32,
+    pub(super) total: u32,
 }
 
 impl ProgressUpdate {
     #[must_use]
-    pub const fn new(curr: u32, total: u32) -> Self {
+    pub(super) const fn new(curr: u32, total: u32) -> Self {
         Self { curr, total }
     }
 }

@@ -25,7 +25,8 @@ pub enum ReindexError {
 ///
 /// # Errors
 ///
-/// Returns `Err` if any failure occurs.
+/// Returns `Err` if connecting to the server, encoding the request,
+/// or receiving the response fails.
 pub fn reindex(
     root_path: &Path,
     replace_watchers: bool,
