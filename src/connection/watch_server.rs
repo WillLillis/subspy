@@ -1564,4 +1564,79 @@ mod tests {
             indexing_max.len(),
         );
     }
+
+    // -- is_index_or_head_path --
+
+    #[test]
+    fn is_index_or_head_matches_index() {
+        assert!(WatchServer::is_index_or_head_path(Path::new(
+            ".git/modules/sub/index"
+        )));
+    }
+
+    #[test]
+    fn is_index_or_head_matches_head() {
+        assert!(WatchServer::is_index_or_head_path(Path::new(
+            ".git/modules/sub/HEAD"
+        )));
+    }
+
+    #[test]
+    fn is_index_or_head_rejects_index_lock() {
+        assert!(!WatchServer::is_index_or_head_path(Path::new(
+            ".git/modules/sub/index.lock"
+        )));
+    }
+
+    #[test]
+    fn is_index_or_head_rejects_head_lock() {
+        assert!(!WatchServer::is_index_or_head_path(Path::new(
+            ".git/modules/sub/HEAD.lock"
+        )));
+    }
+
+    #[test]
+    fn is_index_or_head_rejects_other() {
+        assert!(!WatchServer::is_index_or_head_path(Path::new(
+            ".git/modules/sub/config"
+        )));
+    }
+
+    // -- has_rebase_marker_path --
+
+    #[test]
+    fn has_rebase_marker_under_prefix() {
+        let paths = vec![PathBuf::from(".git/modules/sub/rebase-merge")];
+        assert!(WatchServer::has_rebase_marker_path(
+            &paths,
+            Path::new(".git/modules")
+        ));
+    }
+
+    #[test]
+    fn has_rebase_marker_wrong_prefix() {
+        let paths = vec![PathBuf::from("/other/path/rebase-merge")];
+        assert!(!WatchServer::has_rebase_marker_path(
+            &paths,
+            Path::new(".git/modules")
+        ));
+    }
+
+    #[test]
+    fn has_rebase_marker_wrong_filename() {
+        let paths = vec![PathBuf::from(".git/modules/sub/rebase-apply")];
+        assert!(!WatchServer::has_rebase_marker_path(
+            &paths,
+            Path::new(".git/modules")
+        ));
+    }
+
+    #[test]
+    fn has_rebase_marker_empty_paths() {
+        let paths: Vec<PathBuf> = vec![];
+        assert!(!WatchServer::has_rebase_marker_path(
+            &paths,
+            Path::new(".git/modules")
+        ));
+    }
 }
