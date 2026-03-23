@@ -213,3 +213,271 @@ pub fn expand_template<'a, const N: usize>(
     }
     output
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -- find_unescaped --
+
+    #[test]
+    fn find_unescaped_basic() {
+        assert_eq!(find_unescaped("hello}world", '}'), Some(5));
+    }
+
+    #[test]
+    fn find_unescaped_escaped() {
+        assert_eq!(find_unescaped(r"hello\}world}", '}'), Some(12));
+    }
+
+    #[test]
+    fn find_unescaped_all_escaped() {
+        assert_eq!(find_unescaped(r"hello\}", '}'), None);
+    }
+
+    #[test]
+    fn find_unescaped_not_found() {
+        assert_eq!(find_unescaped("hello world", '}'), None);
+    }
+
+    #[test]
+    fn find_unescaped_empty() {
+        assert_eq!(find_unescaped("", '}'), None);
+    }
+
+    #[test]
+    fn find_unescaped_at_start() {
+        assert_eq!(find_unescaped("}rest", '}'), Some(0));
+    }
+
+    #[test]
+    fn find_unescaped_double_escape() {
+        // \\} -> literal backslash followed by unescaped }
+        assert_eq!(find_unescaped(r"\\}", '}'), Some(2));
+    }
+
+    #[test]
+    fn find_unescaped_multibyte() {
+        // needle after a multi-byte char
+        assert_eq!(find_unescaped("café}", '}'), Some("café".len()));
+    }
+
+    // -- find_placeholder --
+
+    const TEST_PH: [&str; 4] = ["name", "commit", "commit_long", "status"];
+
+    #[test]
+    fn find_placeholder_exact() {
+        assert_eq!(find_placeholder("name", &TEST_PH), Some((0, "name")));
+    }
+
+    #[test]
+    fn find_placeholder_longest_match() {
+        // "commit_long" contains "commit", but longest wins
+        assert_eq!(
+            find_placeholder("commit_long", &TEST_PH),
+            Some((2, "commit_long"))
+        );
+    }
+
+    #[test]
+    fn find_placeholder_substring_in_decorator() {
+        // "(name)" contains "name"
+        assert_eq!(find_placeholder("(name)", &TEST_PH), Some((0, "name")));
+    }
+
+    #[test]
+    fn find_placeholder_no_match() {
+        assert_eq!(find_placeholder("bogus", &TEST_PH), None);
+    }
+
+    #[test]
+    fn find_placeholder_empty() {
+        assert_eq!(find_placeholder("", &TEST_PH), None);
+    }
+
+    // -- validate_template --
+
+    const SIMPLE_PH: [&str; 3] = ["a", "b", "c"];
+
+    #[test]
+    fn validate_all_used() {
+        let used = validate_template("{a} {b} {c}", &SIMPLE_PH).unwrap();
+        assert_eq!(used, [true, true, true]);
+    }
+
+    #[test]
+    fn validate_partial_use() {
+        let used = validate_template("{b} only", &SIMPLE_PH).unwrap();
+        assert_eq!(used, [false, true, false]);
+    }
+
+    #[test]
+    fn validate_no_placeholders() {
+        let used = validate_template("just text", &SIMPLE_PH).unwrap();
+        assert_eq!(used, [false, false, false]);
+    }
+
+    #[test]
+    fn validate_escaped_braces() {
+        // \{ should not be treated as a placeholder opening
+        let used = validate_template(r"\{a\}", &SIMPLE_PH).unwrap();
+        assert_eq!(used, [false, false, false]);
+    }
+
+    #[test]
+    fn validate_unclosed_brace() {
+        let err = validate_template("{a", &SIMPLE_PH).unwrap_err();
+        assert!(matches!(err, TemplateError::UnclosedBrace(_)));
+    }
+
+    #[test]
+    fn validate_unknown_placeholder() {
+        let err = validate_template("{xyz}", &SIMPLE_PH).unwrap_err();
+        assert!(matches!(err, TemplateError::UnknownPlaceholder(_)));
+    }
+
+    #[test]
+    fn validate_empty_braces() {
+        let err = validate_template("{}", &SIMPLE_PH).unwrap_err();
+        assert!(matches!(err, TemplateError::UnknownPlaceholder(_)));
+    }
+
+    #[test]
+    fn validate_decorator_text() {
+        let used = validate_template("{(a)}", &SIMPLE_PH).unwrap();
+        assert_eq!(used, [true, false, false]);
+    }
+
+    #[test]
+    fn validate_escaped_brace_inside_block() {
+        // {a\}} -> content is "a\}", the \} is escaped so find_unescaped
+        // finds the outer }
+        let used = validate_template(r"{a\}}", &SIMPLE_PH).unwrap();
+        assert_eq!(used, [true, false, false]);
+    }
+
+    #[test]
+    fn validate_repeated_placeholder() {
+        let used = validate_template("{a}{a}{a}", &SIMPLE_PH).unwrap();
+        assert_eq!(used, [true, false, false]);
+    }
+
+    // -- expand_template --
+
+    #[test]
+    fn expand_basic() {
+        let result = expand_template(
+            "{a} and {b}",
+            &SIMPLE_PH,
+            |name| Cow::Owned(name.to_ascii_uppercase()),
+            &[0; 3],
+        );
+        assert_eq!(result, "A and B");
+    }
+
+    #[test]
+    fn expand_escape_sequences() {
+        let result = expand_template(
+            r"tab:\there\nnewline",
+            &SIMPLE_PH,
+            |_| unreachable!(),
+            &[0; 3],
+        );
+        assert_eq!(result, "tab:\there\nnewline");
+    }
+
+    #[test]
+    fn expand_escaped_braces() {
+        let result = expand_template(
+            r"\{not a placeholder\}",
+            &SIMPLE_PH,
+            |_| unreachable!(),
+            &[0; 3],
+        );
+        assert_eq!(result, "{not a placeholder}");
+    }
+
+    #[test]
+    fn expand_carriage_return() {
+        let result = expand_template(r"\r\n", &SIMPLE_PH, |_| unreachable!(), &[0; 3]);
+        assert_eq!(result, "\r\n");
+    }
+
+    #[test]
+    fn expand_decorator_text() {
+        let result = expand_template("{[a]}", &SIMPLE_PH, |_| Cow::Borrowed("val"), &[0; 3]);
+        assert_eq!(result, "[val]");
+    }
+
+    #[test]
+    fn expand_with_padding() {
+        let result = expand_template(
+            "{a}|{b}",
+            &SIMPLE_PH,
+            |name| Cow::Owned(name.to_string()),
+            &[5, 5, 0],
+        );
+        assert_eq!(result, "a    |b    ");
+    }
+
+    #[test]
+    fn expand_no_padding_when_zero() {
+        let result = expand_template(
+            "{a}|{b}",
+            &SIMPLE_PH,
+            |name| Cow::Owned(name.to_string()),
+            &[0; 3],
+        );
+        assert_eq!(result, "a|b");
+    }
+
+    #[test]
+    fn expand_decorator_with_padding() {
+        let result = expand_template("{(a)}", &SIMPLE_PH, |_| Cow::Borrowed("x"), &[6, 0, 0]);
+        // "(x)" is 3 chars, padded to 6
+        assert_eq!(result, "(x)   ");
+    }
+
+    #[test]
+    fn expand_unknown_escape_preserved() {
+        let result = expand_template(r"\z", &SIMPLE_PH, |_| unreachable!(), &[0; 3]);
+        assert_eq!(result, "\\z");
+    }
+
+    #[test]
+    fn expand_literal_backslash() {
+        let result = expand_template(r"\\", &SIMPLE_PH, |_| unreachable!(), &[0; 3]);
+        assert_eq!(result, "\\");
+    }
+
+    #[test]
+    fn expand_multibyte_literal() {
+        let result = expand_template("café {a}", &SIMPLE_PH, |_| Cow::Borrowed("!"), &[0; 3]);
+        assert_eq!(result, "café !");
+    }
+
+    // -- error display --
+
+    #[test]
+    fn error_unknown_placeholder_caret_alignment() {
+        let err = validate_template("pre {xyz} post", &SIMPLE_PH).unwrap_err();
+        let msg = err.to_string();
+        assert_eq!(msg, "Unknown placeholder:\npre {xyz} post\n     ^^^\n");
+    }
+
+    #[test]
+    fn error_unclosed_brace_caret_alignment() {
+        let err = validate_template("pre {abc", &SIMPLE_PH).unwrap_err();
+        let msg = err.to_string();
+        assert_eq!(msg, "Unclosed '{' in format string:\npre {abc\n    ^\n");
+    }
+
+    #[test]
+    fn error_caret_with_multibyte_prefix() {
+        let err = validate_template("café {xyz}", &SIMPLE_PH).unwrap_err();
+        let msg = err.to_string();
+        // "café " is 5 chars (not 6 bytes), carets under "xyz"
+        assert_eq!(msg, "Unknown placeholder:\ncafé {xyz}\n      ^^^\n");
+    }
+}

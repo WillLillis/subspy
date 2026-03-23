@@ -147,3 +147,100 @@ fn create_progress_bar(len: u64, prefix: impl Into<Cow<'static, str>>) -> indica
         )
         .with_prefix(prefix)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -- StatusSummary Display --
+
+    #[test]
+    fn display_clean() {
+        assert_eq!(StatusSummary::CLEAN.to_string(), "");
+    }
+
+    #[test]
+    fn display_single_flag() {
+        assert_eq!(
+            StatusSummary::MODIFIED_CONTENT.to_string(),
+            "(modified content)"
+        );
+    }
+
+    #[test]
+    fn display_multiple_flags() {
+        let s = StatusSummary::MODIFIED_CONTENT | StatusSummary::NEW_COMMITS;
+        assert_eq!(s.to_string(), "(modified content, new commits)");
+    }
+
+    #[test]
+    fn display_omits_staged() {
+        let s = StatusSummary::MODIFIED_CONTENT | StatusSummary::STAGED;
+        assert_eq!(s.to_string(), "(modified content)");
+    }
+
+    #[test]
+    fn display_all_visible_flags() {
+        let s = StatusSummary::MODIFIED_CONTENT
+            | StatusSummary::UNTRACKED_CONTENT
+            | StatusSummary::NEW_COMMITS;
+        assert_eq!(
+            s.to_string(),
+            "(modified content, untracked content, new commits)"
+        );
+    }
+
+    // -- From<git2::SubmoduleStatus> --
+
+    #[test]
+    fn from_submodule_status_clean() {
+        let s = StatusSummary::from(git2::SubmoduleStatus::empty());
+        assert_eq!(s, StatusSummary::CLEAN);
+    }
+
+    #[test]
+    fn from_submodule_status_wd_modified_is_new_commits() {
+        let s = StatusSummary::from(git2::SubmoduleStatus::WD_MODIFIED);
+        assert!(s.contains(StatusSummary::NEW_COMMITS));
+    }
+
+    #[test]
+    fn from_submodule_status_wd_index_modified_is_modified_content() {
+        let s = StatusSummary::from(git2::SubmoduleStatus::WD_INDEX_MODIFIED);
+        assert!(s.contains(StatusSummary::MODIFIED_CONTENT));
+    }
+
+    #[test]
+    fn from_submodule_status_wd_wd_modified_is_modified_content() {
+        let s = StatusSummary::from(git2::SubmoduleStatus::WD_WD_MODIFIED);
+        assert!(s.contains(StatusSummary::MODIFIED_CONTENT));
+    }
+
+    #[test]
+    fn from_submodule_status_wd_untracked() {
+        let s = StatusSummary::from(git2::SubmoduleStatus::WD_UNTRACKED);
+        assert!(s.contains(StatusSummary::UNTRACKED_CONTENT));
+    }
+
+    #[test]
+    fn from_submodule_status_staged() {
+        let s = StatusSummary::from(
+            git2::SubmoduleStatus::IN_HEAD
+                | git2::SubmoduleStatus::IN_INDEX
+                | git2::SubmoduleStatus::INDEX_MODIFIED,
+        );
+        assert!(s.contains(StatusSummary::STAGED));
+    }
+
+    #[test]
+    fn from_submodule_status_combined() {
+        let s = StatusSummary::from(
+            git2::SubmoduleStatus::WD_MODIFIED
+                | git2::SubmoduleStatus::WD_UNTRACKED
+                | git2::SubmoduleStatus::WD_WD_MODIFIED,
+        );
+        assert!(s.contains(StatusSummary::NEW_COMMITS));
+        assert!(s.contains(StatusSummary::UNTRACKED_CONTENT));
+        assert!(s.contains(StatusSummary::MODIFIED_CONTENT));
+    }
+}
