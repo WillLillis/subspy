@@ -170,12 +170,13 @@ fn handle_status_request(
         .lock()
         .expect("Subscribers mutex poisoned")
         .insert(client_pid);
-    let guard = get_status_guard_with_progress(&mut conn, client_pid, statuses, progress)?;
+    let result = get_status_guard_with_progress(&mut conn, client_pid, statuses, progress);
     _ = subscribers
         .lock()
         .expect("Subscribers mutex poisoned")
         .remove(&client_pid);
     _ = progress.lock().expect("Mutex poisoned").remove(&client_pid);
+    let guard = result?;
 
     let mut status_out = Vec::with_capacity(guard.len());
     for (submod_path, status) in guard.iter().filter(|(_, st)| **st != StatusSummary::CLEAN) {
@@ -203,12 +204,13 @@ fn handle_reindex_request(
     progress: &ProgressMap,
     subscribers: &ProgressSubscribers,
 ) -> WatchResult<()> {
-    loop {
-        if try_send_progress_update(&mut conn, client_pid, progress)? {
-            break;
+    let result = loop {
+        match try_send_progress_update(&mut conn, client_pid, progress) {
+            Ok(true) => break Ok(()),
+            Ok(false) => std::thread::yield_now(),
+            Err(e) => break Err(e),
         }
-        std::thread::yield_now();
-    }
+    };
 
     _ = subscribers
         .lock()
@@ -216,7 +218,7 @@ fn handle_reindex_request(
         .remove(&client_pid);
     _ = progress.lock().expect("Mutex poisoned").remove(&client_pid);
 
-    Ok(())
+    result
 }
 
 /// Attempts to send an index progress message to `conn` for `client_pid`.

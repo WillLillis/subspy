@@ -237,13 +237,11 @@ pub fn recv_status_response(
             break Err(e.into());
         }
 
-        let resp_msg = match bincode::borrow_decode_from_slice::<ServerMessage, _>(
-            &buffer,
-            BINCODE_CFG,
-        ) {
-            Ok((msg, _)) => msg,
-            Err(e) => break Err(e.into()),
-        };
+        let resp_msg =
+            match bincode::borrow_decode_from_slice::<ServerMessage, _>(&buffer, BINCODE_CFG) {
+                Ok((msg, _)) => msg,
+                Err(e) => break Err(e.into()),
+            };
         match resp_msg {
             ServerMessage::Status(items) => break Ok(items),
             ServerMessage::Indexing { curr, total } => {
@@ -262,9 +260,7 @@ pub fn recv_status_response(
             other => {
                 break Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
-                    format!(
-                        "Unexpected response from server during status request: {other:?}"
-                    ),
+                    format!("Unexpected response from server during status request: {other:?}"),
                 )
                 .into());
             }
