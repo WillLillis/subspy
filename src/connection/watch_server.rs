@@ -26,6 +26,7 @@ use crate::{
         write_full_message,
     },
     create_progress_bar,
+    git::parse_gitmodules,
     watch::{LockFileGuard, WatchResult},
 };
 
@@ -499,7 +500,6 @@ impl WatchServer {
     #[allow(clippy::too_many_lines)]
     fn populate_status_map(
         &mut self,
-        repo: &Repository,
         display_progress: bool,
         place_submod_watches: bool,
         mut status_guard: MutexGuard<'_, BTreeMap<String, StatusSummary>>,
@@ -508,38 +508,15 @@ impl WatchServer {
 
         use rayon::prelude::*;
 
-        // A race condition can occur if certain git operations (i.e. rebase) are performed
-        // while the server is (re)indexing. git2's `Repository::submodules` function contains
-        // an assert for its inner call to `git_submodule_lookup`, which triggers for a non-zero
-        // return code.
-        let submodules = {
+        let gitmodule_entries = {
             let _lock = LockFileGuard::acquire(&self.root_lock_path, None)?;
-            repo.submodules()?
+            parse_gitmodules(&self.root_path)?
         };
 
         self.root_rebasing = self.root_git_path.join("rebase-merge").exists();
 
         info!("Indexing project at {}", self.root_path.display());
-        let submod_info: Vec<_> = submodules
-            .iter()
-            .map(|submod| {
-                let rel_path = submod.path();
-                let git_path_str = rel_path
-                    .to_str()
-                    .expect("Submodule path contains invalid UTF-8");
-
-                #[cfg(target_os = "windows")]
-                let relative_path = git_path_str.replace('/', "\\");
-                #[cfg(not(target_os = "windows"))]
-                let relative_path = git_path_str.to_owned();
-
-                let full_path = self.root_path.join(rel_path);
-
-                (relative_path, full_path)
-            })
-            .collect();
-
-        let n_submodules = submod_info.len() as u32;
+        let n_submodules = gitmodule_entries.len() as u32;
         let progress_bar = display_progress
             .then(|| create_progress_bar(u64::from(n_submodules), "Indexing submodules"));
 
@@ -555,13 +532,12 @@ impl WatchServer {
         let progress_queue = &self.progress_queue;
         let tl_repo = thread_local::ThreadLocal::new();
 
-        let results: Vec<_> = submod_info
+        let results: Vec<_> = gitmodule_entries
             .into_par_iter()
-            .map(|(relative_path, full_path)| {
+            .map(|(_, relative_path, _)| {
                 let sub_start = std::time::Instant::now();
 
-                #[cfg(target_os = "windows")]
-                let relative_path = relative_path.replace('\\', "/");
+                let full_path = root_path.join(&relative_path);
 
                 // TODO: This would be better as a `try` block if that's ever stabilized
                 // (https://github.com/rust-lang/rust/issues/31436)
@@ -637,7 +613,7 @@ impl WatchServer {
         // Every submodule occupies a slot in this loop regardless of whether
         // its status read succeeded. This keeps `index` (= ROOT_WATCHER_COUNT + i)
         // aligned with watcher positions across calls: rayon preserves order for
-        // indexed iterators, and `repo.submodules()` returns a consistent order.
+        // indexed iterators, and `parse_gitmodules()` returns a consistent order.
         // Skipping failed submodules would shift subsequent indices and misalign
         // skip_set / modules_path_to_index with the watcher array.
         for (i, (relative_path, full_path, inner)) in results.into_iter().enumerate() {
@@ -777,15 +753,7 @@ impl WatchServer {
         self.place_root_watchers()?;
 
         // Initial indexing with the pre-acquired guard.
-        // A fresh Repository is opened for each indexing pass so that
-        // `submodules()` always sees the current HEAD, index, and
-        // `.gitmodules` config. Reusing a long-lived Repository across
-        // reindexes risks stale cached state (HEAD ref, submodule config)
-        // that causes `git_submodule_lookup` to assert inside the
-        // `git_submodule_foreach` callback.
-        let repo = Repository::open(&self.root_path)?;
-        self.populate_status_map(&repo, display_progress, true, status_guard)?;
-        drop(repo);
+        self.populate_status_map(display_progress, true, status_guard)?;
         let mut exit_reason = self.handle_events()?;
 
         // Subsequent reindex iterations
@@ -823,9 +791,8 @@ impl WatchServer {
                 }
             };
 
-            let repo = Repository::open(&self.root_path)?;
             let status_guard = status_lock.lock().expect("Mutex poisoned");
-            self.populate_status_map(&repo, false, new_submod_watches, status_guard)?;
+            self.populate_status_map(false, new_submod_watches, status_guard)?;
 
             exit_reason = self.handle_events()?;
         }
