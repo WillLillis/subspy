@@ -1,4 +1,9 @@
-use std::{borrow::Cow, io::BufReader, path::Path};
+use std::{
+    borrow::Cow,
+    io::BufReader,
+    path::Path,
+    time::{Duration, Instant},
+};
 
 use git2::Repository;
 use interprocess::local_socket::{Stream, traits::Stream as _};
@@ -8,7 +13,8 @@ use thiserror::Error;
 use crate::{
     StatusSummary,
     connection::{
-        BINCODE_CFG, ClientMessage, ServerMessage, ipc_name, read_full_message, write_full_message,
+        BINCODE_CFG, ClientMessage, ServerMessage, client::server_not_started, ipc_name,
+        read_full_message, write_full_message,
     },
     list::parse_gitmodules,
     status::compute_local_statuses,
@@ -24,6 +30,7 @@ pub enum PromptError {
     Template(#[from] TemplateError),
 }
 
+/// The format string used when the user doesn't provide one.
 const DEFAULT_FORMAT: &str = "{dirty} {staged} {new_commits} {clean} {total}";
 
 const PLACEHOLDERS: [&str; 5] = ["dirty", "staged", "new_commits", "clean", "total"];
@@ -31,6 +38,9 @@ const PLACEHOLDERS: [&str; 5] = ["dirty", "staged", "new_commits", "clean", "tot
 /// Indices into [`PLACEHOLDERS`] for fields that require the total submodule count.
 const IDX_CLEAN: usize = 3;
 const IDX_TOTAL: usize = 4;
+
+/// Pre-computed `used` array for [`DEFAULT_FORMAT`].
+const DEFAULT_USED: [bool; 5] = [true; 5];
 
 /// Outputs a formatted summary of submodule statuses for shell prompt
 /// integration.
@@ -44,14 +54,22 @@ const IDX_TOTAL: usize = 4;
 /// # Errors
 ///
 /// Returns `TemplateError` if the format string is invalid.
-pub fn prompt(root_path: &Path, use_server: bool, format: Option<&str>) -> PromptResult<()> {
-    let template = format.unwrap_or(DEFAULT_FORMAT);
-    let used = validate_template(template, &PLACEHOLDERS)?;
+pub fn prompt(
+    root_path: &Path,
+    use_server: bool,
+    format: Option<&str>,
+    timeout: Duration,
+) -> PromptResult<()> {
+    // Skip validation for the default template. It's verified and `DEFAULT_USED`
+    // captures which placeholders are used.
+    let (template, used) = match format {
+        Some(t) => (t, validate_template(t, &PLACEHOLDERS)?),
+        None => (DEFAULT_FORMAT, DEFAULT_USED),
+    };
     let need_total = used[IDX_CLEAN] || used[IDX_TOTAL];
 
     let (statuses, total) = if use_server {
-        let Some(statuses) = try_get_statuses(root_path) else {
-            let _ = spawn_daemon(root_path, None);
+        let Some(statuses) = try_get_statuses(root_path, timeout) else {
             return Ok(());
         };
         let total = if need_total {
@@ -124,12 +142,33 @@ pub fn prompt(root_path: &Path, use_server: bool, format: Option<&str>) -> Promp
     Ok(())
 }
 
-/// Attempts a non-blocking connection to the watch server and retrieves
-/// submodule statuses. Returns `None` if the server isn't running or
-/// communication fails.
-fn try_get_statuses(root_path: &Path) -> Option<Vec<(String, StatusSummary)>> {
+/// Connects to the watch server and retrieves submodule statuses. If no
+/// server is running, spawns one and retries until connected or `timeout`
+/// is exceeded. Returns `None` if the timeout expires or communication fails.
+fn try_get_statuses(root_path: &Path, timeout: Duration) -> Option<Vec<(String, StatusSummary)>> {
+    let deadline = Instant::now() + timeout;
     let name = ipc_name(root_path).ok()?;
-    let conn = Stream::connect(name).ok()?;
+
+    let mut spawned = false;
+    let conn = loop {
+        match Stream::connect(name.clone()) {
+            Ok(conn) => break conn,
+            Err(e) if server_not_started(&e) => {
+                if !spawned {
+                    let _ = spawn_daemon(root_path, None);
+                    spawned = true;
+                }
+                if Instant::now() >= deadline {
+                    return None;
+                }
+                std::thread::yield_now();
+            }
+            Err(_) => return None,
+        }
+    };
+
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    conn.set_recv_timeout(Some(remaining)).ok()?;
     let mut conn = BufReader::new(conn);
 
     let status_req = ClientMessage::Status(std::process::id());
@@ -150,5 +189,16 @@ fn try_get_statuses(root_path: &Path) -> Option<Vec<(String, StatusSummary)>> {
                 return None;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_format_matches_precomputed_used() {
+        let used = validate_template(DEFAULT_FORMAT, &PLACEHOLDERS).unwrap();
+        assert_eq!(used, DEFAULT_USED);
     }
 }

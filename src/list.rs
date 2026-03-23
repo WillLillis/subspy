@@ -112,6 +112,19 @@ const IDX_HEAD_LONG: usize = 5;
 const IDX_HEAD_BRANCH: usize = 7;
 const IDX_STATUS: usize = 8;
 
+/// Pre-computed `used` array for [`DEFAULT_FORMAT`].
+const DEFAULT_USED: [bool; 9] = [
+    true,  // name
+    true,  // path
+    true,  // commit
+    false, // commit_long
+    true,  // head
+    false, // head_long
+    true,  // branch
+    true,  // head_branch
+    true,  // status
+];
+
 /// Resolves the `.git` directory for a submodule. Handles both `.git`
 /// directories (normal repos) and `.git` files containing a `gitdir:` pointer
 /// (the common case for submodules).
@@ -392,8 +405,12 @@ pub fn list(
     header: bool,
     no_server: bool,
 ) -> ListResult<()> {
-    let template = format.unwrap_or(DEFAULT_FORMAT);
-    let used = validate_template(template, &PLACEHOLDERS)?;
+    // Skip validation for the default template. It's verified and `DEFAULT_USED`
+    // captures which placeholders are used.
+    let (template, used) = match format {
+        Some(t) => (t, validate_template(t, &PLACEHOLDERS)?),
+        None => (DEFAULT_FORMAT, DEFAULT_USED),
+    };
 
     let server_statuses = if no_server {
         None
@@ -414,4 +431,76 @@ pub fn list(
     let output = format_output(&infos, template, header);
     print!("{output}");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -- short_oid / long_oid --
+
+    #[test]
+    fn short_oid_some() {
+        let oid = git2::Oid::from_str("abcdef1234567890abcdef1234567890abcdef12").unwrap();
+        assert_eq!(short_oid(Some(oid)), "abcdef1");
+    }
+
+    #[test]
+    fn short_oid_none() {
+        assert_eq!(short_oid(None), "");
+    }
+
+    #[test]
+    fn long_oid_some() {
+        let oid = git2::Oid::from_str("abcdef1234567890abcdef1234567890abcdef12").unwrap();
+        assert_eq!(
+            long_oid(Some(oid)),
+            "abcdef1234567890abcdef1234567890abcdef12"
+        );
+    }
+
+    #[test]
+    fn long_oid_none() {
+        assert_eq!(long_oid(None), "");
+    }
+
+    // -- status_text --
+
+    #[test]
+    fn status_text_clean() {
+        assert_eq!(status_text(StatusSummary::CLEAN), "");
+    }
+
+    #[test]
+    fn status_text_single_flag() {
+        assert_eq!(
+            status_text(StatusSummary::MODIFIED_CONTENT),
+            "modified content"
+        );
+    }
+
+    #[test]
+    fn status_text_multiple_flags() {
+        let status =
+            StatusSummary::MODIFIED_CONTENT | StatusSummary::NEW_COMMITS | StatusSummary::STAGED;
+        assert_eq!(status_text(status), "modified content, new commits, staged");
+    }
+
+    #[test]
+    fn status_text_all_flags() {
+        let status = StatusSummary::MODIFIED_CONTENT
+            | StatusSummary::UNTRACKED_CONTENT
+            | StatusSummary::NEW_COMMITS
+            | StatusSummary::STAGED;
+        assert_eq!(
+            status_text(status),
+            "modified content, untracked content, new commits, staged"
+        );
+    }
+
+    #[test]
+    fn default_format_matches_precomputed_used() {
+        let used = validate_template(DEFAULT_FORMAT, &PLACEHOLDERS).unwrap();
+        assert_eq!(used, DEFAULT_USED);
+    }
 }

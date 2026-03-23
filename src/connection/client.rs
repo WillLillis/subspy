@@ -167,7 +167,8 @@ fn connect_to_server(root_path: &Path) -> StatusResult<BufReader<Stream>> {
 }
 
 #[inline]
-fn server_not_started(e: &std::io::Error) -> bool {
+#[must_use]
+pub fn server_not_started(e: &std::io::Error) -> bool {
     matches!(
         e.kind(),
         std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound

@@ -1,4 +1,4 @@
-use std::{env::current_dir, io, io::IsTerminal as _, path::PathBuf, process};
+use std::{env::current_dir, io, io::IsTerminal as _, path::PathBuf, process, time::Duration};
 
 use anstyle::AnsiColor;
 use clap::{Args, Command, FromArgMatches as _, Subcommand, ValueEnum};
@@ -151,6 +151,10 @@ struct Prompt {
     /// Escape sequences: \n, \r, \t, \\, \{, \}.
     #[arg(short, long, verbatim_doc_comment)]
     pub format: Option<String>,
+    /// Timeout in milliseconds for the server response. Produces no output
+    /// if exceeded.
+    #[arg(short, long, default_value_t = 500)]
+    pub timeout_ms: u64,
 }
 
 #[derive(Args, Debug)]
@@ -298,8 +302,16 @@ impl Status {
 impl Prompt {
     fn run(self) -> RunResult<()> {
         let (true_path, repo_kind) = get_project_path(self.dir)?;
-        let use_server = !self.no_server && repo_kind == RepoKind::WithSubmodules;
-        prompt(true_path.as_path(), use_server, self.format.as_deref())?;
+        if repo_kind != RepoKind::WithSubmodules {
+            return Ok(());
+        }
+        let timeout = Duration::from_millis(self.timeout_ms);
+        prompt(
+            true_path.as_path(),
+            !self.no_server,
+            self.format.as_deref(),
+            timeout,
+        )?;
         Ok(())
     }
 }
