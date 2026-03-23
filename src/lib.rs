@@ -10,6 +10,7 @@ use bincode::{BorrowDecode, Encode};
 use bitflags::bitflags;
 use indicatif::{ProgressBar, ProgressStyle};
 
+pub mod cli;
 pub mod connection;
 pub mod debug;
 pub mod git;
