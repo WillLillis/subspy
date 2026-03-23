@@ -516,6 +516,13 @@ impl WatchServer {
             parse_gitmodules(&self.root_path)?
         };
 
+        if gitmodule_entries.is_empty() {
+            log::warn!(
+                "No submodules found in {}",
+                self.root_path.join(".gitmodules").display()
+            );
+        }
+
         self.root_rebasing = self.root_git_path.join("rebase-merge").exists();
 
         info!("Indexing project at {}", self.root_path.display());

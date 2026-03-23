@@ -18,6 +18,7 @@ use crate::{
         BINCODE_CFG, ClientMessage, ClientRequest, ServerMessage, client::server_not_started,
         ipc_name, read_full_message, write_full_message,
     },
+    git::parse_gitmodules,
     status::compute_local_statuses,
     template::{TemplateError, expand_template, validate_template},
     watch::spawn_daemon,
@@ -36,13 +37,6 @@ const DEFAULT_FORMAT: &str = "{dirty} {staged} {new_commits} {clean} {total}";
 
 const PLACEHOLDERS: [&str; 5] = ["dirty", "staged", "new_commits", "clean", "total"];
 
-/// Indices into [`PLACEHOLDERS`] for fields that require the total submodule count.
-const IDX_CLEAN: usize = 3;
-const IDX_TOTAL: usize = 4;
-
-/// Pre-computed `used` array for [`DEFAULT_FORMAT`].
-const DEFAULT_USED: [bool; 5] = [true; 5];
-
 /// Outputs a formatted summary of submodule statuses for shell prompt
 /// integration.
 ///
@@ -57,40 +51,32 @@ const DEFAULT_USED: [bool; 5] = [true; 5];
 /// Returns `TemplateError` if the format string is invalid. Any non `TemplateError` error
 /// is intentionally swallowed in this function. We cannot display runtime errors in the prompt,
 /// and garbage "placeholder" data is worse than no data.
-#[allow(clippy::missing_panics_doc)]
 pub fn prompt(
     root_path: &Path,
     use_server: bool,
     format: Option<&str>,
     timeout: Duration,
 ) -> PromptResult<()> {
-    // Skip validation for the default template. It's verified and `DEFAULT_USED`
-    // captures which placeholders are used.
-    let (template, used) = match format {
-        Some(t) => (t, validate_template(t, &PLACEHOLDERS)?),
-        None => (DEFAULT_FORMAT, DEFAULT_USED),
+    let template = match format {
+        Some(t) => {
+            validate_template(t, &PLACEHOLDERS)?;
+            t
+        }
+        None => DEFAULT_FORMAT,
     };
-    // The `repo.submodules()` can be incredibly expensive, so avoid it if the template doesn't
-    // require it
-    let need_total = used[IDX_CLEAN] || used[IDX_TOTAL];
-
     let (statuses, total) = if use_server {
         let Some((statuses, total)) = try_get_statuses(root_path, timeout) else {
             return Ok(());
         };
-        (statuses, Some(total as usize))
+        (statuses, total as usize)
     } else {
         let Ok(repo) = Repository::open(root_path) else {
             return Ok(());
         };
-        let total = if need_total {
-            let Ok(subs) = repo.submodules() else {
-                return Ok(());
-            };
-            Some(subs.len())
-        } else {
-            None
+        let Ok(gitmodule_entries) = parse_gitmodules(root_path) else {
+            return Ok(());
         };
+        let total = gitmodule_entries.len();
         let Ok(statuses) = compute_local_statuses(root_path, &repo) else {
             return Ok(());
         };
@@ -125,14 +111,8 @@ pub fn prompt(
                 "dirty" => dirty,
                 "staged" => staged,
                 "new_commits" => new_commits,
-                "clean" => {
-                    let total = total.expect("need_total guards this path");
-                    total.saturating_sub(statuses.len()) as u32
-                }
-                "total" => {
-                    let total = total.expect("need_total guards this path");
-                    total as u32
-                }
+                "clean" => total.saturating_sub(statuses.len()) as u32,
+                "total" => total as u32,
                 _ => unreachable!("validated by validate_template"),
             };
             Cow::Owned(value.to_string())
@@ -202,8 +182,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_format_matches_precomputed_used() {
-        let used = validate_template(DEFAULT_FORMAT, &PLACEHOLDERS).unwrap();
-        assert_eq!(used, DEFAULT_USED);
+    fn default_format_is_valid() {
+        validate_template(DEFAULT_FORMAT, &PLACEHOLDERS).unwrap();
     }
 }
