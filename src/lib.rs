@@ -7,6 +7,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 
 pub mod connection;
 pub mod debug;
+pub mod git;
 pub mod list;
 pub mod prompt;
 pub mod reindex;
