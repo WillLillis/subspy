@@ -11,8 +11,8 @@ use log::error;
 use crate::{
     StatusSummary,
     connection::{
-        BINCODE_CFG, ClientMessage, DebugState, ServerMessage, ipc_name, read_full_message,
-        write_full_message,
+        BINCODE_CFG, ClientMessage, ClientRequest, DebugState, IPC_VERSION, ServerMessage,
+        VersionMismatchError, ipc_name, read_full_message, write_full_message,
     },
     create_progress_bar,
     debug::DebugResult,
@@ -37,12 +37,13 @@ pub fn request_reindex(
     let conn = Stream::connect(name)?;
     let mut conn = BufReader::new(conn);
     let client_pid = std::process::id();
-    let status_req = ClientMessage::Reindex {
+    let req = ClientRequest::new(ClientMessage::Reindex {
         pid: client_pid,
         replace_watchers,
-    };
-    let mut msg = [0; 9]; // 4 byte variant index + 4 byte u32 pid + 1 byte bool (fixint)
-    let msg_len = bincode::encode_into_slice(&status_req, &mut msg, BINCODE_CFG)?;
+    });
+    // 1 byte version + 4 byte variant index + 4 byte u32 pid + 1 byte bool (fixint)
+    let mut msg = [0; 10];
+    let msg_len = bincode::encode_into_slice(&req, &mut msg, BINCODE_CFG)?;
     write_full_message(&mut conn, &msg[..msg_len])?;
 
     let progress_bar =
@@ -50,33 +51,51 @@ pub fn request_reindex(
     // Indexing { u32, u32 } = 12 bytes fixint, so use a stack buffer.
     let mut len_buf = [0u8; 4];
     let mut buffer = [0u8; 12];
-    loop {
-        conn.read_exact(&mut len_buf)?;
+    // TODO: This would be better as a `try` block if that's ever stabilized
+    let result = loop {
+        if let Err(e) = conn.read_exact(&mut len_buf) {
+            break Err(e.into());
+        }
         let msg_len = u32::from_le_bytes(len_buf) as usize;
         debug_assert!(
             msg_len <= buffer.len(),
             "Server message length {msg_len} exceeds buffer size"
         );
-        conn.read_exact(&mut buffer[..msg_len])?;
-        let Ok((ServerMessage::Indexing { curr, total }, _)): Result<(ServerMessage, usize), _> =
-            bincode::borrow_decode_from_slice(&buffer[..msg_len], BINCODE_CFG)
-        else {
-            break;
-        };
-        if let Some(pb) = &progress_bar {
-            pb.set_position(u64::from(curr));
-            pb.set_length(u64::from(total));
+        if let Err(e) = conn.read_exact(&mut buffer[..msg_len]) {
+            break Err(e.into());
         }
-        if curr == total {
-            break;
+        match bincode::borrow_decode_from_slice::<ServerMessage, _>(&buffer[..msg_len], BINCODE_CFG)
+        {
+            Err(e) => break Err(e.into()),
+            Ok((ServerMessage::VersionMismatch { server_version }, _)) => {
+                break Err(VersionMismatchError {
+                    client_version: IPC_VERSION,
+                    server_version,
+                }
+                .into());
+            }
+            Ok((ServerMessage::Indexing { curr, total }, _)) => {
+                if let Some(pb) = &progress_bar {
+                    pb.set_position(u64::from(curr));
+                    pb.set_length(u64::from(total));
+                }
+                if curr == total {
+                    break Ok(());
+                }
+            }
+            Ok(_) => break Ok(()),
         }
-    }
+    };
 
     if let Some(pb) = &progress_bar {
-        pb.finish_with_message("Reindex complete");
+        if result.is_ok() {
+            pb.finish_with_message("Reindex complete");
+        } else {
+            pb.abandon();
+        }
     }
 
-    Ok(())
+    result
 }
 
 /// Sends a shutdown request to the watch server for `root_path`.
@@ -88,17 +107,17 @@ pub fn request_shutdown(root_path: &Path) -> ShutdownResult<()> {
     let name = ipc_name(root_path)?;
     let conn = Stream::connect(name)?;
     let mut conn = BufReader::new(conn);
-    let status_req = ClientMessage::Shutdown;
-    let mut msg = [0; 4]; // unit variant: 4 byte variant index (fixint)
-    let msg_len = bincode::encode_into_slice(&status_req, &mut msg, BINCODE_CFG)?;
+    let req = ClientRequest::new(ClientMessage::Shutdown);
+    let mut msg = [0; 5]; // 1 byte version + 4 byte variant index (fixint)
+    let msg_len = bincode::encode_into_slice(&req, &mut msg, BINCODE_CFG)?;
     write_full_message(&mut conn, &msg[..msg_len])?;
 
     // Wait for the watch server to acknowledge the shutdown.
-    // ShutdownAck is 4 bytes (fixint variant index only), so use a stack buffer.
+    // VersionMismatch { u8 } = 5 bytes is the largest possible response.
     let mut len_buf = [0u8; 4];
     conn.read_exact(&mut len_buf)?;
     let msg_len = u32::from_le_bytes(len_buf) as usize;
-    let mut buffer = [0u8; 4];
+    let mut buffer = [0u8; 5];
     debug_assert!(
         msg_len <= buffer.len(),
         "Server message length {msg_len} exceeds buffer size"
@@ -113,6 +132,12 @@ pub fn request_shutdown(root_path: &Path) -> ShutdownResult<()> {
                 "Successfully shutdown watch server for {}",
                 root_path.display()
             );
+        }
+        ServerMessage::VersionMismatch { server_version } => {
+            Err(VersionMismatchError {
+                client_version: IPC_VERSION,
+                server_version,
+            })?;
         }
         other => error!("Unexpected response from server during shutdown: {other:?}"),
     }
@@ -186,9 +211,9 @@ pub fn server_not_started(e: &std::io::Error) -> bool {
 /// Returns error if the ipc channel cannot be created or the request cannot be sent.
 pub fn send_status_request(root_path: &Path) -> StatusResult<BufReader<Stream>> {
     let mut conn = connect_to_server(root_path)?;
-    let status_req = ClientMessage::Status(std::process::id());
-    let mut req_msg = [0; 8]; // 4 byte variant index + 4 byte u32 pid (fixint)
-    let req_msg_len = bincode::encode_into_slice(&status_req, &mut req_msg, BINCODE_CFG)?;
+    let req = ClientRequest::new(ClientMessage::Status(std::process::id()));
+    let mut req_msg = [0; 9]; // 1 byte version + 4 byte variant index + 4 byte u32 pid (fixint)
+    let req_msg_len = bincode::encode_into_slice(&req, &mut req_msg, BINCODE_CFG)?;
     write_full_message(&mut conn, &req_msg[..req_msg_len])?;
     Ok(conn)
 }
@@ -206,31 +231,56 @@ pub fn recv_status_response(
 ) -> StatusResult<Vec<(String, StatusSummary)>> {
     let progress_bar = display_progress.then(|| create_progress_bar(0, "Indexing in progress..."));
     let mut buffer = Vec::with_capacity(4096); // empirically ~2 KiB on a test repo
-    loop {
-        read_full_message(conn, &mut buffer)?;
+    // TODO: This would be better as a `try` block if that's ever stabilized
+    let result = loop {
+        if let Err(e) = read_full_message(conn, &mut buffer) {
+            break Err(e.into());
+        }
 
-        let (resp_msg, _): (ServerMessage, usize) =
-            bincode::borrow_decode_from_slice(&buffer, BINCODE_CFG)?;
+        let resp_msg = match bincode::borrow_decode_from_slice::<ServerMessage, _>(
+            &buffer,
+            BINCODE_CFG,
+        ) {
+            Ok((msg, _)) => msg,
+            Err(e) => break Err(e.into()),
+        };
         match resp_msg {
-            ServerMessage::Status(items) => {
-                if let Some(pb) = &progress_bar {
-                    pb.finish_and_clear();
-                }
-                return Ok(items);
-            }
+            ServerMessage::Status(items) => break Ok(items),
             ServerMessage::Indexing { curr, total } => {
                 if let Some(pb) = &progress_bar {
                     pb.set_length(u64::from(total));
                     pb.set_position(u64::from(curr));
                 }
             }
-            other => Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("Unexpected response from server during status request: {other:?}"),
-            ))?,
+            ServerMessage::VersionMismatch { server_version } => {
+                break Err(VersionMismatchError {
+                    client_version: IPC_VERSION,
+                    server_version,
+                }
+                .into());
+            }
+            other => {
+                break Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "Unexpected response from server during status request: {other:?}"
+                    ),
+                )
+                .into());
+            }
         }
         buffer.clear();
+    };
+
+    if let Some(pb) = &progress_bar {
+        if result.is_ok() {
+            pb.finish_and_clear();
+        } else {
+            pb.abandon();
+        }
     }
+
+    result
 }
 
 /// Requests a debug state snapshot from the watch server for `root_path`.
@@ -242,8 +292,8 @@ pub fn request_debug(root_path: &Path) -> DebugResult<DebugState> {
     let name = ipc_name(root_path)?;
     let conn = Stream::connect(name)?;
     let mut conn = BufReader::new(conn);
-    let req = ClientMessage::Debug;
-    let mut msg = [0; 4]; // unit variant: 4 byte variant index (fixint)
+    let req = ClientRequest::new(ClientMessage::Debug);
+    let mut msg = [0; 5]; // 1 byte version + 4 byte variant index (fixint)
     let msg_len = bincode::encode_into_slice(&req, &mut msg, BINCODE_CFG)?;
     write_full_message(&mut conn, &msg[..msg_len])?;
 
@@ -254,6 +304,10 @@ pub fn request_debug(root_path: &Path) -> DebugResult<DebugState> {
 
     match resp {
         ServerMessage::DebugInfo(state) => Ok(*state),
+        ServerMessage::VersionMismatch { server_version } => Err(VersionMismatchError {
+            client_version: IPC_VERSION,
+            server_version,
+        })?,
         other => {
             error!("Unexpected response from server during debug request: {other:?}");
             Err(std::io::Error::new(

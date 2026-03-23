@@ -11,7 +11,9 @@ use log::{error, info};
 
 use crate::{
     StatusSummary,
-    connection::{BINCODE_CFG, ClientMessage, ServerMessage, write_full_message},
+    connection::{
+        BINCODE_CFG, ClientMessage, ClientRequest, IPC_VERSION, ServerMessage, write_full_message,
+    },
     watch::WatchResult,
 };
 
@@ -98,18 +100,33 @@ fn dispatch_client_message(
         conn.read_exact(&mut len_buf)?;
         u32::from_le_bytes(len_buf) as usize
     };
-    // 4 byte variant index + 4 byte u32 + 1 byte bool (fixint)
-    let mut buffer = [0u8; 9];
+    // 1 byte version + 4 byte variant index + 4 byte u32 + 1 byte bool (fixint)
+    let mut buffer = [0u8; 10];
     debug_assert!(
         msg_len <= buffer.len(),
-        "Client message length {msg_len} exceeds buffer size"
+        "Client request length {msg_len} exceeds buffer size"
     );
     conn.read_exact(&mut buffer[..msg_len])?;
-    let (msg, _): (ClientMessage, usize) =
+    let (request, _): (ClientRequest, usize) =
         bincode::borrow_decode_from_slice(&buffer[..msg_len], BINCODE_CFG)?;
-    info!("Received client message: {msg:?}");
+    info!("Received client request: {request:?}");
 
-    match msg {
+    if request.version != IPC_VERSION {
+        error!(
+            "Version mismatch: client={}, server={}",
+            request.version, IPC_VERSION
+        );
+        let resp = ServerMessage::VersionMismatch {
+            server_version: IPC_VERSION,
+        };
+        // VersionMismatch: 4 byte variant index + 1 byte u8 (fixint)
+        let mut resp_buf = [0u8; 5];
+        let resp_len = bincode::encode_into_slice(resp, &mut resp_buf, BINCODE_CFG)?;
+        write_full_message(&mut conn, &resp_buf[..resp_len])?;
+        return Ok(());
+    }
+
+    match request.message {
         ClientMessage::Reindex {
             pid,
             replace_watchers,

@@ -13,6 +13,7 @@ use interprocess::local_socket::{
     ToFsName as _, ToNsName as _,
 };
 use rustc_hash::FxHasher;
+use thiserror::Error;
 
 use crate::StatusSummary;
 
@@ -28,6 +29,25 @@ pub const BINCODE_CFG: bincode::config::Configuration<
     .with_fixed_int_encoding()
     .with_no_limit();
 
+/// IPC protocol version. Bump when the wire format changes.
+pub const IPC_VERSION: u8 = 0;
+
+#[derive(Clone, Debug, Eq, PartialEq, Encode, BorrowDecode)]
+pub struct ClientRequest {
+    pub version: u8,
+    pub message: ClientMessage,
+}
+
+impl ClientRequest {
+    #[must_use]
+    pub const fn new(message: ClientMessage) -> Self {
+        Self {
+            version: IPC_VERSION,
+            message,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Encode, BorrowDecode)]
 pub enum ClientMessage {
     Reindex { pid: u32, replace_watchers: bool },
@@ -42,6 +62,25 @@ pub enum ServerMessage {
     Indexing { curr: u32, total: u32 },
     ShutdownAck,
     DebugInfo(Box<DebugState>),
+    VersionMismatch { server_version: u8 },
+}
+
+/// Error returned when the client and server IPC versions do not match.
+#[derive(Clone, Debug, Error)]
+pub struct VersionMismatchError {
+    pub client_version: u8,
+    pub server_version: u8,
+}
+
+impl std::fmt::Display for VersionMismatchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "IPC version mismatch: client is version {}, server is version {}.\n\
+             Stop the server with `subspy stop` (or kill the process) and retry.",
+            self.client_version, self.server_version,
+        )
+    }
 }
 
 /// Diagnostic snapshot of the watch server's internal state

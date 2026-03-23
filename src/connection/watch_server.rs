@@ -1491,7 +1491,7 @@ pub fn watch(root_dir: &Path, display_progress: bool) -> WatchResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::connection::ClientMessage;
+    use crate::connection::{ClientMessage, ClientRequest};
 
     #[test]
     fn unit_variant_sizes() {
@@ -1520,32 +1520,35 @@ mod tests {
         }
     }
 
-    /// Verifies that the worst-case encoded sizes of `ClientMessage` and
-    /// `ServerMessage::Indexing` fit within the stack buffers used to
-    /// encode/decode them in `client.rs` and `client_handler.rs`.
+    /// Verifies that the worst-case encoded sizes of `ClientRequest` and
+    /// `ServerMessage::Indexing` / `VersionMismatch` fit within the stack
+    /// buffers used to encode/decode them in `client.rs` and `client_handler.rs`.
     #[test]
     fn max_message_sizes() {
-        // ClientMessage::Reindex with max u32 is the largest ClientMessage variant
+        // ClientRequest wrapping Reindex with max u32 is the largest request
         let reindex_max = bincode::encode_to_vec(
-            ClientMessage::Reindex {
+            ClientRequest::new(ClientMessage::Reindex {
                 pid: u32::MAX,
                 replace_watchers: true,
-            },
+            }),
             BINCODE_CFG,
         )
         .unwrap();
         assert!(
-            reindex_max.len() <= 9,
-            "ClientMessage::Reindex(u32::MAX, true) encoded to {} bytes, exceeds buffer size of 9",
+            reindex_max.len() <= 10,
+            "ClientRequest(Reindex(u32::MAX, true)) encoded to {} bytes, exceeds buffer size of 10",
             reindex_max.len(),
         );
 
-        // ClientMessage::Status with max u32
-        let status_max =
-            bincode::encode_to_vec(ClientMessage::Status(u32::MAX), BINCODE_CFG).unwrap();
+        // ClientRequest wrapping Status with max u32
+        let status_max = bincode::encode_to_vec(
+            ClientRequest::new(ClientMessage::Status(u32::MAX)),
+            BINCODE_CFG,
+        )
+        .unwrap();
         assert!(
-            status_max.len() <= 9,
-            "ClientMessage::Status(u32::MAX) encoded to {} bytes, exceeds buffer size of 9",
+            status_max.len() <= 10,
+            "ClientRequest(Status(u32::MAX)) encoded to {} bytes, exceeds buffer size of 10",
             status_max.len(),
         );
 
@@ -1563,6 +1566,179 @@ mod tests {
             "ServerMessage::Indexing(u32::MAX, u32::MAX) encoded to {} bytes, exceeds buffer size of 12",
             indexing_max.len(),
         );
+
+        // ServerMessage::VersionMismatch with max u8
+        let mismatch_max = bincode::encode_to_vec(
+            ServerMessage::VersionMismatch {
+                server_version: u8::MAX,
+            },
+            BINCODE_CFG,
+        )
+        .unwrap();
+        assert!(
+            mismatch_max.len() <= 5,
+            "ServerMessage::VersionMismatch(u8::MAX) encoded to {} bytes, exceeds buffer size of 5",
+            mismatch_max.len(),
+        );
+    }
+
+    #[test]
+    fn client_request_round_trip() {
+        let request = ClientRequest::new(ClientMessage::Status(42));
+        let encoded = bincode::encode_to_vec(&request, BINCODE_CFG).unwrap();
+        let (decoded, _): (ClientRequest, usize) =
+            bincode::borrow_decode_from_slice(&encoded, BINCODE_CFG).unwrap();
+        assert_eq!(request, decoded);
+    }
+
+    #[test]
+    fn version_mismatch_round_trip() {
+        let msg = ServerMessage::VersionMismatch { server_version: 7 };
+        let encoded = bincode::encode_to_vec(&msg, BINCODE_CFG).unwrap();
+        let (decoded, _): (ServerMessage, usize) =
+            bincode::borrow_decode_from_slice(&encoded, BINCODE_CFG).unwrap();
+        assert_eq!(msg, decoded);
+    }
+
+    /// Hardcoded byte sequences for every IPC message variant. If any of these
+    /// change, the wire format has broken: bump `IPC_VERSION` and update the
+    /// expected byte slices to match the actual bytes shown in the failure output.
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn wire_format_stability() {
+        use crate::{StatusSummary, connection::DebugState};
+
+        let cases: &[(&str, Vec<u8>, &[u8])] = &[
+            // -- ClientRequest variants --
+            (
+                "ClientRequest(Reindex { pid: 1, replace_watchers: false })",
+                bincode::encode_to_vec(
+                    ClientRequest::new(ClientMessage::Reindex {
+                        pid: 1,
+                        replace_watchers: false,
+                    }),
+                    BINCODE_CFG,
+                )
+                .unwrap(),
+                // version(0) | variant(0,0,0,0) | pid(1,0,0,0) | bool(0)
+                &[0, 0, 0, 0, 0, 1, 0, 0, 0, 0],
+            ),
+            (
+                "ClientRequest(Shutdown)",
+                bincode::encode_to_vec(ClientRequest::new(ClientMessage::Shutdown), BINCODE_CFG)
+                    .unwrap(),
+                // version(0) | variant(1,0,0,0)
+                &[0, 1, 0, 0, 0],
+            ),
+            (
+                "ClientRequest(Status(42))",
+                bincode::encode_to_vec(ClientRequest::new(ClientMessage::Status(42)), BINCODE_CFG)
+                    .unwrap(),
+                // version(0) | variant(2,0,0,0) | pid(42,0,0,0)
+                &[0, 2, 0, 0, 0, 42, 0, 0, 0],
+            ),
+            (
+                "ClientRequest(Debug)",
+                bincode::encode_to_vec(ClientRequest::new(ClientMessage::Debug), BINCODE_CFG)
+                    .unwrap(),
+                // version(0) | variant(3,0,0,0)
+                &[0, 3, 0, 0, 0],
+            ),
+            // -- ServerMessage variants --
+            (
+                "ServerMessage::Status(empty)",
+                bincode::encode_to_vec(ServerMessage::Status(vec![]), BINCODE_CFG).unwrap(),
+                // variant(0,0,0,0) | vec_len(0,0,0,0,0,0,0,0)
+                &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            ),
+            (
+                "ServerMessage::Status(one entry)",
+                bincode::encode_to_vec(
+                    ServerMessage::Status(vec![(
+                        "sub".to_string(),
+                        StatusSummary::MODIFIED_CONTENT,
+                    )]),
+                    BINCODE_CFG,
+                )
+                .unwrap(),
+                // variant(0,0,0,0) | vec_len(1,0,0,0,0,0,0,0)
+                // | str_len(3,0,0,0,0,0,0,0) | "sub" | flags(1,0,0,0)
+                &[
+                    0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, b's', b'u', b'b',
+                    1, 0, 0, 0,
+                ],
+            ),
+            (
+                "ServerMessage::Indexing { curr: 5, total: 10 }",
+                bincode::encode_to_vec(ServerMessage::Indexing { curr: 5, total: 10 }, BINCODE_CFG)
+                    .unwrap(),
+                // variant(1,0,0,0) | curr(5,0,0,0) | total(10,0,0,0)
+                &[1, 0, 0, 0, 5, 0, 0, 0, 10, 0, 0, 0],
+            ),
+            (
+                "ServerMessage::ShutdownAck",
+                bincode::encode_to_vec(ServerMessage::ShutdownAck, BINCODE_CFG).unwrap(),
+                // variant(2,0,0,0)
+                &[2, 0, 0, 0],
+            ),
+            (
+                "ServerMessage::DebugInfo(empty)",
+                bincode::encode_to_vec(
+                    ServerMessage::DebugInfo(Box::new(DebugState {
+                        server_pid: 0,
+                        rayon_threads: 0,
+                        progress_subscribers: None,
+                        watcher_count: 0,
+                        watched_paths: vec![],
+                        skip_set: vec![],
+                        root_rebasing: false,
+                        root_path: String::new(),
+                        socket_name: String::new(),
+                        submodule_statuses: None,
+                        in_flight: None,
+                        progress_queues: None,
+                        last_watcher_error: None,
+                    })),
+                    BINCODE_CFG,
+                )
+                .unwrap(),
+                // variant(3,0,0,0)
+                // | server_pid(0,0,0,0) | rayon_threads(0,0,0,0)
+                // | progress_subscribers:None(0)
+                // | watcher_count(0,0,0,0)
+                // | watched_paths:empty(0,0,0,0,0,0,0,0)
+                // | skip_set:empty(0,0,0,0,0,0,0,0)
+                // | root_rebasing:false(0)
+                // | root_path:""(0,0,0,0,0,0,0,0)
+                // | socket_name:""(0,0,0,0,0,0,0,0)
+                // | submodule_statuses:None(0)
+                // | in_flight:None(0) | progress_queues:None(0)
+                // | last_watcher_error:None(0)
+                &[
+                    3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                    0, 0,
+                ],
+            ),
+            (
+                "ServerMessage::VersionMismatch { server_version: 0 }",
+                bincode::encode_to_vec(
+                    ServerMessage::VersionMismatch { server_version: 0 },
+                    BINCODE_CFG,
+                )
+                .unwrap(),
+                // variant(4,0,0,0) | version(0)
+                &[4, 0, 0, 0, 0],
+            ),
+        ];
+
+        for (name, actual, expected) in cases {
+            assert_eq!(
+                actual, expected,
+                "Wire format changed for {name}! \
+                 If this is intentional, bump IPC_VERSION and update the expected bytes."
+            );
+        }
     }
 
     // -- is_index_or_head_path --

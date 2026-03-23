@@ -24,6 +24,8 @@ pub enum StatusError {
     Git(#[from] git2::Error),
     #[error(transparent)]
     LockFile(#[from] LockFileError),
+    #[error(transparent)]
+    VersionMismatch(#[from] crate::connection::VersionMismatchError),
 }
 
 const STAGED_HEADER: &str = "Changes to be committed:
