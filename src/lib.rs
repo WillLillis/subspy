@@ -1,3 +1,8 @@
+//! Core types and utilities shared across the `subspy` crate.
+//!
+//! Defines [`StatusSummary`] bitflags, terminal styling helpers, and
+//! progress bar construction used by both the watch server and CLI commands.
+
 use std::borrow::Cow;
 
 use anstyle::{Color, Style};

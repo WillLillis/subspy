@@ -1,3 +1,6 @@
+//! The `prompt` subcommand: outputs a compact submodule status summary
+//! for shell prompt integration. Designed to be fast and silent on errors.
+
 use std::{
     borrow::Cow,
     io::BufReader,

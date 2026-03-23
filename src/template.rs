@@ -1,3 +1,6 @@
+//! Format template parsing, validation, and expansion. Used by the `list`
+//! and `prompt` subcommands for user-configurable output formatting.
+
 use std::borrow::Cow;
 
 use thiserror::Error;

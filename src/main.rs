@@ -1,3 +1,5 @@
+//! CLI entry point and subcommand dispatch.
+
 use std::{env::current_dir, io, io::IsTerminal as _, path::PathBuf, process, time::Duration};
 
 use anstyle::AnsiColor;

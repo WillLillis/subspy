@@ -1,3 +1,6 @@
+//! The `list` subcommand: displays per-submodule metadata in a
+//! user-configurable template format with optional column alignment.
+
 use std::{borrow::Cow, io::IsTerminal as _, path::Path, path::PathBuf};
 
 use git2::Repository;

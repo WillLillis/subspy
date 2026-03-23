@@ -1,3 +1,6 @@
+//! Client-side IPC: connecting to the watch server, sending requests,
+//! and reading responses.
+
 use std::{
     io::{BufReader, Read},
     path::Path,

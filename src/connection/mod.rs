@@ -1,4 +1,5 @@
-//! Client-server implementation
+//! IPC types, message framing, and socket management shared between the
+//! watch server and its clients.
 use core::hash::{Hash as _, Hasher as _};
 use std::{
     io::{BufReader, Read, Write as _},

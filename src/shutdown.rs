@@ -1,3 +1,5 @@
+//! The `stop` subcommand: sends a shutdown request to the watch server.
+
 use std::path::Path;
 
 use thiserror::Error;

@@ -1,3 +1,6 @@
+//! The `debug` subcommand: dumps the watch server's internal state for
+//! diagnostics and troubleshooting.
+
 use std::{fmt, path::Path};
 
 use thiserror::Error;

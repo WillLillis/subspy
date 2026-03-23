@@ -1,3 +1,6 @@
+//! Daemon lifecycle: spawning the background watch server process,
+//! lock file management, and the top-level `watch` entry point.
+
 use std::{
     fs,
     path::{Path, PathBuf},

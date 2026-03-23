@@ -1,3 +1,6 @@
+//! Server-side client connection handling: message dispatch, status
+//! responses, progress broadcasting, and reindex coordination.
+
 use std::{
     cell::RefCell,
     collections::{BTreeMap, VecDeque},

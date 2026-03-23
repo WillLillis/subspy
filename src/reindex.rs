@@ -1,3 +1,6 @@
+//! The `reindex` subcommand: triggers a full status recomputation on
+//! the watch server.
+
 use std::path::Path;
 
 use thiserror::Error;

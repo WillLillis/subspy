@@ -1,3 +1,6 @@
+//! The watch server: monitors filesystem events on submodule working trees,
+//! maintains a cached status map, and serves status queries over IPC.
+
 use std::{
     collections::{BTreeMap, VecDeque},
     io::BufReader,

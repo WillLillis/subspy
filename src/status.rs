@@ -1,3 +1,6 @@
+//! The `status` subcommand: displays submodule and working-tree status
+//! in a format that mirrors `git status`.
+
 use anstyle::AnsiColor;
 use git2::{Repository, Statuses};
 use std::{cmp::Ordering, fs, path::Path};

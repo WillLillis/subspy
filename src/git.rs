@@ -1,3 +1,5 @@
+//! Lightweight git helpers that bypass expensive libgit2 machinery.
+
 use std::path::Path;
 
 /// Parses `.gitmodules` to extract submodule name, path, and branch without
