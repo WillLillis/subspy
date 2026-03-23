@@ -54,6 +54,7 @@ const DEFAULT_USED: [bool; 5] = [true; 5];
 /// Returns `TemplateError` if the format string is invalid. Any non `TemplateError` error
 /// is intentionally swallowed in this function. We cannot display runtime errors in the prompt,
 /// and garbage "placeholder" data is worst than no data.
+#[allow(clippy::missing_panics_doc)]
 pub fn prompt(
     root_path: &Path,
     use_server: bool,
@@ -66,13 +67,15 @@ pub fn prompt(
         Some(t) => (t, validate_template(t, &PLACEHOLDERS)?),
         None => (DEFAULT_FORMAT, DEFAULT_USED),
     };
+    // The `repo.submodules()` can be incredibly expensive, so avoid it if the template doesn't
+    // require it
     let need_total = used[IDX_CLEAN] || used[IDX_TOTAL];
 
     let (statuses, total) = if use_server {
         let Some((statuses, total)) = try_get_statuses(root_path, timeout) else {
             return Ok(());
         };
-        (statuses, total as usize)
+        (statuses, Some(total as usize))
     } else {
         let Ok(repo) = Repository::open(root_path) else {
             return Ok(());
@@ -81,9 +84,9 @@ pub fn prompt(
             let Ok(subs) = repo.submodules() else {
                 return Ok(());
             };
-            subs.len()
+            Some(subs.len())
         } else {
-            0
+            None
         };
         let Ok(statuses) = compute_local_statuses(root_path, &repo) else {
             return Ok(());
@@ -110,20 +113,23 @@ pub fn prompt(
         }
     }
 
-    let clean = total.saturating_sub(statuses.len()) as u32;
-    let total = total as u32;
-
     let no_widths = [0; 5];
     let output = expand_template(
         template,
         &PLACEHOLDERS,
         |name| {
-            let value = match name {
+            let value: u32 = match name {
                 "dirty" => dirty,
                 "staged" => staged,
                 "new_commits" => new_commits,
-                "clean" => clean,
-                "total" => total,
+                "clean" => {
+                    let total = total.expect("need_total guards this path");
+                    total.saturating_sub(statuses.len()) as u32
+                }
+                "total" => {
+                    let total = total.expect("need_total guards this path");
+                    total as u32
+                }
                 _ => unreachable!("validated by validate_template"),
             };
             Cow::Owned(value.to_string())
