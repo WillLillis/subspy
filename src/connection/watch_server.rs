@@ -1646,26 +1646,34 @@ mod tests {
             ),
             // -- ServerMessage variants --
             (
-                "ServerMessage::Status(empty)",
-                bincode::encode_to_vec(ServerMessage::Status(vec![]), BINCODE_CFG).unwrap(),
-                // variant(0,0,0,0) | vec_len(0,0,0,0,0,0,0,0)
-                &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                "ServerMessage::Status(empty, total=0)",
+                bincode::encode_to_vec(
+                    ServerMessage::Status {
+                        statuses: vec![],
+                        total: 0,
+                    },
+                    BINCODE_CFG,
+                )
+                .unwrap(),
+                // variant(0,0,0,0) | vec_len(0,0,0,0,0,0,0,0) | total(0,0,0,0)
+                &[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             ),
             (
-                "ServerMessage::Status(one entry)",
+                "ServerMessage::Status(one entry, total=3)",
                 bincode::encode_to_vec(
-                    ServerMessage::Status(vec![(
-                        "sub".to_string(),
-                        StatusSummary::MODIFIED_CONTENT,
-                    )]),
+                    ServerMessage::Status {
+                        statuses: vec![("sub".to_string(), StatusSummary::MODIFIED_CONTENT)],
+                        total: 3,
+                    },
                     BINCODE_CFG,
                 )
                 .unwrap(),
                 // variant(0,0,0,0) | vec_len(1,0,0,0,0,0,0,0)
                 // | str_len(3,0,0,0,0,0,0,0) | "sub" | flags(1,0,0,0)
+                // | total(3,0,0,0)
                 &[
                     0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, b's', b'u', b'b',
-                    1, 0, 0, 0,
+                    1, 0, 0, 0, 3, 0, 0, 0,
                 ],
             ),
             (

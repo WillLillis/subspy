@@ -58,11 +58,19 @@ pub enum ClientMessage {
 
 #[derive(Clone, Debug, Eq, PartialEq, Encode, BorrowDecode)]
 pub enum ServerMessage {
-    Status(Vec<(String, StatusSummary)>),
-    Indexing { curr: u32, total: u32 },
+    Status {
+        statuses: Vec<(String, StatusSummary)>,
+        total: u32,
+    },
+    Indexing {
+        curr: u32,
+        total: u32,
+    },
     ShutdownAck,
     DebugInfo(Box<DebugState>),
-    VersionMismatch { server_version: u8 },
+    VersionMismatch {
+        server_version: u8,
+    },
 }
 
 /// Error returned when the client and server IPC versions do not match.

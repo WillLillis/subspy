@@ -417,7 +417,7 @@ pub fn list(
     } else {
         let mut conn = send_status_request(root_path)?;
         let display_progress = std::io::stderr().is_terminal();
-        Some(recv_status_response(&mut conn, display_progress)?)
+        Some(recv_status_response(&mut conn, display_progress)?.0)
     };
 
     let need_submod_head = used[IDX_HEAD] || used[IDX_HEAD_LONG] || used[IDX_HEAD_BRANCH];

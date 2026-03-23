@@ -178,13 +178,17 @@ fn handle_status_request(
     _ = progress.lock().expect("Mutex poisoned").remove(&client_pid);
     let guard = result?;
 
-    let mut status_out = Vec::with_capacity(guard.len());
+    let total = guard.len() as u32;
+    let mut status_out = Vec::with_capacity(total as usize);
     for (submod_path, status) in guard.iter().filter(|(_, st)| **st != StatusSummary::CLEAN) {
         status_out.push((submod_path.clone(), *status));
     }
     drop(guard);
 
-    let msg = ServerMessage::Status(status_out);
+    let msg = ServerMessage::Status {
+        statuses: status_out,
+        total,
+    };
     ENCODE_BUF.with_borrow_mut(|buf| -> WatchResult<()> {
         buf.clear();
         bincode::encode_into_std_write(msg, buf, BINCODE_CFG)?;

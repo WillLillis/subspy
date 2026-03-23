@@ -7,7 +7,6 @@ use std::{
 
 use git2::Repository;
 use interprocess::local_socket::{Stream, traits::Stream as _};
-use log::error;
 use thiserror::Error;
 
 use crate::{
@@ -16,7 +15,6 @@ use crate::{
         BINCODE_CFG, ClientMessage, ClientRequest, ServerMessage, client::server_not_started,
         ipc_name, read_full_message, write_full_message,
     },
-    list::parse_gitmodules,
     status::compute_local_statuses,
     template::{TemplateError, expand_template, validate_template},
     watch::spawn_daemon,
@@ -53,7 +51,9 @@ const DEFAULT_USED: [bool; 5] = [true; 5];
 ///
 /// # Errors
 ///
-/// Returns `TemplateError` if the format string is invalid.
+/// Returns `TemplateError` if the format string is invalid. Any non `TemplateError` error
+/// is intentionally swallowed in this function. We cannot display runtime errors in the prompt,
+/// and garbage "placeholder" data is worst than no data.
 pub fn prompt(
     root_path: &Path,
     use_server: bool,
@@ -69,27 +69,19 @@ pub fn prompt(
     let need_total = used[IDX_CLEAN] || used[IDX_TOTAL];
 
     let (statuses, total) = if use_server {
-        let Some(statuses) = try_get_statuses(root_path, timeout) else {
+        let Some((statuses, total)) = try_get_statuses(root_path, timeout) else {
             return Ok(());
         };
-        let total = if need_total {
-            match parse_gitmodules(root_path) {
-                Ok(entries) => entries.len(),
-                Err(e) => {
-                    error!("Failed to parse .gitmodules: {e}");
-                    return Ok(());
-                }
-            }
-        } else {
-            0
-        };
-        (statuses, total)
+        (statuses, total as usize)
     } else {
         let Ok(repo) = Repository::open(root_path) else {
             return Ok(());
         };
         let total = if need_total {
-            repo.submodules().map(|s| s.len()).unwrap_or(0)
+            let Ok(subs) = repo.submodules() else {
+                return Ok(());
+            };
+            subs.len()
         } else {
             0
         };
@@ -145,7 +137,10 @@ pub fn prompt(
 /// Connects to the watch server and retrieves submodule statuses. If no
 /// server is running, spawns one and retries until connected or `timeout`
 /// is exceeded. Returns `None` if the timeout expires or communication fails.
-fn try_get_statuses(root_path: &Path, timeout: Duration) -> Option<Vec<(String, StatusSummary)>> {
+fn try_get_statuses(
+    root_path: &Path,
+    timeout: Duration,
+) -> Option<(Vec<(String, StatusSummary)>, u32)> {
     let deadline = Instant::now() + timeout;
     let name = ipc_name(root_path).ok()?;
 
@@ -182,7 +177,7 @@ fn try_get_statuses(root_path: &Path, timeout: Duration) -> Option<Vec<(String, 
         let (resp_msg, _): (ServerMessage, usize) =
             bincode::borrow_decode_from_slice(&buffer, BINCODE_CFG).ok()?;
         match resp_msg {
-            ServerMessage::Status(statuses) => return Some(statuses),
+            ServerMessage::Status { statuses, total } => return Some((statuses, total)),
             ServerMessage::Indexing { .. } => {}
             ServerMessage::VersionMismatch { .. }
             | ServerMessage::ShutdownAck

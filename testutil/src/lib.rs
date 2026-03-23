@@ -183,7 +183,9 @@ impl TestHarness {
     /// Request the current status from the watch server.
     pub fn status(&self) -> Vec<(String, StatusSummary)> {
         let mut conn = send_status_request(&self.root_path).expect("send_status_request failed");
-        recv_status_response(&mut conn, false).expect("recv_status_response failed")
+        recv_status_response(&mut conn, false)
+            .expect("recv_status_response failed")
+            .0
     }
 
     /// Poll status until it matches the expected predicate, or panic on timeout.

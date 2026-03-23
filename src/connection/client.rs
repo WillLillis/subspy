@@ -228,7 +228,7 @@ pub fn send_status_request(root_path: &Path) -> StatusResult<BufReader<Stream>> 
 pub fn recv_status_response(
     conn: &mut BufReader<Stream>,
     display_progress: bool,
-) -> StatusResult<Vec<(String, StatusSummary)>> {
+) -> StatusResult<(Vec<(String, StatusSummary)>, u32)> {
     let progress_bar = display_progress.then(|| create_progress_bar(0, "Indexing in progress..."));
     let mut buffer = Vec::with_capacity(4096); // empirically ~2 KiB on a test repo
     // TODO: This would be better as a `try` block if that's ever stabilized
@@ -243,7 +243,7 @@ pub fn recv_status_response(
                 Err(e) => break Err(e.into()),
             };
         match resp_msg {
-            ServerMessage::Status(items) => break Ok(items),
+            ServerMessage::Status { statuses, total } => break Ok((statuses, total)),
             ServerMessage::Indexing { curr, total } => {
                 if let Some(pb) = &progress_bar {
                     pb.set_length(u64::from(total));

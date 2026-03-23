@@ -735,7 +735,7 @@ pub fn status(
     let deleted_submodule_paths = deleted_submodule_paths(&repo)?;
 
     let submodule_statuses = match conn {
-        Some(ref mut c) => recv_status_response(c, display_progress)?,
+        Some(ref mut c) => recv_status_response(c, display_progress)?.0,
         None if repo_kind == RepoKind::WithSubmodules => compute_local_statuses(root_path, &repo)?,
         None => Vec::new(),
     };
