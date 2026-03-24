@@ -1462,6 +1462,11 @@ pub fn watch(root_dir: &Path, display_progress: bool) -> WatchResult<()> {
 
     server.spawn_listener(control_tx)?;
     let result = server.watch(display_progress, status_guard);
+    // Socket file cleanup can't be tied to IpcListener's Drop because the
+    // listener is moved into a background thread with no shutdown signal,
+    // which it runs until the OS tears down the process. Instead we clean
+    // up here after the server loop returns. Crashes that skip this are
+    // handled by create_listener's stale socket recovery on next startup.
     cleanup_socket(root_dir);
     result
 }
