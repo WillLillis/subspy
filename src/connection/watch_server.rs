@@ -26,8 +26,8 @@ use notify::{
 use crate::{
     DOT_GIT, DOT_GITMODULES, StatusSummary,
     connection::{
-        BINCODE_CFG, DebugState, IpcStream, ServerMessage, create_listener, ipc_socket_path,
-        write_full_message,
+        BINCODE_CFG, DebugState, IpcStream, ServerMessage, cleanup_socket, create_listener,
+        ipc_socket_path, write_full_message,
     },
     create_progress_bar,
     git::parse_gitmodules,
@@ -1461,9 +1461,9 @@ pub fn watch(root_dir: &Path, display_progress: bool) -> WatchResult<()> {
     let status_guard = status_lock.lock().expect("Mutex poisoned");
 
     server.spawn_listener(control_tx)?;
-    server.watch(display_progress, status_guard)?;
-
-    Ok(())
+    let result = server.watch(display_progress, status_guard);
+    cleanup_socket(root_dir);
+    result
 }
 
 #[cfg(test)]

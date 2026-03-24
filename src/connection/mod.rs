@@ -135,6 +135,19 @@ pub struct DebugState {
     pub last_watcher_error: Option<String>,
 }
 
+/// Returns `true` if IPC uses filesystem sockets that need manual cleanup.
+#[must_use]
+pub fn uses_filesystem_sockets() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        true // uds_windows always uses filesystem sockets
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        !GenericNamespaced::is_supported()
+    }
+}
+
 /// Sets the receive timeout on the IPC stream.
 #[cfg(not(target_os = "windows"))]
 fn set_recv_timeout(stream: &IpcStream, timeout: Option<Duration>) -> std::io::Result<()> {
@@ -257,42 +270,73 @@ pub fn ipc_connect(sock_path: &str) -> std::io::Result<IpcStream> {
 
 /// Creates a new listener for incoming client connections to the watch server for `root_dir`.
 ///
+/// On platforms using filesystem sockets (Windows, or Unix without namespace
+/// support), a stale socket file from a crashed server is detected and removed
+/// automatically.
+///
 /// # Errors
 ///
 /// Returns `std::io::Error` if the listener cannot be created.
 pub fn create_listener(root_dir: &Path) -> std::io::Result<IpcListener> {
+    let sock_path = ipc_socket_path(root_dir);
+    let addr_in_use_err = || {
+        std::io::Error::new(
+            std::io::ErrorKind::AddrInUse,
+            format!(
+                "Could not start watch server because the socket file is occupied. \
+                 Is there already a watcher placed on {}?",
+                root_dir.display()
+            ),
+        )
+    };
+
     #[cfg(not(target_os = "windows"))]
     {
-        let sock_path = ipc_socket_path(root_dir);
         let name = ipc_name(&sock_path)?;
         let opts = ListenerOptions::new().name(name);
         match opts.create_sync() {
-            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => Err(std::io::Error::new(
-                std::io::ErrorKind::AddrInUse,
-                format!(
-                    "Could not start watch server because the socket file is occupied. \
-                     Is there already a watcher placed on {}?",
-                    root_dir.display()
-                ),
-            )),
-            x => Ok(x?),
+            Ok(listener) => Ok(listener),
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+                if uses_filesystem_sockets()
+                    && ipc_connect(&sock_path).is_err()
+                    && std::fs::remove_file(&sock_path).is_ok()
+                {
+                    let name = ipc_name(&sock_path)?;
+                    Ok(ListenerOptions::new().name(name).create_sync()?)
+                } else {
+                    Err(addr_in_use_err())
+                }
+            }
+            Err(e) => Err(e),
         }
     }
     #[cfg(target_os = "windows")]
     {
-        let sock_path = ipc_socket_path(root_dir);
         match uds_windows::UnixListener::bind(&sock_path) {
-            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => Err(std::io::Error::new(
-                std::io::ErrorKind::AddrInUse,
-                format!(
-                    "Could not start watch server because the socket file is occupied. \
-                     Is there already a watcher placed on {}?",
-                    root_dir.display()
-                ),
-            )),
-            x => Ok(x?),
+            Ok(listener) => Ok(listener),
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+                if uses_filesystem_sockets()
+                    && ipc_connect(&sock_path).is_err()
+                    && std::fs::remove_file(&sock_path).is_ok()
+                {
+                    Ok(uds_windows::UnixListener::bind(&sock_path)?)
+                } else {
+                    Err(addr_in_use_err())
+                }
+            }
+            Err(e) => Err(e),
         }
     }
+}
+
+/// Removes the socket file for `root_dir` if it exists on the filesystem.
+/// No-op on platforms using abstract/namespaced sockets.
+pub fn cleanup_socket(root_dir: &Path) {
+    if !uses_filesystem_sockets() {
+        return;
+    }
+    let sock_path = ipc_socket_path(root_dir);
+    let _ = std::fs::remove_file(&sock_path);
 }
 
 /// Attempts to acquire `mutex` without blocking.

@@ -7,7 +7,8 @@ use subspy::{
     StatusSummary,
     connection::{
         BINCODE_CFG, ClientMessage, ClientRequest, IPC_VERSION, ServerMessage,
-        client::request_reindex, ipc_connect, ipc_socket_path, write_full_message,
+        client::request_reindex, ipc_connect, ipc_socket_path, uses_filesystem_sockets,
+        write_full_message,
     },
 };
 
@@ -88,4 +89,51 @@ fn version_mismatch_returns_error_and_server_stays_alive(_run: u32) {
 
     // Server should still be alive - normal requests should work
     harness.assert_all_clean();
+}
+
+#[apply(common::repeat)]
+fn socket_file_removed_after_shutdown(_run: u32) {
+    if !uses_filesystem_sockets() {
+        return;
+    }
+    let mut harness = common::HarnessBuilder::new().submodule("sub_a").build();
+    harness.assert_all_clean();
+
+    let sock_path = ipc_socket_path(harness.root_path());
+    assert!(
+        std::path::Path::new(&sock_path).exists(),
+        "socket file should exist while server is running"
+    );
+
+    harness.shutdown();
+    assert!(
+        !std::path::Path::new(&sock_path).exists(),
+        "socket file should be removed after shutdown"
+    );
+}
+
+#[apply(common::repeat)]
+fn stale_socket_file_recovered_on_start(_run: u32) {
+    if !uses_filesystem_sockets() {
+        return;
+    }
+    let mut harness = common::HarnessBuilder::new()
+        .submodule("sub_a")
+        .no_server()
+        .build();
+
+    // Create a stale socket file (no server listening)
+    let sock_path = ipc_socket_path(harness.root_path());
+    std::fs::write(&sock_path, "stale").unwrap();
+    assert!(std::path::Path::new(&sock_path).exists());
+
+    // Server should detect the stale socket, remove it, and start successfully
+    harness.start_server();
+    harness.assert_all_clean();
+
+    harness.shutdown();
+    assert!(
+        !std::path::Path::new(&sock_path).exists(),
+        "socket file should be removed after shutdown"
+    );
 }
