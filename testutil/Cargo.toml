@@ -9,6 +9,5 @@ git2 = { version = "0.20.3", features = [
     "vendored-libgit2",
     "vendored-openssl",
 ] }
-interprocess = "2.2.3"
 subspy = { path = ".." }
 tempfile = "3"

@@ -9,9 +9,10 @@ use std::{
 };
 
 use bincode::{BorrowDecode, Encode};
+#[cfg(not(target_os = "windows"))]
 use interprocess::local_socket::{
-    GenericFilePath, GenericNamespaced, Listener, ListenerOptions, Name, NameType as _, Stream,
-    ToFsName as _, ToNsName as _, traits::Stream as _,
+    GenericFilePath, GenericNamespaced, ListenerOptions, Name, NameType as _, ToFsName as _,
+    ToNsName as _,
 };
 use rustc_hash::FxHasher;
 use thiserror::Error;
@@ -21,6 +22,26 @@ use crate::StatusSummary;
 pub mod client;
 mod client_handler;
 pub mod watch_server;
+
+// Platform-specific IPC stream and listener types.
+//
+// On Unix, we use interprocess's local sockets (Unix domain sockets).
+// On Windows, interprocess only supports named pipes, which lack native
+// read timeouts (SO_RCVTIMEO). We use uds_windows instead, which provides
+// AF_UNIX sockets with full timeout support.
+//
+// Once std gains Unix domain socket support on Windows (rust-lang/rust#56533),
+// interprocess can adopt it (kotauskas/interprocess#45) and we can drop
+// uds_windows in favor of a single interprocess backend on all platforms.
+#[cfg(not(target_os = "windows"))]
+pub type IpcStream = interprocess::local_socket::Stream;
+#[cfg(target_os = "windows")]
+pub type IpcStream = uds_windows::UnixStream;
+
+#[cfg(not(target_os = "windows"))]
+pub type IpcListener = interprocess::local_socket::Listener;
+#[cfg(target_os = "windows")]
+pub type IpcListener = uds_windows::UnixListener;
 
 /// Common bincode configuration used to encode/decode messages between the client and server
 pub const BINCODE_CFG: bincode::config::Configuration<
@@ -114,13 +135,26 @@ pub struct DebugState {
     pub last_watcher_error: Option<String>,
 }
 
+/// Sets the receive timeout on the IPC stream.
+#[cfg(not(target_os = "windows"))]
+fn set_recv_timeout(stream: &IpcStream, timeout: Option<Duration>) -> std::io::Result<()> {
+    use interprocess::local_socket::traits::Stream as _;
+    stream.set_recv_timeout(timeout)
+}
+
+/// Sets the receive timeout on the IPC stream.
+#[cfg(target_os = "windows")]
+fn set_recv_timeout(stream: &IpcStream, timeout: Option<Duration>) -> std::io::Result<()> {
+    stream.set_read_timeout(timeout)
+}
+
 /// Writes all of `msg` to `conn`, prepended by the length as a LE u32.
 ///
 /// # Errors
 ///
 /// Returns `std::io::Error` if writing to `conn` fails
 #[inline]
-pub fn write_full_message(conn: &mut BufReader<Stream>, msg: &[u8]) -> std::io::Result<()> {
+pub fn write_full_message(conn: &mut BufReader<IpcStream>, msg: &[u8]) -> std::io::Result<()> {
     let len_bytes = (msg.len() as u32).to_le_bytes();
     conn.get_mut().write_all(&len_bytes)?;
     conn.get_mut().write_all(msg)?;
@@ -130,153 +164,94 @@ pub fn write_full_message(conn: &mut BufReader<Stream>, msg: &[u8]) -> std::io::
 
 /// Reads from `conn` into `buffer` expecting the message length as a LE u32 first.
 ///
-/// When `timeout` is `Some`, reads will time out after the given duration.
-/// On Unix, this uses the socket's receive timeout. On Windows, the stream
-/// is temporarily set to nonblocking mode and reads poll on [`WouldBlock`].
-/// When `timeout` is `None`, reads block normally.
-///
-/// On normal return, the socket's receive timeout is cleared (Unix) or the
-/// stream is set to blocking mode (Windows).
-///
-/// [`WouldBlock`]: std::io::ErrorKind::WouldBlock
+/// When `timeout` is `Some`, the socket's receive timeout is temporarily set
+/// for the duration of the read, then cleared on return. When `timeout` is
+/// `None`, reads block normally.
 ///
 /// # Errors
 ///
 /// Returns `std::io::Error` if reading fails or the timeout elapses.
 pub fn read_full_message(
-    conn: &mut BufReader<Stream>,
+    conn: &mut BufReader<IpcStream>,
     buffer: &mut Vec<u8>,
     timeout: Option<Duration>,
 ) -> std::io::Result<()> {
     buffer.clear();
 
-    #[cfg(not(target_os = "windows"))]
     if let Some(duration) = timeout {
-        conn.get_ref().set_recv_timeout(Some(duration))?;
+        set_recv_timeout(conn.get_ref(), Some(duration))?;
     }
-    #[cfg(target_os = "windows")]
+
+    // TODO: Yet another strong candidate for a `try` block
+    let result = (|| {
+        let msg_len = {
+            let mut len_buf = [0u8; 4];
+            conn.read_exact(&mut len_buf)?;
+            u32::from_le_bytes(len_buf) as usize
+        };
+        buffer.resize(msg_len, 0);
+        conn.read_exact(buffer)
+    })();
+
     if timeout.is_some() {
-        conn.get_ref().set_nonblocking(true)?;
+        let _ = set_recv_timeout(conn.get_ref(), None);
     }
 
-    let read_result = read_full_message_inner(
-        conn,
-        buffer,
-        #[cfg(target_os = "windows")]
-        timeout,
-    );
-
-    #[cfg(not(target_os = "windows"))]
-    if timeout.is_some() {
-        let _ = conn.get_ref().set_recv_timeout(None);
-    }
-    #[cfg(target_os = "windows")]
-    if timeout.is_some() {
-        let _ = conn.get_ref().set_nonblocking(false);
-    }
-
-    read_result
+    result
 }
 
-fn read_full_message_inner(
-    conn: &mut BufReader<Stream>,
-    buffer: &mut Vec<u8>,
-    #[cfg(target_os = "windows")] timeout: Option<Duration>,
-) -> std::io::Result<()> {
-    let msg_len = {
-        let mut len_buf = [0u8; 4];
-        read_exact_impl(
-            conn,
-            &mut len_buf,
-            #[cfg(target_os = "windows")]
-            timeout,
-        )?;
-        u32::from_le_bytes(len_buf) as usize
-    };
-
-    buffer.resize(msg_len, 0);
-    read_exact_impl(
-        conn,
-        buffer,
-        #[cfg(target_os = "windows")]
-        timeout,
-    )?;
-
-    Ok(())
-}
-
-/// - On Unix, delegates to `read_exact` (the OS socket timeout handles deadlines).
-///   The timeout isn't passed in this implementation, as the `set_recv_timeout` has been
-///   set with the corresponding timeout in the caller.
+/// Returns the socket path used for IPC on the current platform.
 ///
-/// - On Windows, polls on `WouldBlock` with a deadline computed from `timeout`.
-#[cfg(not(target_os = "windows"))]
-fn read_exact_impl(conn: &mut BufReader<Stream>, buf: &mut [u8]) -> std::io::Result<()> {
-    conn.read_exact(buf)
-}
-
-/// On Unix, delegates to `read_exact` (the OS socket timeout handles deadlines).
-/// On Windows, polls on `WouldBlock` with a deadline computed from `timeout`.
-#[cfg(target_os = "windows")]
-fn read_exact_impl(
-    conn: &mut BufReader<Stream>,
-    buf: &mut [u8],
-    timeout: Option<Duration>,
-) -> std::io::Result<()> {
-    let Some(timeout) = timeout else {
-        return conn.read_exact(buf);
-    };
-    let deadline = Instant::now() + timeout;
-    let mut filled = 0;
-    while filled < buf.len() {
-        if Instant::now() >= deadline {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "read timed out",
-            ));
-        }
-        match conn.read(&mut buf[filled..]) {
-            Ok(0) => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::UnexpectedEof,
-                    "connection closed before message was fully read",
-                ));
-            }
-            Ok(n) => filled += n,
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                std::thread::yield_now();
-            }
-            Err(e) => return Err(e),
-        }
-    }
-    Ok(())
-}
-
-/// Returns the `interprocess::local_socket::name::Name` used to communicate between
-/// the watch server and request clients for a given git project at `path`.
-///
-/// # Errors
-///
-/// Returns `std::io::Error` if socket name isn't supported by the given platform
-pub fn ipc_name(path: &Path) -> std::io::Result<Name<'_>> {
-    let name = ipc_name_string(path);
-    if GenericNamespaced::is_supported() {
-        name.to_ns_name::<GenericNamespaced>()
-    } else {
-        name.to_fs_name::<GenericFilePath>()
-    }
-}
-
-/// Returns the raw socket name string for a given repository path.
+/// On Unix with namespace support, returns a short name like `{hash}.sock`.
+/// On Unix without namespace support or on Windows, returns a filesystem
+/// path like `/tmp/{hash}.sock` or `%TEMP%\{hash}.sock`.
 #[must_use]
-pub fn ipc_name_string(path: &Path) -> String {
+pub fn ipc_socket_path(path: &Path) -> String {
     let mut hasher = FxHasher::default();
     path.hash(&mut hasher);
     let hash = hasher.finish();
+
+    #[cfg(not(target_os = "windows"))]
     if GenericNamespaced::is_supported() {
-        format!("{hash}.sock")
+        return format!("{hash}.sock");
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let temp = std::env::temp_dir();
+        return format!("{}\\{hash}.sock", temp.display());
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    format!("/tmp/{hash}.sock")
+}
+
+/// Converts a socket path string into an `interprocess` `Name`.
+#[cfg(not(target_os = "windows"))]
+fn ipc_name(sock_path: &str) -> std::io::Result<Name<'_>> {
+    if GenericNamespaced::is_supported() {
+        sock_path.to_string().to_ns_name::<GenericNamespaced>()
     } else {
-        format!("/tmp/{hash}.sock")
+        sock_path.to_string().to_fs_name::<GenericFilePath>()
+    }
+}
+
+/// Connects to the IPC socket at the given socket path (as returned by
+/// [`ipc_socket_path`]).
+///
+/// # Errors
+///
+/// Returns `std::io::Error` if the connection cannot be established.
+pub fn ipc_connect(sock_path: &str) -> std::io::Result<IpcStream> {
+    #[cfg(not(target_os = "windows"))]
+    {
+        use interprocess::local_socket::traits::Stream as _;
+        let name = ipc_name(sock_path)?;
+        IpcStream::connect(name)
+    }
+    #[cfg(target_os = "windows")]
+    {
+        IpcStream::connect(sock_path)
     }
 }
 
@@ -284,22 +259,40 @@ pub fn ipc_name_string(path: &Path) -> String {
 ///
 /// # Errors
 ///
-/// Returns `std::io::Error` if the ipc name or listener cannot be created
-pub fn create_listener(root_dir: &Path) -> std::io::Result<Listener> {
-    let name = ipc_name(root_dir)?;
-    let opts = ListenerOptions::new().name(name);
-    let listener = match opts.create_sync() {
-        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => Err(std::io::Error::new(
-            std::io::ErrorKind::AddrInUse,
-            format!(
-                "Could not start watch server because the socket file is occupied. Is there already a watcher placed on {}?",
-                root_dir.display()
-            ),
-        ))?,
-        x => x?,
-    };
-
-    Ok(listener)
+/// Returns `std::io::Error` if the listener cannot be created.
+pub fn create_listener(root_dir: &Path) -> std::io::Result<IpcListener> {
+    #[cfg(not(target_os = "windows"))]
+    {
+        let sock_path = ipc_socket_path(root_dir);
+        let name = ipc_name(&sock_path)?;
+        let opts = ListenerOptions::new().name(name);
+        match opts.create_sync() {
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => Err(std::io::Error::new(
+                std::io::ErrorKind::AddrInUse,
+                format!(
+                    "Could not start watch server because the socket file is occupied. \
+                     Is there already a watcher placed on {}?",
+                    root_dir.display()
+                ),
+            )),
+            x => Ok(x?),
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let sock_path = ipc_socket_path(root_dir);
+        match uds_windows::UnixListener::bind(&sock_path) {
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => Err(std::io::Error::new(
+                std::io::ErrorKind::AddrInUse,
+                format!(
+                    "Could not start watch server because the socket file is occupied. \
+                     Is there already a watcher placed on {}?",
+                    root_dir.display()
+                ),
+            )),
+            x => Ok(x?),
+        }
+    }
 }
 
 /// Attempts to acquire `mutex` without blocking.

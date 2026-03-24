@@ -142,6 +142,7 @@ git st  0.07s user 0.21s system 104% cpu 0.264 total
 be run from the top-level of the repository.
 - On Linux, each watch server consumes inotify watches. For very large repositories or many concurrent servers, you may
 need to increase the system limit (e.g. `sudo sysctl fs.inotify.max_user_watches=<value>`).
+- On Windows, AF_UNIX sockets are used for IPC, which requires Windows 10 version 1809 (October 2018 Update) or Windows Server 2019 or later.
 
 #### Future Improvements
 

@@ -9,14 +9,13 @@ use std::{
 };
 
 use git2::Repository;
-use interprocess::local_socket::{Stream, traits::Stream as _};
 use thiserror::Error;
 
 use crate::{
     StatusSummary,
     connection::{
         BINCODE_CFG, ClientMessage, ClientRequest, ServerMessage, client::server_not_started,
-        ipc_name, read_full_message, write_full_message,
+        ipc_connect, ipc_socket_path, read_full_message, write_full_message,
     },
     git::parse_gitmodules,
     status::compute_local_statuses,
@@ -131,11 +130,11 @@ fn try_get_statuses(
     timeout: Duration,
 ) -> Option<(Vec<(String, StatusSummary)>, u32)> {
     let deadline = Instant::now() + timeout;
-    let name = ipc_name(root_path).ok()?;
+    let sock_path = ipc_socket_path(root_path);
 
     let mut spawned = false;
     let conn = loop {
-        match Stream::connect(name.clone()) {
+        match ipc_connect(&sock_path) {
             Ok(conn) => break conn,
             Err(e) if server_not_started(&e) => {
                 if !spawned {

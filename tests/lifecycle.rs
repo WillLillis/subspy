@@ -7,7 +7,7 @@ use subspy::{
     StatusSummary,
     connection::{
         BINCODE_CFG, ClientMessage, ClientRequest, IPC_VERSION, ServerMessage,
-        client::request_reindex, ipc_name, write_full_message,
+        client::request_reindex, ipc_connect, ipc_socket_path, write_full_message,
     },
 };
 
@@ -56,14 +56,12 @@ fn reindex_replace_watchers_preserves_status(_run: u32) {
 
 #[apply(common::repeat)]
 fn version_mismatch_returns_error_and_server_stays_alive(_run: u32) {
-    use interprocess::local_socket::{Stream, traits::Stream as _};
-
     let harness = common::HarnessBuilder::new().submodule("sub_a").build();
     harness.assert_all_clean();
 
     // Send a request with a wrong version
-    let name = ipc_name(harness.root_path()).unwrap();
-    let conn = Stream::connect(name).unwrap();
+    let sock_path = ipc_socket_path(harness.root_path());
+    let conn = ipc_connect(&sock_path).unwrap();
     let mut conn = BufReader::new(conn);
     let bad_request = ClientRequest {
         version: IPC_VERSION + 1,
