@@ -15,7 +15,8 @@ use std::{
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use git2::Repository;
-use interprocess::local_socket::{Stream, traits::ListenerExt as _};
+#[cfg(not(target_os = "windows"))]
+use interprocess::local_socket::traits::ListenerExt as _;
 use log::{error, info, trace};
 use notify::{
     Event, EventKind, Watcher,
@@ -25,7 +26,7 @@ use notify::{
 use crate::{
     DOT_GIT, DOT_GITMODULES, StatusSummary,
     connection::{
-        BINCODE_CFG, DebugState, ServerMessage, create_listener, ipc_name_string,
+        BINCODE_CFG, DebugState, IpcStream, ServerMessage, create_listener, ipc_socket_path,
         write_full_message,
     },
     create_progress_bar,
@@ -168,7 +169,7 @@ enum HandleEventsExit {
     /// A reindex was requested by a client
     ReindexRequest { replace_watchers: bool },
     /// A shutdown was requested by a client
-    Shutdown { conn: BufReader<Stream> },
+    Shutdown { conn: BufReader<IpcStream> },
     /// A filesystem watcher at `index` reported an error
     WatcherError { index: usize },
 }
@@ -176,8 +177,8 @@ enum HandleEventsExit {
 /// Control messages sent from the listener thread to the main event loop
 pub(super) enum ControlMessage {
     Reindex { replace_watchers: bool },
-    Shutdown { conn: BufReader<Stream> },
-    Debug { conn: BufReader<Stream> },
+    Shutdown { conn: BufReader<IpcStream> },
+    Debug { conn: BufReader<IpcStream> },
 }
 
 /// State of an in-flight rayon task for a status reindex.
@@ -724,7 +725,7 @@ impl WatchServer {
             skip_set,
             root_rebasing: self.root_rebasing,
             root_path: self.root_path.display().to_string(),
-            socket_name: ipc_name_string(&self.root_path),
+            socket_name: ipc_socket_path(&self.root_path),
             submodule_statuses,
             in_flight: in_flight_tasks,
             progress_queues,
@@ -733,7 +734,7 @@ impl WatchServer {
     }
 
     /// Sends a shutdown acknowledgment to the client over the IPC connection.
-    fn signal_shutdown(mut conn: BufReader<Stream>) {
+    fn signal_shutdown(mut conn: BufReader<IpcStream>) {
         let mut buf = [0; 4]; // unit variant: 4 byte variant index (fixint)
         match bincode::encode_into_slice(ServerMessage::ShutdownAck, &mut buf, BINCODE_CFG) {
             Ok(_) => {
@@ -1257,7 +1258,7 @@ impl WatchServer {
     #[cold]
     fn handle_debug_request(
         &self,
-        conn: &mut BufReader<Stream>,
+        conn: &mut BufReader<IpcStream>,
         in_flight: &Arc<(Mutex<InFlightTracker>, Condvar)>,
     ) {
         let state = self.gather_debug_state(in_flight);

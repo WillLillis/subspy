@@ -6,13 +6,12 @@ use std::{
 };
 
 use git2::{Repository, Signature};
-use interprocess::local_socket::{Stream, traits::Stream as _};
 use subspy::{
     StatusSummary,
     connection::watch_server::watch,
     connection::{
         client::{recv_status_response, request_reindex, request_shutdown, send_status_request},
-        ipc_name,
+        ipc_connect, ipc_socket_path,
     },
 };
 use tempfile::TempDir;
@@ -395,12 +394,12 @@ impl TestHarness {
     fn wait_for_server_ready(&self) {
         let start = Instant::now();
         let timeout = Duration::from_secs(60);
-        // First, poll with raw Stream::connect to detect when the server is
+        // First, poll with raw ipc_connect to detect when the server is
         // listening. This avoids triggering connect_to_server's auto-start
         // behavior (which would spawn a second daemon process).
+        let sock_path = ipc_socket_path(&self.root_path);
         loop {
-            let name = ipc_name(&self.root_path).unwrap();
-            if Stream::connect(name).is_ok() {
+            if ipc_connect(&sock_path).is_ok() {
                 // Server is listening. Do a full status request to
                 // wait for initial indexing to complete.
                 let mut conn = send_status_request(&self.root_path).unwrap();

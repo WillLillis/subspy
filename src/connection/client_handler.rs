@@ -8,8 +8,8 @@ use std::{
     sync::{Arc, MutexGuard},
 };
 
+use super::IpcStream;
 use bincode::{BorrowDecode, Encode};
-use interprocess::local_socket::Stream;
 use log::{error, info};
 
 use crate::{
@@ -76,7 +76,7 @@ pub(super) fn broadcast_progress(
     reason = "owned values required for 'static std::thread::spawn closure"
 )]
 pub(super) fn handle_client_connection(
-    conn: Stream,
+    conn: IpcStream,
     control_tx: crossbeam_channel::Sender<ControlMessage>,
     statuses: Arc<StatusMap>,
     progress: Arc<ProgressMap>,
@@ -90,7 +90,7 @@ pub(super) fn handle_client_connection(
 // NOTE: The logic in this function is kept separate from `handle_client_connection` purely to
 // preserve `?` ergonomics.
 fn dispatch_client_message(
-    conn: Stream,
+    conn: IpcStream,
     control_tx: &crossbeam_channel::Sender<ControlMessage>,
     statuses: &StatusMap,
     progress: &ProgressMap,
@@ -163,7 +163,7 @@ fn dispatch_client_message(
 
 /// Handles a client's request for submodule statuses.
 fn handle_status_request(
-    mut conn: BufReader<Stream>,
+    mut conn: BufReader<IpcStream>,
     client_pid: u32,
     statuses: &StatusMap,
     progress: &ProgressMap,
@@ -206,7 +206,7 @@ fn handle_status_request(
 /// been sent to the main event loop via the control channel; this function handles sending
 /// progress updates back to the client over the IPC connection.
 fn handle_reindex_request(
-    mut conn: BufReader<Stream>,
+    mut conn: BufReader<IpcStream>,
     client_pid: u32,
     progress: &ProgressMap,
     subscribers: &ProgressSubscribers,
@@ -236,7 +236,7 @@ fn handle_reindex_request(
 ///
 /// Returns `Err` if `bincode` encoding or writing to `conn` fails
 fn try_send_progress_update(
-    conn: &mut BufReader<Stream>,
+    conn: &mut BufReader<IpcStream>,
     client_pid: u32,
     progress: &ProgressMap,
 ) -> WatchResult<bool> {
@@ -264,7 +264,7 @@ fn try_send_progress_update(
 /// (because it is currently locked by an indexing operation in the main loop), an attempt
 /// is made to send a progress update to the client.
 fn get_status_guard_with_progress<'a>(
-    conn: &mut BufReader<Stream>,
+    conn: &mut BufReader<IpcStream>,
     client_pid: u32,
     statuses: &'a StatusMap,
     progress: &ProgressMap,
