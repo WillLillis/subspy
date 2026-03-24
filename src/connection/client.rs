@@ -236,7 +236,7 @@ pub fn recv_status_response(
     let mut buffer = Vec::with_capacity(4096); // empirically ~2 KiB on a test repo
     // TODO: This would be better as a `try` block if that's ever stabilized
     let result = loop {
-        if let Err(e) = read_full_message(conn, &mut buffer) {
+        if let Err(e) = read_full_message(conn, &mut buffer, None) {
             break Err(e.into());
         }
 
@@ -297,7 +297,7 @@ pub fn request_debug(root_path: &Path) -> DebugResult<DebugState> {
     write_full_message(&mut conn, &msg[..msg_len])?;
 
     let mut buffer = Vec::with_capacity(1024);
-    read_full_message(&mut conn, &mut buffer)?;
+    read_full_message(&mut conn, &mut buffer, None)?;
     let (resp, _): (ServerMessage, usize) =
         bincode::borrow_decode_from_slice(&buffer, BINCODE_CFG)?;
 
