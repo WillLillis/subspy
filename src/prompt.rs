@@ -151,8 +151,6 @@ fn try_get_statuses(
         }
     };
 
-    let remaining = deadline.saturating_duration_since(Instant::now());
-    conn.set_recv_timeout(Some(remaining)).ok()?;
     let mut conn = BufReader::new(conn);
 
     let req = ClientRequest::new(ClientMessage::Status(std::process::id()));
@@ -162,7 +160,8 @@ fn try_get_statuses(
 
     let mut buffer = Vec::with_capacity(4096);
     loop {
-        read_full_message(&mut conn, &mut buffer).ok()?;
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        read_full_message(&mut conn, &mut buffer, Some(remaining)).ok()?;
         let (resp_msg, _): (ServerMessage, usize) =
             bincode::borrow_decode_from_slice(&buffer, BINCODE_CFG).ok()?;
         match resp_msg {

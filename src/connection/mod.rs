@@ -11,7 +11,7 @@ use std::{
 use bincode::{BorrowDecode, Encode};
 use interprocess::local_socket::{
     GenericFilePath, GenericNamespaced, Listener, ListenerOptions, Name, NameType as _, Stream,
-    ToFsName as _, ToNsName as _,
+    ToFsName as _, ToNsName as _, traits::Stream as _,
 };
 use rustc_hash::FxHasher;
 use thiserror::Error;
@@ -130,24 +130,125 @@ pub fn write_full_message(conn: &mut BufReader<Stream>, msg: &[u8]) -> std::io::
 
 /// Reads from `conn` into `buffer` expecting the message length as a LE u32 first.
 ///
+/// When `timeout` is `Some`, reads will time out after the given duration.
+/// On Unix, this uses the socket's receive timeout. On Windows, the stream
+/// is temporarily set to nonblocking mode and reads poll on [`WouldBlock`].
+/// When `timeout` is `None`, reads block normally.
+///
+/// On normal return, the socket's receive timeout is cleared (Unix) or the
+/// stream is set to blocking mode (Windows).
+///
+/// [`WouldBlock`]: std::io::ErrorKind::WouldBlock
+///
 /// # Errors
 ///
-/// Returns `std::io::Error` if reading fails
+/// Returns `std::io::Error` if reading fails or the timeout elapses.
 pub fn read_full_message(
     conn: &mut BufReader<Stream>,
     buffer: &mut Vec<u8>,
+    timeout: Option<Duration>,
 ) -> std::io::Result<()> {
     buffer.clear();
 
+    #[cfg(not(target_os = "windows"))]
+    if let Some(duration) = timeout {
+        conn.get_ref().set_recv_timeout(Some(duration))?;
+    }
+    #[cfg(target_os = "windows")]
+    if timeout.is_some() {
+        conn.get_ref().set_nonblocking(true)?;
+    }
+
+    let read_result = read_full_message_inner(
+        conn,
+        buffer,
+        #[cfg(target_os = "windows")]
+        timeout,
+    );
+
+    #[cfg(not(target_os = "windows"))]
+    if timeout.is_some() {
+        let _ = conn.get_ref().set_recv_timeout(None);
+    }
+    #[cfg(target_os = "windows")]
+    if timeout.is_some() {
+        let _ = conn.get_ref().set_nonblocking(false);
+    }
+
+    read_result
+}
+
+fn read_full_message_inner(
+    conn: &mut BufReader<Stream>,
+    buffer: &mut Vec<u8>,
+    #[cfg(target_os = "windows")] timeout: Option<Duration>,
+) -> std::io::Result<()> {
     let msg_len = {
         let mut len_buf = [0u8; 4];
-        conn.read_exact(&mut len_buf)?;
+        read_exact_impl(
+            conn,
+            &mut len_buf,
+            #[cfg(target_os = "windows")]
+            timeout,
+        )?;
         u32::from_le_bytes(len_buf) as usize
     };
 
     buffer.resize(msg_len, 0);
-    conn.read_exact(buffer)?;
+    read_exact_impl(
+        conn,
+        buffer,
+        #[cfg(target_os = "windows")]
+        timeout,
+    )?;
 
+    Ok(())
+}
+
+/// - On Unix, delegates to `read_exact` (the OS socket timeout handles deadlines).
+///   The timeout isn't passed in this implementation, as the `set_recv_timeout` has been
+///   set with the corresponding timeout in the caller.
+///
+/// - On Windows, polls on `WouldBlock` with a deadline computed from `timeout`.
+#[cfg(not(target_os = "windows"))]
+fn read_exact_impl(conn: &mut BufReader<Stream>, buf: &mut [u8]) -> std::io::Result<()> {
+    conn.read_exact(buf)
+}
+
+/// On Unix, delegates to `read_exact` (the OS socket timeout handles deadlines).
+/// On Windows, polls on `WouldBlock` with a deadline computed from `timeout`.
+#[cfg(target_os = "windows")]
+fn read_exact_impl(
+    conn: &mut BufReader<Stream>,
+    buf: &mut [u8],
+    timeout: Option<Duration>,
+) -> std::io::Result<()> {
+    let Some(timeout) = timeout else {
+        return conn.read_exact(buf);
+    };
+    let deadline = Instant::now() + timeout;
+    let mut filled = 0;
+    while filled < buf.len() {
+        if Instant::now() >= deadline {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "read timed out",
+            ));
+        }
+        match conn.read(&mut buf[filled..]) {
+            Ok(0) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "connection closed before message was fully read",
+                ));
+            }
+            Ok(n) => filled += n,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::yield_now();
+            }
+            Err(e) => return Err(e),
+        }
+    }
     Ok(())
 }
 
