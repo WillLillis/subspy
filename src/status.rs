@@ -58,6 +58,7 @@ fn unstaged_header(rm_in_workdir: bool, has_submod_changes: bool) -> String {
     )
 }
 
+#[derive(Debug, PartialEq, Eq)]
 struct RebaseInfo {
     onto_short: String,
     head_name: String,
@@ -265,16 +266,134 @@ fn print_unmerged_paths(repo: &Repository) -> StatusResult<bool> {
     Ok(true)
 }
 
-fn print_normal_header(repo: &Repository) -> StatusResult<()> {
-    println!("{}", current_branch_display(repo)?);
-    if let Some((status_line, hint)) = get_upstream_status(repo)? {
-        println!("{status_line}");
-        if !hint.is_empty() {
-            println!("  {hint}");
-        }
-        println!();
+/// The detected repository state, used to print the appropriate header.
+#[derive(Debug, PartialEq, Eq)]
+enum HeaderState {
+    Rebase(RebaseInfo),
+    CherryPick {
+        short_oid: String,
+        has_conflicts: bool,
+    },
+    Merge {
+        has_conflicts: bool,
+    },
+    Revert {
+        short_oid: String,
+        has_conflicts: bool,
+    },
+    Bisect,
+    Normal {
+        branch_display: String,
+        upstream: Option<(String, &'static str)>,
+    },
+}
+
+/// Reads a `*_HEAD` file (e.g. `CHERRY_PICK_HEAD`, `REVERT_HEAD`) and returns
+/// the first 7 characters of the OID, or the full content if shorter.
+fn read_short_oid(repo: &Repository, filename: &str) -> String {
+    let path = repo.path().join(filename);
+    let oid = fs::read_to_string(path).unwrap_or_default();
+    let trimmed = oid.trim();
+    trimmed.get(..7).unwrap_or(trimmed).to_string()
+}
+
+fn get_header_state(repo: &Repository) -> StatusResult<HeaderState> {
+    if let Some(info) = get_rebase_info(repo)? {
+        return Ok(HeaderState::Rebase(info));
     }
+
+    let branch_display = current_branch_display(repo)?;
+    let has_conflicts = repo.index()?.has_conflicts();
+
+    match repo.state() {
+        git2::RepositoryState::CherryPick | git2::RepositoryState::CherryPickSequence => {
+            Ok(HeaderState::CherryPick {
+                short_oid: read_short_oid(repo, "CHERRY_PICK_HEAD"),
+                has_conflicts,
+            })
+        }
+        git2::RepositoryState::Merge => Ok(HeaderState::Merge { has_conflicts }),
+        git2::RepositoryState::Revert | git2::RepositoryState::RevertSequence => {
+            Ok(HeaderState::Revert {
+                short_oid: read_short_oid(repo, "REVERT_HEAD"),
+                has_conflicts,
+            })
+        }
+        git2::RepositoryState::Bisect => Ok(HeaderState::Bisect),
+        _ => Ok(HeaderState::Normal {
+            branch_display,
+            upstream: get_upstream_status(repo)?,
+        }),
+    }
+}
+
+fn print_header(repo: &Repository) -> StatusResult<()> {
+    let state = get_header_state(repo)?;
+    print_header_state(&state);
     Ok(())
+}
+
+fn print_header_state(state: &HeaderState) {
+    match state {
+        HeaderState::Rebase(info) => print_rebase_header(info),
+        HeaderState::CherryPick {
+            short_oid,
+            has_conflicts,
+        } => {
+            println!("You are currently cherry-picking commit {short_oid}.");
+            if *has_conflicts {
+                println!("  (fix conflicts and run \"git cherry-pick --continue\")");
+            } else {
+                println!("  (all conflicts fixed: run \"git cherry-pick --continue\")");
+            }
+            println!("  (use \"git cherry-pick --skip\" to skip this patch)");
+            println!("  (use \"git cherry-pick --abort\" to cancel the cherry-pick operation)");
+            println!();
+        }
+        HeaderState::Merge { has_conflicts } => {
+            if *has_conflicts {
+                println!("You have unmerged paths.");
+                println!("  (fix conflicts and run \"git commit\")");
+                println!("  (use \"git merge --abort\" to abort the merge)");
+            } else {
+                println!("All conflicts fixed but you are still merging.");
+                println!("  (use \"git commit\" to conclude merge)");
+            }
+            println!();
+        }
+        HeaderState::Revert {
+            short_oid,
+            has_conflicts,
+        } => {
+            println!("You are currently reverting commit {short_oid}.");
+            if *has_conflicts {
+                println!("  (fix conflicts and run \"git revert --continue\")");
+            } else {
+                println!("  (all conflicts fixed: run \"git revert --continue\")");
+            }
+            println!("  (use \"git revert --skip\" to skip this patch)");
+            println!("  (use \"git revert --abort\" to cancel the revert operation)");
+            println!();
+        }
+        HeaderState::Bisect => {
+            println!("You are currently bisecting.");
+            println!("  (use \"git bisect reset\" to get back to the original branch)");
+            println!();
+        }
+        HeaderState::Normal {
+            branch_display,
+            upstream,
+        } => {
+            println!("{branch_display}");
+            if let Some((status_line, hint)) = upstream {
+                println!("{status_line}");
+                if !hint.is_empty() {
+                    println!("  {hint}");
+                }
+                println!();
+            }
+        }
+    }
 }
 
 fn print_staged_changes(
@@ -591,19 +710,13 @@ fn display_status(
         && new_submodule_paths.is_empty()
         && deleted_submodule_paths.is_empty()
     {
-        match get_rebase_info(repo)? {
-            Some(ref info) => print_rebase_header(info),
-            None => print_normal_header(repo)?,
-        }
+        print_header(repo)?;
         println!("nothing to commit, working tree clean");
         print_lock_file_errors(submodule_statuses);
         return Ok(());
     }
 
-    match get_rebase_info(repo)? {
-        Some(ref info) => print_rebase_header(info),
-        None => print_normal_header(repo)?,
-    }
+    print_header(repo)?;
 
     let rm_in_workdir = non_submodule_statuses
         .iter()
@@ -795,4 +908,244 @@ pub fn compute_local_statuses(
         .collect();
 
     statuses
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn git(args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .args(["-c", "user.name=Test", "-c", "user.email=test@test.com"])
+            .args(args)
+            .output()
+            .expect("failed to run git");
+        assert!(
+            output.status.success(),
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    /// Creates a repo with an initial commit containing `file.txt`.
+    fn init_repo() -> (TempDir, Repository) {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().display().to_string();
+        git(&["-C", &root, "init"]);
+        std::fs::write(tmp.path().join("file.txt"), "initial\n").unwrap();
+        git(&["-C", &root, "add", "-A"]);
+        git(&["-C", &root, "commit", "-m", "initial"]);
+        let repo = Repository::open(tmp.path()).unwrap();
+        (tmp, repo)
+    }
+
+    /// Creates a diverged branch that conflicts on `file.txt`.
+    fn create_conflicting_branch(root: &str, root_path: &Path, branch: &str) {
+        git(&["-C", root, "checkout", "-b", branch]);
+        std::fs::write(root_path.join("file.txt"), format!("{branch} content\n")).unwrap();
+        git(&["-C", root, "add", "-A"]);
+        git(&["-C", root, "commit", "-m", &format!("{branch} commit")]);
+        git(&["-C", root, "checkout", "master"]);
+        std::fs::write(root_path.join("file.txt"), "master content\n").unwrap();
+        git(&["-C", root, "add", "-A"]);
+        git(&["-C", root, "commit", "-m", "master diverge"]);
+    }
+
+    #[test]
+    fn header_state_clean_repo() {
+        let (_tmp, repo) = init_repo();
+        let state = get_header_state(&repo).unwrap();
+        assert!(
+            matches!(state, HeaderState::Normal { .. }),
+            "expected Normal, got {state:?}"
+        );
+    }
+
+    #[test]
+    fn header_state_cherry_pick_with_conflict() {
+        let (tmp, _repo) = init_repo();
+        let root = tmp.path().display().to_string();
+        create_conflicting_branch(&root, tmp.path(), "pick-me");
+
+        // Cherry-pick the conflicting commit (will fail with conflict)
+        let output = std::process::Command::new("git")
+            .args(["-c", "user.name=Test", "-c", "user.email=test@test.com"])
+            .args(["-C", &root, "cherry-pick", "pick-me"])
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "expected cherry-pick to conflict");
+
+        // Re-open repo to pick up state changes
+        let repo = Repository::open(tmp.path()).unwrap();
+        let state = get_header_state(&repo).unwrap();
+        assert!(
+            matches!(
+                state,
+                HeaderState::CherryPick {
+                    has_conflicts: true,
+                    ..
+                }
+            ),
+            "expected CherryPick with conflicts, got {state:?}"
+        );
+        if let HeaderState::CherryPick { short_oid, .. } = &state {
+            assert_eq!(short_oid.len(), 7);
+        }
+    }
+
+    #[test]
+    fn header_state_merge_with_conflict() {
+        let (tmp, _repo) = init_repo();
+        let root = tmp.path().display().to_string();
+        create_conflicting_branch(&root, tmp.path(), "feature");
+
+        let output = std::process::Command::new("git")
+            .args(["-C", &root, "merge", "feature"])
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "expected merge to conflict");
+
+        let repo = Repository::open(tmp.path()).unwrap();
+        let state = get_header_state(&repo).unwrap();
+        assert!(
+            matches!(
+                state,
+                HeaderState::Merge {
+                    has_conflicts: true
+                }
+            ),
+            "expected Merge with conflicts, got {state:?}"
+        );
+    }
+
+    #[test]
+    fn header_state_revert_with_conflict() {
+        let (tmp, _repo) = init_repo();
+        let root = tmp.path().display().to_string();
+
+        // Commit A: change file.txt to "aaa"
+        std::fs::write(tmp.path().join("file.txt"), "aaa\n").unwrap();
+        git(&["-C", &root, "add", "-A"]);
+        git(&["-C", &root, "commit", "-m", "commit A"]);
+
+        // Commit B: change file.txt to "bbb"
+        std::fs::write(tmp.path().join("file.txt"), "bbb\n").unwrap();
+        git(&["-C", &root, "add", "-A"]);
+        git(&["-C", &root, "commit", "-m", "commit B"]);
+
+        // Revert commit A (changes "aaa" -> "initial"), but current is "bbb",
+        // so git can't apply the reverse patch cleanly.
+        let output = std::process::Command::new("git")
+            .args([
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@test.com",
+                "-C",
+                &root,
+                "revert",
+                "HEAD~1",
+                "--no-edit",
+            ])
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "expected revert to conflict");
+
+        let repo = Repository::open(tmp.path()).unwrap();
+        let state = get_header_state(&repo).unwrap();
+        assert!(
+            matches!(
+                state,
+                HeaderState::Revert {
+                    has_conflicts: true,
+                    ..
+                }
+            ),
+            "expected Revert with conflicts, got {state:?}"
+        );
+        if let HeaderState::Revert { short_oid, .. } = &state {
+            assert_eq!(short_oid.len(), 7);
+        }
+    }
+
+    #[test]
+    fn header_state_cherry_pick_conflicts_resolved() {
+        let (tmp, _repo) = init_repo();
+        let root = tmp.path().display().to_string();
+        create_conflicting_branch(&root, tmp.path(), "pick-me");
+
+        let output = std::process::Command::new("git")
+            .args(["-c", "user.name=Test", "-c", "user.email=test@test.com"])
+            .args(["-C", &root, "cherry-pick", "pick-me"])
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "expected cherry-pick to conflict");
+
+        // Resolve the conflict by accepting the incoming content and staging
+        std::fs::write(tmp.path().join("file.txt"), "resolved\n").unwrap();
+        git(&["-C", &root, "add", "file.txt"]);
+
+        let repo = Repository::open(tmp.path()).unwrap();
+        let state = get_header_state(&repo).unwrap();
+        assert!(
+            matches!(
+                state,
+                HeaderState::CherryPick {
+                    has_conflicts: false,
+                    ..
+                }
+            ),
+            "expected CherryPick without conflicts, got {state:?}"
+        );
+    }
+
+    #[test]
+    fn header_state_merge_conflicts_resolved() {
+        let (tmp, _repo) = init_repo();
+        let root = tmp.path().display().to_string();
+        create_conflicting_branch(&root, tmp.path(), "feature");
+
+        let output = std::process::Command::new("git")
+            .args(["-C", &root, "merge", "feature"])
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "expected merge to conflict");
+
+        // Resolve and stage
+        std::fs::write(tmp.path().join("file.txt"), "resolved\n").unwrap();
+        git(&["-C", &root, "add", "file.txt"]);
+
+        let repo = Repository::open(tmp.path()).unwrap();
+        let state = get_header_state(&repo).unwrap();
+        assert!(
+            matches!(
+                state,
+                HeaderState::Merge {
+                    has_conflicts: false
+                }
+            ),
+            "expected Merge without conflicts, got {state:?}"
+        );
+    }
+
+    #[test]
+    fn header_state_bisect() {
+        let (tmp, _repo) = init_repo();
+        let root = tmp.path().display().to_string();
+
+        // Add a second commit so we have a range to bisect
+        std::fs::write(tmp.path().join("file.txt"), "changed\n").unwrap();
+        git(&["-C", &root, "add", "-A"]);
+        git(&["-C", &root, "commit", "-m", "second"]);
+
+        git(&["-C", &root, "bisect", "start"]);
+        git(&["-C", &root, "bisect", "bad", "HEAD"]);
+        git(&["-C", &root, "bisect", "good", "HEAD~1"]);
+
+        let repo = Repository::open(tmp.path()).unwrap();
+        let state = get_header_state(&repo).unwrap();
+        assert_eq!(state, HeaderState::Bisect);
+    }
 }
