@@ -193,13 +193,35 @@ fn connect_to_server(root_path: &Path) -> StatusResult<BufReader<IpcStream>> {
     }
 }
 
+/// Returns `true` if the error indicates no server is listening.
+///
+/// Covers the common cases: no socket exists (`NotFound`), server not
+/// accepting (`ConnectionRefused`), and stale/dead sockets that produce
+/// `ConnectionReset` or `ConnectionAborted`. On Windows, `WSAEINVAL`
+/// (error 10022) from a stale `AF_UNIX` socket file is also treated as
+/// retryable.
 #[inline]
 #[must_use]
 pub fn server_not_started(e: &std::io::Error) -> bool {
-    matches!(
+    if matches!(
         e.kind(),
-        std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
-    )
+        std::io::ErrorKind::ConnectionRefused
+            | std::io::ErrorKind::NotFound
+            | std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::ConnectionAborted
+    ) {
+        return true;
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        const WSAEINVAL: i32 = 10022;
+        if e.raw_os_error() == Some(WSAEINVAL) {
+            return true;
+        }
+    }
+
+    false
 }
 
 /// Sends a status request to the watch server for `root_path`.
