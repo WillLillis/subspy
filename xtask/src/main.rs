@@ -1116,7 +1116,7 @@ fn main() {
 
     // Verify initial state is clean
     if let Err(e) = state.verify(false) {
-        dump_failure(&state, 0, &e);
+        dump_failure(&state, seed, args.submodules, 0, &e);
         wait_and_exit(pause_on_failure);
     }
     println!("[step 0] initial state verified clean");
@@ -1166,7 +1166,7 @@ fn main() {
                 }
             }
             Err(e) => {
-                dump_failure(&state, step, &e);
+                dump_failure(&state, seed, args.submodules, step, &e);
                 wait_and_exit(pause_on_failure);
             }
         }
@@ -1217,13 +1217,15 @@ fn wait_and_exit(pause: bool) -> ! {
     std::process::exit(1);
 }
 
-fn dump_failure(state: &FuzzerState, failed_step: u32, error: &str) {
+fn dump_failure(state: &FuzzerState, seed: u64, submodules: usize, failed_step: u32, error: &str) {
     eprintln!();
     eprintln!(
         "Repo path: {} (preserved for inspection)",
         state.harness.root_path().display()
     );
-    eprintln!("Reproduce: cargo xtask --seed <SEED> --steps {failed_step} --submodules <N>");
+    eprintln!(
+        "Reproduce: cargo xtask --seed {seed} --steps {failed_step} --submodules {submodules}"
+    );
     eprintln!();
     match request_debug(state.harness.root_path()) {
         Ok(debug_state) => eprintln!("Server debug state:\n{debug_state}"),
