@@ -933,7 +933,7 @@ pub fn compute_local_statuses(
 
     let lock_path = repo.path().join("index.lock");
     let submodules = {
-        let _lock = LockFileGuard::acquire(&lock_path, None)?;
+        let _lock = LockFileGuard::acquire(&lock_path)?;
         repo.submodules()?
     };
     let tl_repo = thread_local::ThreadLocal::new();
