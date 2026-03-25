@@ -282,6 +282,14 @@ enum HeaderState {
         has_conflicts: bool,
     },
     Bisect,
+    ApplyMailbox {
+        has_conflicts: bool,
+    },
+    /// Rebase using the apply backend (`git rebase --apply`), which uses
+    /// the `rebase-apply/` directory instead of `rebase-merge/`.
+    RebaseWithApplyBackend {
+        has_conflicts: bool,
+    },
     Normal {
         branch_display: String,
         upstream: Option<(String, &'static str)>,
@@ -302,6 +310,14 @@ fn get_header_state(repo: &Repository) -> StatusResult<HeaderState> {
         return Ok(HeaderState::Rebase(info));
     }
 
+    // `git rebase --apply` uses `rebase-apply/` instead of `rebase-merge/`.
+    // git2 reports this as `RepositoryState::Rebase`, which `get_rebase_info`
+    // doesn't handle since it only reads from `rebase-merge/`.
+    if repo.path().join("rebase-apply").join("rebasing").exists() {
+        let has_conflicts = repo.index()?.has_conflicts();
+        return Ok(HeaderState::RebaseWithApplyBackend { has_conflicts });
+    }
+
     let branch_display = current_branch_display(repo)?;
     let has_conflicts = repo.index()?.has_conflicts();
 
@@ -320,6 +336,16 @@ fn get_header_state(repo: &Repository) -> StatusResult<HeaderState> {
             })
         }
         git2::RepositoryState::Bisect => Ok(HeaderState::Bisect),
+        git2::RepositoryState::ApplyMailbox | git2::RepositoryState::ApplyMailboxOrRebase => {
+            // rebase-apply/rebasing exists for `git rebase --apply`,
+            // rebase-apply/applying exists for `git am`.
+            let rebase_apply = repo.path().join("rebase-apply");
+            if rebase_apply.join("rebasing").exists() {
+                Ok(HeaderState::RebaseWithApplyBackend { has_conflicts })
+            } else {
+                Ok(HeaderState::ApplyMailbox { has_conflicts })
+            }
+        }
         _ => Ok(HeaderState::Normal {
             branch_display,
             upstream: get_upstream_status(repo)?,
@@ -378,6 +404,28 @@ fn print_header_state(state: &HeaderState) {
         HeaderState::Bisect => {
             println!("You are currently bisecting.");
             println!("  (use \"git bisect reset\" to get back to the original branch)");
+            println!();
+        }
+        HeaderState::ApplyMailbox { has_conflicts } => {
+            println!("You are in the middle of an am session.");
+            if *has_conflicts {
+                println!("  (fix conflicts and then run \"git am --continue\")");
+            } else {
+                println!("  (all conflicts fixed: run \"git am --continue\")");
+            }
+            println!("  (use \"git am --skip\" to skip this patch)");
+            println!("  (use \"git am --abort\" to restore the original branch)");
+            println!();
+        }
+        HeaderState::RebaseWithApplyBackend { has_conflicts } => {
+            println!("You are currently rebasing.");
+            if *has_conflicts {
+                println!("  (fix conflicts and then run \"git rebase --continue\")");
+            } else {
+                println!("  (all conflicts fixed: run \"git rebase --continue\")");
+            }
+            println!("  (use \"git rebase --skip\" to skip this patch)");
+            println!("  (use \"git rebase --abort\" to check out the original branch)");
             println!();
         }
         HeaderState::Normal {
@@ -1147,5 +1195,76 @@ mod tests {
         let repo = Repository::open(tmp.path()).unwrap();
         let state = get_header_state(&repo).unwrap();
         assert_eq!(state, HeaderState::Bisect);
+    }
+
+    #[test]
+    fn header_state_git_am_with_conflict() {
+        let (tmp, _repo) = init_repo();
+        let root = tmp.path().display().to_string();
+        create_conflicting_branch(&root, tmp.path(), "patch-src");
+
+        // Generate a patch from the conflicting branch
+        let patch_output = std::process::Command::new("git")
+            .args(["-C", &root, "format-patch", "master..patch-src", "--stdout"])
+            .output()
+            .unwrap();
+        assert!(patch_output.status.success());
+        let patch_file = tmp.path().join("conflict.patch");
+        std::fs::write(&patch_file, &patch_output.stdout).unwrap();
+
+        // Apply the patch (will conflict with master's diverged file.txt)
+        let output = std::process::Command::new("git")
+            .args(["-C", &root, "am", &patch_file.display().to_string()])
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "expected git am to conflict");
+
+        let repo = Repository::open(tmp.path()).unwrap();
+        let state = get_header_state(&repo).unwrap();
+        // git am patch failures don't produce index conflicts - the patch
+        // simply fails to apply and the index stays clean.
+        assert!(
+            matches!(state, HeaderState::ApplyMailbox { .. }),
+            "expected ApplyMailbox, got {state:?}"
+        );
+    }
+
+    #[test]
+    fn header_state_rebase_apply_backend_with_conflict() {
+        let (tmp, _repo) = init_repo();
+        let root = tmp.path().display().to_string();
+        create_conflicting_branch(&root, tmp.path(), "rebase-src");
+
+        // Rebase master onto rebase-src using the apply backend
+        let output = std::process::Command::new("git")
+            .args([
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@test.com",
+                "-C",
+                &root,
+                "rebase",
+                "--apply",
+                "rebase-src",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            !output.status.success(),
+            "expected rebase --apply to conflict"
+        );
+
+        let repo = Repository::open(tmp.path()).unwrap();
+        let state = get_header_state(&repo).unwrap();
+        assert!(
+            matches!(
+                state,
+                HeaderState::RebaseWithApplyBackend {
+                    has_conflicts: true
+                }
+            ),
+            "expected RebaseWithApplyBackend with conflicts, got {state:?}"
+        );
     }
 }
