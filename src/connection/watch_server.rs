@@ -5,7 +5,10 @@ use std::{
     collections::{BTreeMap, VecDeque},
     io::BufReader,
     path::{Path, PathBuf},
-    sync::{Arc, Condvar, Mutex, MutexGuard},
+    sync::{
+        Arc, Condvar, Mutex, MutexGuard,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -28,7 +31,7 @@ use crate::{
     },
     create_progress_bar,
     git::parse_gitmodules,
-    watch::{CancelHandle, LockFileGuard, WatchResult, cancel_pair},
+    watch::{LockFileGuard, WatchResult},
 };
 
 use super::{
@@ -178,10 +181,10 @@ pub(super) enum ControlMessage {
     Debug { conn: BufReader<IpcStream> },
 }
 
-/// An in-flight rayon task for a submodule status read. Dropping the
-/// [`CancelHandle`] signals the task to stop.
+/// An in-flight rayon task for a submodule status read. Setting the cancel
+/// flag signals the task to stop.
 struct InFlightTask {
-    handle: CancelHandle,
+    cancel: Arc<AtomicBool>,
     /// When `true`, new events arrived while processing and the task should
     /// re-read status when done rather than completing.
     dirty: bool,
@@ -193,13 +196,13 @@ struct InFlightTracker {
     tasks: FxHashMap<usize, InFlightTask>,
 }
 
-/// Cancels all in-flight rayon tasks by dropping their [`CancelHandle`]s,
-/// then blocks until all tasks have completed.
+/// Signals cancellation to all in-flight rayon tasks, then blocks until
+/// they have all completed.
 fn wait_for_in_flight(state: &(Mutex<InFlightTracker>, Condvar)) {
     let (mutex, condvar) = state;
     let mut guard = mutex.lock().expect("InFlightTracker mutex poisoned");
-    for (_, task) in guard.tasks.drain() {
-        task.handle.cancel();
+    for task in guard.tasks.values() {
+        task.cancel.store(true, Ordering::Relaxed);
     }
     // Tasks remove themselves from the tracker as they exit; wait for stragglers
     // that haven't observed cancellation yet.
@@ -209,11 +212,11 @@ fn wait_for_in_flight(state: &(Mutex<InFlightTracker>, Condvar)) {
     drop(guard);
 }
 
-/// Cancels the in-flight rayon task for `index` by dropping its [`CancelHandle`].
+/// Signals cancellation to the in-flight rayon task for `index`, if one exists.
 fn cancel_submod_update(index: usize, state: &(Mutex<InFlightTracker>, Condvar)) {
-    let mut tracker = state.0.lock().expect("InFlightTracker mutex poisoned");
-    if let Some(task) = tracker.tasks.remove(&index) {
-        task.handle.cancel();
+    let tracker = state.0.lock().expect("InFlightTracker mutex poisoned");
+    if let Some(task) = tracker.tasks.get(&index) {
+        task.cancel.store(true, Ordering::Relaxed);
     }
 }
 
@@ -678,7 +681,13 @@ impl WatchServer {
                         .watchers
                         .get(*idx)
                         .map_or("(unknown)", |w| w.relative_path.as_str());
-                    let state_str = if state.dirty { "dirty" } else { "active" };
+                    let cancelled = state.cancel.load(Ordering::Relaxed);
+                    let state_str = match (state.dirty, cancelled) {
+                        (false, false) => "active",
+                        (false, true) => "active (cancelling)",
+                        (true, false) => "dirty",
+                        (true, true) => "dirty (cancelling)",
+                    };
                     (rel_path.to_owned(), state_str.to_owned())
                 })
                 .collect()
@@ -1072,11 +1081,11 @@ impl WatchServer {
             task.dirty = true;
             return;
         }
-        let (cancel_handle, cancel_token) = cancel_pair();
+        let cancel = Arc::new(AtomicBool::new(false));
         tracker.tasks.insert(
             index,
             InFlightTask {
-                handle: cancel_handle,
+                cancel: Arc::clone(&cancel),
                 dirty: false,
             },
         );
@@ -1142,7 +1151,7 @@ impl WatchServer {
             //    source path is reported.)
             let mut cleaned_up = false;
             loop {
-                if cancel_token.is_cancelled() {
+                if cancel.load(Ordering::Relaxed) {
                     break;
                 }
 
@@ -1164,7 +1173,7 @@ impl WatchServer {
                     match repo.submodule_status(&relative_path, git2::SubmoduleIgnore::None) {
                         Ok(st) => {
                             let submod_status: StatusSummary = st.into();
-                            if !cancel_token.is_cancelled() {
+                            if !cancel.load(Ordering::Relaxed) {
                                 let mut guard = statuses.lock().expect("StatusMap mutex poisoned");
                                 if let Some(entry) = guard.get_mut(relative_path.as_str()) {
                                     *entry = submod_status;
@@ -1175,7 +1184,7 @@ impl WatchServer {
                             true
                         }
                         Err(e) => {
-                            if !cancel_token.is_cancelled() {
+                            if !cancel.load(Ordering::Relaxed) {
                                 trace!(
                                     "Transient read failure for {relative_path}, \
                                      will retry if dirty -- {e}",
@@ -1188,7 +1197,7 @@ impl WatchServer {
                 // Handle pending_retries before acquiring the tracker lock.
                 // This preserves lock ordering (pending_retries->tracker),
                 // matching `try_spawn_submod_update` to avoid deadlocks.
-                if !read_ok && !cancel_token.is_cancelled() {
+                if !read_ok && !cancel.load(Ordering::Relaxed) {
                     pending_retries
                         .lock()
                         .expect("pending_retries mutex poisoned")

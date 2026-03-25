@@ -7,7 +7,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crossbeam_channel::TryRecvError;
 use log::{error, trace};
 use notify::{RecursiveMode, Watcher as _};
 use thiserror::Error;
@@ -55,49 +54,6 @@ impl LockFileError {
     #[must_use]
     pub const fn new(path: PathBuf, error: std::io::Error) -> Self {
         Self { error, path }
-    }
-}
-
-/// Creates a cancellation pair for cooperative task cancellation.
-///
-/// The [`CancelHandle`] is held by the canceller (e.g. the task tracker).
-/// The [`CancelToken`] is given to the cancellable task. Dropping the handle
-/// disconnects the internal channel, which the token detects instantly via
-/// [`CancelToken::is_cancelled`] or through `crossbeam_channel::Select`.
-#[must_use]
-pub fn cancel_pair() -> (CancelHandle, CancelToken) {
-    let (tx, rx) = crossbeam_channel::bounded(0);
-    (CancelHandle(tx), CancelToken(rx))
-}
-
-/// The canceller's end. Drop or call [`cancel`](Self::cancel) to signal
-/// cancellation. The inner sender is never used directly; its `Drop` impl
-/// disconnects the channel.
-pub struct CancelHandle(#[expect(dead_code)] crossbeam_channel::Sender<()>);
-
-impl CancelHandle {
-    /// Signals cancellation by disconnecting the channel.
-    pub fn cancel(self) {
-        // Dropping self disconnects the sender, which the CancelToken detects.
-    }
-}
-
-/// The cancellable task's end. Check [`is_cancelled`](Self::is_cancelled) or
-/// use [`receiver`](Self::receiver) in a `crossbeam_channel::Select` to
-/// detect cancellation without polling.
-pub struct CancelToken(crossbeam_channel::Receiver<()>);
-
-impl CancelToken {
-    /// Returns `true` if the corresponding [`CancelHandle`] has been dropped.
-    #[must_use]
-    pub fn is_cancelled(&self) -> bool {
-        matches!(self.0.try_recv(), Err(TryRecvError::Disconnected))
-    }
-
-    /// Returns the underlying receiver for use in `crossbeam_channel::Select`.
-    #[must_use]
-    pub const fn receiver(&self) -> &crossbeam_channel::Receiver<()> {
-        &self.0
     }
 }
 
