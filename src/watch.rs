@@ -1,5 +1,5 @@
-//! Daemon lifecycle: spawning the background watch server process,
-//! lock file management, and the top-level `watch` entry point.
+//! Daemon lifecycle: spawning the background watch server process
+//! and lock file management.
 
 use std::{
     fs,
@@ -11,7 +11,7 @@ use log::{error, trace};
 use notify::{RecursiveMode, Watcher as _};
 use thiserror::Error;
 
-use crate::connection::watch_server::{ServerWatcher, watch};
+use crate::connection::watch_server::ServerWatcher;
 
 pub type WatchResult<T> = Result<T, WatchError>;
 
@@ -168,15 +168,6 @@ impl Drop for LockFileGuard<'_> {
             );
         }
     }
-}
-
-/// Watches the repository at `path`
-///
-/// # Errors
-///
-/// Returns `Err` if watching fails.
-pub fn watch_project(path: &Path, display_progress: bool) -> WatchResult<()> {
-    watch(path, display_progress)
 }
 
 /// Spawns the watch server as a fully detached background process for `path`.

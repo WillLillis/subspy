@@ -8,13 +8,14 @@ use thiserror::Error;
 
 use crate::{
     DOT_GIT, DOT_GITMODULES, RepoKind,
+    connection::watch_server::watch,
     debug::{DebugError, debug},
     list::{ListError, list},
     prompt::{PromptError, prompt},
     reindex::{ReindexError, reindex},
     shutdown::{ShutdownError, shutdown},
     status::{StatusError, status},
-    watch::{WatchError, spawn_daemon, watch_project},
+    watch::{WatchError, spawn_daemon},
 };
 
 #[derive(Subcommand, Debug)]
@@ -371,10 +372,7 @@ impl Start {
         }
 
         if self.foreground {
-            Ok(watch_project(
-                true_path.as_path(),
-                std::io::stderr().is_terminal(),
-            )?)
+            Ok(watch(true_path.as_path(), std::io::stderr().is_terminal())?)
         } else {
             let level_str = self.log_level.map(|l| l.to_string());
             spawn_daemon(&true_path, level_str.as_deref()).map_err(WatchError::from)?;
