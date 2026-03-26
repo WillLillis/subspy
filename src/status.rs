@@ -750,7 +750,6 @@ fn display_status(
     {
         print_header(repo)?;
         println!("nothing to commit, working tree clean");
-        print_lock_file_errors(submodule_statuses);
         return Ok(());
     }
 
