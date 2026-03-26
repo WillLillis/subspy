@@ -241,15 +241,6 @@ impl TestHarness {
         self.assert_status_eventually("all submodules clean", |s| s.is_empty());
     }
 
-    /// Assert that `new_submodule_paths` returns exactly the given paths (order-sensitive).
-    pub fn assert_new_submodule_paths(&self, expected: &[&str]) {
-        let repo = Repository::open(&self.root_path).expect("Failed to open root repo");
-        let actual =
-            subspy::status::new_submodule_paths(&repo).expect("new_submodule_paths failed");
-        let expected: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
-        assert_eq!(actual, expected, "new_submodule_paths mismatch");
-    }
-
     /// Assert that `deleted_submodule_paths` returns exactly the given paths.
     pub fn assert_deleted_submodule_paths(&self, expected: &[&str]) {
         let repo = Repository::open(&self.root_path).expect("Failed to open root repo");

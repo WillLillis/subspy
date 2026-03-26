@@ -93,7 +93,7 @@ pub fn prompt(
         {
             dirty += 1;
         }
-        if status.contains(StatusSummary::STAGED) {
+        if status.contains(StatusSummary::STAGED) || status.contains(StatusSummary::STAGED_NEW) {
             staged += 1;
         }
         if status.contains(StatusSummary::NEW_COMMITS) {

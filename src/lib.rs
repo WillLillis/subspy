@@ -59,18 +59,20 @@ impl std::fmt::Debug for StatusSummary {
 bitflags! {
     /// Represents the status of a submodule
     impl StatusSummary: u32 {
-        const CLEAN             = 0b0000;
-        const MODIFIED_CONTENT  = 0b0001;
-        const UNTRACKED_CONTENT = 0b0010;
-        const NEW_COMMITS       = 0b0100;
-        const STAGED            = 0b1000;
+        const CLEAN             = 0b0000_0000;
+        const MODIFIED_CONTENT  = 0b0000_0001;
+        const UNTRACKED_CONTENT = 0b0000_0010;
+        const NEW_COMMITS       = 0b0000_0100;
+        const STAGED            = 0b0000_1000;
+        const STAGED_NEW        = 0b0001_0000;
         const LOCK_FAILURE      = 1 << 31;
     }
 }
 
-/// Formats the summary for the `status` command. `STAGED` is intentionally
-/// omitted here because the `status` display handles staging separately;
-/// see [`list::status_text`] for a variant that includes it.
+/// Formats the summary for the `status` command. `STAGED` and `STAGED_NEW`
+/// are intentionally omitted here because the `status` display handles
+/// staging separately; see [`list::status_text`] for a variant that
+/// includes them.
 impl std::fmt::Display for StatusSummary {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if self.eq(&Self::CLEAN) {
@@ -129,7 +131,9 @@ impl From<git2::SubmoduleStatus> for StatusSummary {
             submod_status |= Self::UNTRACKED_CONTENT;
         }
 
-        if value.contains(
+        if value.contains(git2::SubmoduleStatus::INDEX_ADDED) {
+            submod_status |= Self::STAGED_NEW;
+        } else if value.contains(
             git2::SubmoduleStatus::IN_HEAD
                 | git2::SubmoduleStatus::IN_INDEX
                 | git2::SubmoduleStatus::INDEX_MODIFIED,
@@ -237,6 +241,13 @@ mod tests {
                 | git2::SubmoduleStatus::INDEX_MODIFIED,
         );
         assert!(s.contains(StatusSummary::STAGED));
+    }
+
+    #[test]
+    fn from_submodule_status_staged_new() {
+        let s = StatusSummary::from(git2::SubmoduleStatus::INDEX_ADDED);
+        assert!(s.contains(StatusSummary::STAGED_NEW));
+        assert!(!s.contains(StatusSummary::STAGED));
     }
 
     #[test]

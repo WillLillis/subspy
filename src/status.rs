@@ -447,7 +447,6 @@ fn print_header_state(state: &HeaderState) {
 fn print_staged_changes(
     non_submod: &Statuses<'_>,
     submodule_statuses: &[(String, StatusSummary)],
-    new_submodule_paths: &[String],
     deleted_submodule_paths: &[String],
 ) -> bool {
     let mut header = false;
@@ -491,17 +490,6 @@ fn print_staged_changes(
         }
     }
 
-    for path in new_submodule_paths {
-        if !header {
-            println!("{STAGED_HEADER}");
-            header = true;
-        }
-        println!(
-            "{}",
-            paint(Some(AnsiColor::Green), &format!("\tnew file:   {path}"))
-        );
-    }
-
     for path in deleted_submodule_paths {
         if !header {
             println!("{STAGED_HEADER}");
@@ -513,19 +501,22 @@ fn print_staged_changes(
         );
     }
 
-    for (submod_path, _) in submodule_statuses.iter().filter(|(_, st)| {
-        st.contains(StatusSummary::STAGED) && !st.contains(StatusSummary::LOCK_FAILURE)
+    for (submod_path, st) in submodule_statuses.iter().filter(|(_, st)| {
+        (st.contains(StatusSummary::STAGED) || st.contains(StatusSummary::STAGED_NEW))
+            && !st.contains(StatusSummary::LOCK_FAILURE)
     }) {
         if !header {
             println!("{STAGED_HEADER}");
             header = true;
         }
+        let label = if st.contains(StatusSummary::STAGED_NEW) {
+            "new file:   "
+        } else {
+            "modified:   "
+        };
         println!(
             "{}",
-            paint(
-                Some(AnsiColor::Green),
-                &format!("\tmodified:   {submod_path}")
-            )
+            paint(Some(AnsiColor::Green), &format!("\t{label}{submod_path}"))
         );
     }
 
@@ -540,9 +531,11 @@ fn print_unstaged_changes(
     submodule_statuses: &[(String, StatusSummary)],
     rm_in_workdir: bool,
 ) -> bool {
-    let has_submod_changes = submodule_statuses
-        .iter()
-        .any(|(_, st)| !st.eq(&StatusSummary::STAGED) && !st.contains(StatusSummary::LOCK_FAILURE));
+    let has_submod_changes = submodule_statuses.iter().any(|(_, st)| {
+        *st != StatusSummary::STAGED
+            && *st != StatusSummary::STAGED_NEW
+            && !st.contains(StatusSummary::LOCK_FAILURE)
+    });
     let mut header = false;
 
     for entry in non_submod.iter() {
@@ -585,7 +578,9 @@ fn print_unstaged_changes(
     }
 
     for (submod_path, submod_status) in submodule_statuses.iter().filter(|(_, st)| {
-        !st.eq(&StatusSummary::STAGED) && !st.contains(StatusSummary::LOCK_FAILURE)
+        *st != StatusSummary::STAGED
+            && *st != StatusSummary::STAGED_NEW
+            && !st.contains(StatusSummary::LOCK_FAILURE)
     }) {
         if !header {
             println!("{}", unstaged_header(rm_in_workdir, true));
@@ -749,13 +744,11 @@ fn display_status(
     repo: &Repository,
     non_submodule_statuses: &Statuses<'_>,
     submodule_statuses: &[(String, StatusSummary)],
-    new_submodule_paths: &[String],
     deleted_submodule_paths: &[String],
 ) -> StatusResult<()> {
     // Fast path: nothing dirty
     if non_submodule_statuses.is_empty()
         && submodule_statuses.is_empty()
-        && new_submodule_paths.is_empty()
         && deleted_submodule_paths.is_empty()
     {
         print_header(repo)?;
@@ -773,7 +766,6 @@ fn display_status(
     let changes_in_index = print_staged_changes(
         non_submodule_statuses,
         submodule_statuses,
-        new_submodule_paths,
         deleted_submodule_paths,
     );
     let has_conflicts = print_unmerged_paths(repo)?;
@@ -792,44 +784,10 @@ fn display_status(
     Ok(())
 }
 
-/// Returns the relative paths of newly-added submodules.
-///
-/// These are submodules whose gitlink has been staged via `git submodule add`
-/// but not yet committed (present in the index but absent from HEAD).
-///
-/// # Errors
-///
-/// Returns `Err` if the repository index cannot be read.
-pub fn new_submodule_paths(repo: &Repository) -> StatusResult<Vec<String>> {
-    let head_tree = repo.head().ok().and_then(|h| h.peel_to_tree().ok());
-    let index = repo.index()?;
-    let paths = index
-        .iter()
-        .filter(|entry| {
-            // `FileMode::Commit` is the gitlink mode used for submodule entries. Note that
-            // `FileMode::Commit as u32` gives the enum discriminant (6), not the mode value,
-            // so the `From` impl must be used.
-            entry.mode == u32::from(git2::FileMode::Commit)
-                && head_tree.as_ref().is_none_or(|t| {
-                    std::str::from_utf8(&entry.path).is_ok_and(|p| {
-                        matches!(
-                            t.get_path(Path::new(p)),
-                            // New submodules are staged but not in the HEAD commit yet, so looking
-                            // them up should return `NotFound`.
-                            Err(e) if e.code() == git2::ErrorCode::NotFound
-                        )
-                    })
-                })
-        })
-        .filter_map(|entry| String::from_utf8(entry.path).ok())
-        .collect();
-    Ok(paths)
-}
-
 /// Returns the relative paths of submodules staged for deletion.
 ///
 /// These are submodules whose gitlink is in the HEAD commit but has been removed
-/// from the index (via `git rm`), the symmetric counterpart to [`new_submodule_paths`].
+/// from the index (via `git rm`).
 ///
 /// # Errors
 ///
@@ -895,7 +853,6 @@ pub fn status(
     }
 
     let non_submodule_statuses = repo.statuses(Some(&mut opts))?;
-    let new_submodule_paths = new_submodule_paths(&repo)?;
     let deleted_submodule_paths = deleted_submodule_paths(&repo)?;
 
     let submodule_statuses = match conn {
@@ -908,7 +865,6 @@ pub fn status(
         &repo,
         &non_submodule_statuses,
         &submodule_statuses,
-        &new_submodule_paths,
         &deleted_submodule_paths,
     )?;
 

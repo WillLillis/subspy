@@ -92,7 +92,9 @@ fn status_text(status: StatusSummary) -> String {
     if status.contains(StatusSummary::NEW_COMMITS) {
         parts.push("new commits");
     }
-    if status.contains(StatusSummary::STAGED) {
+    if status.contains(StatusSummary::STAGED_NEW) {
+        parts.push("staged (new)");
+    } else if status.contains(StatusSummary::STAGED) {
         parts.push("staged");
     }
     parts.join(", ")
