@@ -107,6 +107,10 @@ struct WatchServer {
     // in hot loops
     /// Root path to the repository being watched
     root_path: PathBuf,
+    /// Shared handle to `root_path` for rayon tasks. Duplicated as an `Arc`
+    /// so that `try_spawn_submod_update` can move a cheap refcount bump into
+    /// `'static` closures instead of cloning the `PathBuf` on every spawn.
+    root_path_shared: Arc<Path>,
     /// `<root_path>/.git/index`
     root_index_path: PathBuf,
     /// `<root_path>/.git/HEAD`
@@ -349,6 +353,7 @@ impl WatchServer {
             skip_set: FxHashSet::default(),
             root_rebasing: false,
             root_path: root_path.to_path_buf(),
+            root_path_shared: Arc::from(root_path),
             root_index_path,
             root_head_path,
             root_gitmodules_path,
@@ -1096,7 +1101,8 @@ impl WatchServer {
 
         let in_flight = Arc::clone(in_flight);
         let statuses = Arc::clone(&self.submod_statuses);
-        let root_path = self.root_path.clone();
+        // cloning the `Arc` here should be cheaper than the `PathBuf` in `self.root_path`.
+        let root_path = Arc::clone(&self.root_path_shared);
         let pending_retries = Arc::clone(pending_lock_retries);
 
         rayon::spawn(move || {
