@@ -2,7 +2,7 @@
 //! and reading responses.
 
 use std::{
-    io::{BufReader, Read},
+    io::BufReader,
     path::Path,
     time::{Duration, Instant},
 };
@@ -15,7 +15,7 @@ use crate::{
     connection::{
         BINCODE_CFG, ClientMessage, ClientRequest, DebugState, IPC_VERSION, IpcResult, IpcStream,
         ServerMessage, VersionMismatchError, ipc_connect, ipc_socket_path, read_full_message,
-        write_full_message,
+        read_full_message_fixed, write_full_message,
     },
     create_progress_bar,
     watch::spawn_daemon,
@@ -47,21 +47,13 @@ pub fn request_reindex(
     let progress_bar =
         display_progress.then(|| create_progress_bar(0, "Reindexing in progress..."));
     // Indexing { u32, u32 } = 12 bytes fixint, so use a stack buffer.
-    let mut len_buf = [0u8; 4];
     let mut buffer = [0u8; 12];
     // TODO: This would be better as a `try` block if that's ever stabilized
     let result = loop {
-        if let Err(e) = conn.read_exact(&mut len_buf) {
-            break Err(e.into());
-        }
-        let msg_len = u32::from_le_bytes(len_buf) as usize;
-        debug_assert!(
-            msg_len <= buffer.len(),
-            "Server message length {msg_len} exceeds buffer size"
-        );
-        if let Err(e) = conn.read_exact(&mut buffer[..msg_len]) {
-            break Err(e.into());
-        }
+        let msg_len = match read_full_message_fixed(&mut conn, &mut buffer) {
+            Ok(n) => n,
+            Err(e) => break Err(e.into()),
+        };
         match bincode::borrow_decode_from_slice::<ServerMessage, _>(&buffer[..msg_len], BINCODE_CFG)
         {
             Err(e) => break Err(e.into()),
@@ -112,15 +104,8 @@ pub fn request_shutdown(root_path: &Path) -> IpcResult<()> {
 
     // Wait for the watch server to acknowledge the shutdown.
     // VersionMismatch { u8 } = 5 bytes is the largest possible response.
-    let mut len_buf = [0u8; 4];
-    conn.read_exact(&mut len_buf)?;
-    let msg_len = u32::from_le_bytes(len_buf) as usize;
     let mut buffer = [0u8; 5];
-    debug_assert!(
-        msg_len <= buffer.len(),
-        "Server message length {msg_len} exceeds buffer size"
-    );
-    conn.read_exact(&mut buffer[..msg_len])?;
+    let msg_len = read_full_message_fixed(&mut conn, &mut buffer)?;
     let (resp, _): (ServerMessage, usize) =
         bincode::borrow_decode_from_slice(&buffer[..msg_len], BINCODE_CFG)?;
 

@@ -1,14 +1,14 @@
 mod common;
 
-use std::io::{BufReader, Read};
+use std::io::BufReader;
 
 use rstest_reuse::apply;
 use subspy::{
     StatusSummary,
     connection::{
         BINCODE_CFG, ClientMessage, ClientRequest, IPC_VERSION, ServerMessage,
-        client::request_reindex, ipc_connect, ipc_socket_path, uses_filesystem_sockets,
-        write_full_message,
+        client::request_reindex, ipc_connect, ipc_socket_path, read_full_message_fixed,
+        uses_filesystem_sockets, write_full_message,
     },
 };
 
@@ -73,11 +73,8 @@ fn version_mismatch_returns_error_and_server_stays_alive(_run: u32) {
     write_full_message(&mut conn, &req_msg[..req_msg_len]).unwrap();
 
     // Read the response - should be VersionMismatch
-    let mut len_buf = [0u8; 4];
-    conn.read_exact(&mut len_buf).unwrap();
-    let msg_len = u32::from_le_bytes(len_buf) as usize;
     let mut buffer = [0u8; 5];
-    conn.read_exact(&mut buffer[..msg_len]).unwrap();
+    let msg_len = read_full_message_fixed(&mut conn, &mut buffer).unwrap();
     let (resp, _): (ServerMessage, usize) =
         bincode::borrow_decode_from_slice(&buffer[..msg_len], BINCODE_CFG).unwrap();
     assert_eq!(

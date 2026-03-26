@@ -210,6 +210,33 @@ pub fn write_full_message(conn: &mut BufReader<IpcStream>, msg: &[u8]) -> std::i
     }
 }
 
+/// Reads a length-prefixed message into a stack buffer of size `N`.
+///
+/// Returns the number of bytes in the message (not including the prefix).
+/// The caller should use `&buffer[..len]` to access the message.
+///
+/// # Errors
+///
+/// Returns `std::io::Error` if reading fails.
+///
+/// # Panics
+///
+/// Debug-panics if the incoming message length exceeds `N`.
+pub fn read_full_message_fixed<const N: usize>(
+    conn: &mut BufReader<IpcStream>,
+    buffer: &mut [u8; N],
+) -> std::io::Result<usize> {
+    let mut len_buf = [0u8; 4];
+    conn.read_exact(&mut len_buf)?;
+    let msg_len = u32::from_le_bytes(len_buf) as usize;
+    debug_assert!(
+        msg_len <= N,
+        "Message length {msg_len} exceeds buffer size {N}"
+    );
+    conn.read_exact(&mut buffer[..msg_len])?;
+    Ok(msg_len)
+}
+
 /// Reads from `conn` into `buffer` expecting the message length as a LE u32 first.
 ///
 /// When `timeout` is `Some`, the socket's receive timeout is temporarily set

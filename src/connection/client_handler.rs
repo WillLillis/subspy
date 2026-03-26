@@ -4,7 +4,7 @@
 use std::{
     cell::RefCell,
     collections::{BTreeMap, VecDeque},
-    io::{BufReader, Read as _},
+    io::BufReader,
     sync::{Arc, MutexGuard},
 };
 
@@ -15,7 +15,8 @@ use log::{error, info};
 use crate::{
     StatusSummary,
     connection::{
-        BINCODE_CFG, ClientMessage, ClientRequest, IPC_VERSION, ServerMessage, write_full_message,
+        BINCODE_CFG, ClientMessage, ClientRequest, IPC_VERSION, ServerMessage,
+        read_full_message_fixed, write_full_message,
     },
     watch::WatchResult,
 };
@@ -98,18 +99,9 @@ fn dispatch_client_message(
 ) -> WatchResult<()> {
     let mut conn = BufReader::new(conn);
 
-    let msg_len = {
-        let mut len_buf = [0u8; 4];
-        conn.read_exact(&mut len_buf)?;
-        u32::from_le_bytes(len_buf) as usize
-    };
     // 1 byte version + 4 byte variant index + 4 byte u32 + 1 byte bool (fixint)
     let mut buffer = [0u8; 10];
-    debug_assert!(
-        msg_len <= buffer.len(),
-        "Client request length {msg_len} exceeds buffer size"
-    );
-    conn.read_exact(&mut buffer[..msg_len])?;
+    let msg_len = read_full_message_fixed(&mut conn, &mut buffer)?;
     let (request, _): (ClientRequest, usize) =
         bincode::borrow_decode_from_slice(&buffer[..msg_len], BINCODE_CFG)?;
     info!("Received client request: {request:?}");
