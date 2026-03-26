@@ -1556,6 +1556,80 @@ mod tests {
         );
     }
 
+    /// Asserts that every fixed-size IPC message fits within
+    /// [`MAX_FIXED_MSG_LEN`], ensuring [`write_full_message`] uses the
+    /// single-write fast path for all of them.
+    #[test]
+    fn fixed_messages_fit_inline_write_buffer() {
+        use crate::connection::MAX_FIXED_MSG_LEN;
+
+        let fixed_messages: &[(&str, Vec<u8>)] = &[
+            (
+                "ClientRequest(Reindex)",
+                bincode::encode_to_vec(
+                    ClientRequest::new(ClientMessage::Reindex {
+                        pid: u32::MAX,
+                        replace_watchers: true,
+                    }),
+                    BINCODE_CFG,
+                )
+                .unwrap(),
+            ),
+            (
+                "ClientRequest(Shutdown)",
+                bincode::encode_to_vec(ClientRequest::new(ClientMessage::Shutdown), BINCODE_CFG)
+                    .unwrap(),
+            ),
+            (
+                "ClientRequest(Status)",
+                bincode::encode_to_vec(
+                    ClientRequest::new(ClientMessage::Status(u32::MAX)),
+                    BINCODE_CFG,
+                )
+                .unwrap(),
+            ),
+            (
+                "ClientRequest(Debug)",
+                bincode::encode_to_vec(ClientRequest::new(ClientMessage::Debug), BINCODE_CFG)
+                    .unwrap(),
+            ),
+            (
+                "ServerMessage::Indexing",
+                bincode::encode_to_vec(
+                    ServerMessage::Indexing {
+                        curr: u32::MAX,
+                        total: u32::MAX,
+                    },
+                    BINCODE_CFG,
+                )
+                .unwrap(),
+            ),
+            (
+                "ServerMessage::ShutdownAck",
+                bincode::encode_to_vec(ServerMessage::ShutdownAck, BINCODE_CFG).unwrap(),
+            ),
+            (
+                "ServerMessage::VersionMismatch",
+                bincode::encode_to_vec(
+                    ServerMessage::VersionMismatch {
+                        server_version: u8::MAX,
+                    },
+                    BINCODE_CFG,
+                )
+                .unwrap(),
+            ),
+        ];
+
+        for (name, encoded) in fixed_messages {
+            assert!(
+                encoded.len() <= MAX_FIXED_MSG_LEN,
+                "{name} encoded to {} bytes, exceeds MAX_FIXED_MSG_LEN ({MAX_FIXED_MSG_LEN}). \
+                 Increase the constant or the message will use two syscalls.",
+                encoded.len(),
+            );
+        }
+    }
+
     #[test]
     fn client_request_round_trip() {
         let request = ClientRequest::new(ClientMessage::Status(42));

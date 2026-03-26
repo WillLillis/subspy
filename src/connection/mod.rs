@@ -161,6 +161,20 @@ fn set_recv_timeout(stream: &IpcStream, timeout: Option<Duration>) -> std::io::R
     stream.set_read_timeout(timeout)
 }
 
+/// Size of the LE u32 length prefix prepended to every IPC message.
+const MSG_PREFIX_LEN: usize = size_of::<u32>();
+
+/// Maximum encoded size of any fixed-size IPC message (i.e. messages that
+/// use stack buffers rather than `Vec`s). Currently the largest is
+/// `ServerMessage::Indexing { u32, u32 }` at 12 bytes.
+///
+/// [`write_full_message`] uses this to combine the length prefix and body
+/// into a single `write_all` call, requiring one syscall instead of two.
+const MAX_FIXED_MSG_LEN: usize = 12;
+
+/// Stack buffer size for [`write_full_message`]'s single-write fast path.
+const INLINE_WRITE_BUF_LEN: usize = MSG_PREFIX_LEN + MAX_FIXED_MSG_LEN;
+
 /// Writes all of `msg` to `conn`, prepended by the length as a LE u32.
 ///
 /// # Errors
@@ -169,10 +183,16 @@ fn set_recv_timeout(stream: &IpcStream, timeout: Option<Duration>) -> std::io::R
 #[inline]
 pub fn write_full_message(conn: &mut BufReader<IpcStream>, msg: &[u8]) -> std::io::Result<()> {
     let len_bytes = (msg.len() as u32).to_le_bytes();
-    conn.get_mut().write_all(&len_bytes)?;
-    conn.get_mut().write_all(msg)?;
-
-    Ok(())
+    let stream = conn.get_mut();
+    if msg.len() <= MAX_FIXED_MSG_LEN {
+        let mut buf = [0u8; INLINE_WRITE_BUF_LEN];
+        buf[..MSG_PREFIX_LEN].copy_from_slice(&len_bytes);
+        buf[MSG_PREFIX_LEN..MSG_PREFIX_LEN + msg.len()].copy_from_slice(msg);
+        stream.write_all(&buf[..MSG_PREFIX_LEN + msg.len()])
+    } else {
+        stream.write_all(&len_bytes)?;
+        stream.write_all(msg)
+    }
 }
 
 /// Reads from `conn` into `buffer` expecting the message length as a LE u32 first.
