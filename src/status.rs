@@ -86,6 +86,15 @@ fn is_unstaged(st: StatusSummary) -> bool {
         && !st.contains(StatusSummary::LOCK_FAILURE)
 }
 
+/// Returns `true` if `st` has untracked or modified content within the
+/// submodule's working tree. Controls whether the
+/// "(commit or discard the untracked or modified content in submodules)"
+/// hint appears in the unstaged header. `NEW_COMMITS` alone (a gitlink
+/// divergence) does not qualify.
+const fn has_workdir_changes(st: StatusSummary) -> bool {
+    st.contains(StatusSummary::MODIFIED_CONTENT) || st.contains(StatusSummary::UNTRACKED_CONTENT)
+}
+
 #[derive(Debug, PartialEq, Eq)]
 struct RebaseInfo {
     onto_short: String,
@@ -552,7 +561,9 @@ fn print_unstaged_changes(
     submodule_statuses: &[(String, StatusSummary)],
     rm_in_workdir: bool,
 ) -> bool {
-    let has_submod_changes = submodule_statuses.iter().any(|(_, st)| is_unstaged(*st));
+    let has_submod_changes = submodule_statuses
+        .iter()
+        .any(|(_, st)| has_workdir_changes(*st));
     let mut header = false;
 
     for entry in non_submod.iter() {
@@ -597,7 +608,7 @@ fn print_unstaged_changes(
     for (submod_path, submod_status) in submodule_statuses.iter().filter(|(_, st)| is_unstaged(*st))
     {
         if !header {
-            println!("{}", unstaged_header(rm_in_workdir, true));
+            println!("{}", unstaged_header(rm_in_workdir, has_submod_changes));
             header = true;
         }
         let istatus = submod_status.to_string();
@@ -1302,6 +1313,39 @@ mod tests {
     #[test]
     fn clean_is_not_unstaged() {
         assert!(!is_unstaged(StatusSummary::clean()));
+    }
+
+    // -- has_workdir_changes --
+
+    #[test]
+    fn workdir_changes_modified_content() {
+        assert!(has_workdir_changes(StatusSummary::MODIFIED_CONTENT));
+    }
+
+    #[test]
+    fn workdir_changes_untracked_content() {
+        assert!(has_workdir_changes(StatusSummary::UNTRACKED_CONTENT));
+    }
+
+    #[test]
+    fn workdir_changes_new_commits_only() {
+        assert!(!has_workdir_changes(StatusSummary::NEW_COMMITS));
+    }
+
+    #[test]
+    fn workdir_changes_staged_only() {
+        assert!(!has_workdir_changes(StatusSummary::STAGED));
+    }
+
+    #[test]
+    fn workdir_changes_new_commits_with_untracked() {
+        let st = StatusSummary::NEW_COMMITS | StatusSummary::UNTRACKED_CONTENT;
+        assert!(has_workdir_changes(st));
+    }
+
+    #[test]
+    fn workdir_changes_clean() {
+        assert!(!has_workdir_changes(StatusSummary::clean()));
     }
 
     // -- get_upstream_status --
