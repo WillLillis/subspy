@@ -472,4 +472,210 @@ mod tests {
         let used = validate_template(DEFAULT_FORMAT, &PLACEHOLDERS).unwrap();
         assert_eq!(used, DEFAULT_USED);
     }
+
+    #[test]
+    fn status_text_staged_new() {
+        assert_eq!(status_text(StatusSummary::STAGED_NEW), "staged (new)");
+    }
+
+    #[test]
+    fn status_text_staged_new_with_other_flags() {
+        let status = StatusSummary::STAGED_NEW | StatusSummary::UNTRACKED_CONTENT;
+        assert_eq!(status_text(status), "untracked content, staged (new)");
+    }
+
+    // -- resolve_git_dir / resolve_ref / read_submodule_head --
+
+    fn git(args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .args(["-c", "user.name=Test", "-c", "user.email=test@test.com"])
+            .args(args)
+            .output()
+            .expect("failed to run git");
+        assert!(
+            output.status.success(),
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    /// Creates a repo with a single submodule checked out on `master`.
+    fn init_repo_with_submodule() -> (tempfile::TempDir, PathBuf) {
+        let tmp = tempfile::TempDir::new().unwrap();
+
+        // Source repo
+        let source = tmp.path().join("source");
+        std::fs::create_dir_all(&source).unwrap();
+        git(&["-C", &source.display().to_string(), "init"]);
+        std::fs::write(source.join("README.md"), "hello\n").unwrap();
+        git(&["-C", &source.display().to_string(), "add", "-A"]);
+        git(&[
+            "-C",
+            &source.display().to_string(),
+            "commit",
+            "-m",
+            "initial",
+        ]);
+
+        // Root repo with submodule
+        let root = tmp.path().join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        git(&["-C", &root.display().to_string(), "init"]);
+        git(&[
+            "-C",
+            &root.display().to_string(),
+            "commit",
+            "--allow-empty",
+            "-m",
+            "init",
+        ]);
+        git(&[
+            "-C",
+            &root.display().to_string(),
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            &source.display().to_string(),
+            "sub",
+        ]);
+        git(&["-C", &root.display().to_string(), "commit", "-m", "add sub"]);
+
+        let submod_path = root.join("sub");
+        (tmp, submod_path)
+    }
+
+    #[test]
+    fn resolve_git_dir_submodule() {
+        let (_tmp, submod_path) = init_repo_with_submodule();
+        let git_dir = resolve_git_dir(&submod_path).expect("should resolve");
+        // Submodule .git is a file pointing to ../../.git/modules/sub
+        assert!(git_dir.join("HEAD").exists());
+        assert!(git_dir.join("config").exists());
+    }
+
+    #[test]
+    fn resolve_git_dir_nonexistent() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        assert!(resolve_git_dir(tmp.path()).is_none());
+    }
+
+    #[test]
+    fn resolve_git_dir_normal_repo() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        git(&["-C", &tmp.path().display().to_string(), "init"]);
+        let git_dir = resolve_git_dir(tmp.path()).expect("should resolve");
+        assert!(git_dir.join("HEAD").exists());
+    }
+
+    #[test]
+    fn resolve_ref_loose() {
+        let (_tmp, submod_path) = init_repo_with_submodule();
+        let git_dir = resolve_git_dir(&submod_path).unwrap();
+        let oid = resolve_ref(&git_dir, "refs/heads/master");
+        assert!(oid.is_some(), "loose ref should resolve");
+    }
+
+    #[test]
+    fn resolve_ref_nonexistent() {
+        let (_tmp, submod_path) = init_repo_with_submodule();
+        let git_dir = resolve_git_dir(&submod_path).unwrap();
+        assert!(resolve_ref(&git_dir, "refs/heads/nonexistent").is_none());
+    }
+
+    #[test]
+    fn read_submodule_head_on_branch() {
+        let (_tmp, submod_path) = init_repo_with_submodule();
+        let (oid, branch) = read_submodule_head(&submod_path);
+        assert!(oid.is_some(), "should have an OID");
+        assert_eq!(branch.as_deref(), Some("master"));
+    }
+
+    #[test]
+    fn read_submodule_head_detached() {
+        let (_tmp, submod_path) = init_repo_with_submodule();
+        // Detach HEAD
+        git(&[
+            "-C",
+            &submod_path.display().to_string(),
+            "checkout",
+            "--detach",
+        ]);
+        let (oid, branch) = read_submodule_head(&submod_path);
+        assert!(oid.is_some(), "should have an OID");
+        assert!(branch.is_none(), "detached HEAD has no branch");
+    }
+
+    #[test]
+    fn read_submodule_head_nonexistent() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (oid, branch) = read_submodule_head(tmp.path());
+        assert!(oid.is_none());
+        assert!(branch.is_none());
+    }
+
+    // -- format_output / compute_placeholder_widths --
+
+    fn make_info(name: &str, path: &str, status: Option<StatusSummary>) -> SubmoduleInfo {
+        SubmoduleInfo {
+            name: name.to_string(),
+            path: path.to_string(),
+            commit: None,
+            head: None,
+            branch: None,
+            head_branch: None,
+            status,
+        }
+    }
+
+    #[test]
+    fn format_output_no_header() {
+        let infos = vec![
+            make_info("a", "libs/a", None),
+            make_info("b", "libs/b", None),
+        ];
+        let output = format_output(&infos, "{name}\n", false);
+        assert_eq!(output, "a\nb\n");
+    }
+
+    #[test]
+    fn format_output_with_header() {
+        let infos = vec![make_info("sub", "sub", None)];
+        let output = format_output(&infos, "{name}\n", true);
+        let lines: Vec<&str> = output.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].trim(), "NAME");
+        assert_eq!(lines[1].trim(), "sub");
+    }
+
+    #[test]
+    fn format_output_with_status() {
+        let infos = vec![make_info(
+            "sub",
+            "sub",
+            Some(StatusSummary::MODIFIED_CONTENT),
+        )];
+        let output = format_output(&infos, "{name}: {status}\n", false);
+        assert_eq!(output, "sub: modified content\n");
+    }
+
+    #[test]
+    fn compute_widths_pads_to_longest() {
+        let infos = vec![
+            make_info("short", "short", None),
+            make_info("much_longer_name", "much_longer_name", None),
+        ];
+        let widths = compute_placeholder_widths("{name}\n", &infos);
+        // "much_longer_name" is 16 chars, "NAME" header is 4; max is 16
+        assert_eq!(widths[0], 16);
+    }
+
+    #[test]
+    fn compute_widths_unused_placeholder_is_zero() {
+        let infos = vec![make_info("sub", "sub", None)];
+        let widths = compute_placeholder_widths("{name}\n", &infos);
+        // "path" (index 1) is not in the template
+        assert_eq!(widths[1], 0);
+    }
 }
