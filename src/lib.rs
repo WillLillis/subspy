@@ -81,7 +81,7 @@ impl StatusSummary {
 
 /// Formats the summary for the `status` command. `STAGED` and `STAGED_NEW`
 /// are intentionally omitted here because the `status` display handles
-/// staging separately; see [`list::status_text`] for a variant that
+/// staging separately; see `list::status_text` for a variant that
 /// includes them.
 impl std::fmt::Display for StatusSummary {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

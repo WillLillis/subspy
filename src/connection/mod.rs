@@ -141,7 +141,8 @@ pub struct DebugState {
     pub root_path: String,
     pub socket_name: String,
     pub submodule_statuses: Option<Vec<(String, StatusSummary)>>,
-    /// In-flight rayon tasks: `(relative_path, state)` where state is "active" or "dirty"
+    /// In-flight rayon tasks: `(relative_path, state)` where state is
+    /// "active", "active (cancelling)", "dirty", or "dirty (cancelling)"
     pub in_flight: Option<Vec<(String, String)>>,
     /// Progress queues keyed by client PID: `(pid, [(curr, total)])`
     #[expect(clippy::type_complexity)]

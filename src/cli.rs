@@ -113,6 +113,7 @@ pub struct List {
         clippy::doc_markdown,
         reason = "placeholder names render in clap help text"
     )]
+    #[allow(rustdoc::broken_intra_doc_links)]
     /// Custom format string with {placeholder} substitution.
     ///
     /// Available placeholders: {name}, {path}, {commit}, {commit_long},

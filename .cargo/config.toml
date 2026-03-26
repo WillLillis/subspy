@@ -1,7 +1,7 @@
 # Integration tests spin up real watch servers with recursive inotify
 # watchers. Running too many in parallel exhausts inotify instance limits
-# (default 1024). 8 threads stays well within that budget while giving a
-# ~7x speedup over serial execution.
+# (default 1024). 4 threads stays well within that budget while giving a
+# ~4x speedup over serial execution.
 [env]
 RUST_TEST_THREADS = "4"
 
