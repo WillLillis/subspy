@@ -1010,7 +1010,7 @@ impl FuzzerState {
                 .submodule_status(path, git2::SubmoduleIgnore::None)
                 .expect("Failed to get submodule status");
             let status: StatusSummary = git2_status.into();
-            if status != StatusSummary::CLEAN {
+            if status != StatusSummary::clean() {
                 statuses.push((path.to_string(), status));
             }
         }

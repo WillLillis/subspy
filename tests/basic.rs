@@ -31,7 +31,7 @@ fn nested_path_modified_content(_run: u32) {
 
     harness.write_file("libs/core", "README.md", "changed\n");
     harness.assert_submodule_status("libs/core", StatusSummary::MODIFIED_CONTENT);
-    harness.assert_submodule_status("libs/utils", StatusSummary::CLEAN);
+    harness.assert_submodule_status("libs/utils", StatusSummary::clean());
 }
 
 #[apply(common::repeat)]
@@ -90,7 +90,7 @@ fn nested_path_independent_statuses(_run: u32) {
 
     harness.assert_submodule_status("libs/core", StatusSummary::MODIFIED_CONTENT);
     harness.assert_submodule_status("vendor/thirdparty", StatusSummary::UNTRACKED_CONTENT);
-    harness.assert_submodule_status("libs/utils", StatusSummary::CLEAN);
+    harness.assert_submodule_status("libs/utils", StatusSummary::clean());
 }
 
 // ---------------------------------------------------------------------------
@@ -273,7 +273,7 @@ fn multiple_submodules_independent_statuses(_run: u32) {
 
     harness.assert_submodule_status("sub_a", StatusSummary::MODIFIED_CONTENT);
     harness.assert_submodule_status("sub_b", StatusSummary::UNTRACKED_CONTENT);
-    harness.assert_submodule_status("sub_c", StatusSummary::CLEAN);
+    harness.assert_submodule_status("sub_c", StatusSummary::clean());
 }
 
 #[apply(common::repeat)]

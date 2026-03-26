@@ -225,7 +225,7 @@ impl TestHarness {
     pub fn assert_submodule_status(&self, submodule: &str, expected: StatusSummary) {
         let description = format!("submodule '{submodule}' to have status {expected:?}");
         self.assert_status_eventually(&description, |statuses| {
-            if expected == StatusSummary::CLEAN {
+            if expected == StatusSummary::clean() {
                 // CLEAN submodules are omitted from the response
                 !statuses.iter().any(|(name, _)| name == submodule)
             } else {

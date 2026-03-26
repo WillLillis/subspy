@@ -59,7 +59,6 @@ impl std::fmt::Debug for StatusSummary {
 bitflags! {
     /// Represents the status of a submodule
     impl StatusSummary: u32 {
-        const CLEAN             = 0b0000_0000;
         const MODIFIED_CONTENT  = 0b0000_0001;
         const UNTRACKED_CONTENT = 0b0000_0010;
         const NEW_COMMITS       = 0b0000_0100;
@@ -69,13 +68,24 @@ bitflags! {
     }
 }
 
+impl StatusSummary {
+    /// Returns the empty (clean) status. Prefer this over `StatusSummary::empty()`
+    /// for readability, and over a `CLEAN` bitflag constant which would make
+    /// `contains(CLEAN)` a no-op footgun.
+    #[inline]
+    #[must_use]
+    pub const fn clean() -> Self {
+        Self::empty()
+    }
+}
+
 /// Formats the summary for the `status` command. `STAGED` and `STAGED_NEW`
 /// are intentionally omitted here because the `status` display handles
 /// staging separately; see [`list::status_text`] for a variant that
 /// includes them.
 impl std::fmt::Display for StatusSummary {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if self.eq(&Self::CLEAN) {
+        if *self == Self::clean() {
             return Ok(());
         }
 
@@ -118,7 +128,7 @@ impl From<u32> for StatusSummary {
 
 impl From<git2::SubmoduleStatus> for StatusSummary {
     fn from(value: git2::SubmoduleStatus) -> Self {
-        let mut submod_status = Self::CLEAN;
+        let mut submod_status = Self::clean();
         if value.contains(git2::SubmoduleStatus::WD_MODIFIED) {
             submod_status |= Self::NEW_COMMITS;
         }
@@ -167,7 +177,7 @@ mod tests {
 
     #[test]
     fn display_clean() {
-        assert_eq!(StatusSummary::CLEAN.to_string(), "");
+        assert_eq!(StatusSummary::clean().to_string(), "");
     }
 
     #[test]
@@ -206,7 +216,7 @@ mod tests {
     #[test]
     fn from_submodule_status_clean() {
         let s = StatusSummary::from(git2::SubmoduleStatus::empty());
-        assert_eq!(s, StatusSummary::CLEAN);
+        assert_eq!(s, StatusSummary::clean());
     }
 
     #[test]

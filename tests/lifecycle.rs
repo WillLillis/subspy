@@ -49,7 +49,7 @@ fn reindex_replace_watchers_preserves_status(_run: u32) {
 
     // New watchers should detect subsequent changes
     harness.remove_file("sub_a", "dirty.txt");
-    harness.assert_submodule_status("sub_a", StatusSummary::CLEAN);
+    harness.assert_submodule_status("sub_a", StatusSummary::clean());
 
     harness.write_file("sub_a", "README.md", "modified\n");
     harness.assert_submodule_status("sub_a", StatusSummary::MODIFIED_CONTENT);

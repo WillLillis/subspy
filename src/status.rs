@@ -903,7 +903,7 @@ pub fn compute_local_statuses(
             let summary: StatusSummary = st.into();
             Ok((path, summary))
         })
-        .filter(|r| !matches!(r, Ok((_, s)) if *s == StatusSummary::CLEAN))
+        .filter(|r| !matches!(r, Ok((_, s)) if *s == StatusSummary::clean()))
         .map(|r| r.map(|(path, s)| (path.to_string(), s)))
         .collect();
 

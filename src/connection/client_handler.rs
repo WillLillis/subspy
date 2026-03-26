@@ -175,7 +175,10 @@ fn handle_status_request(
 
     let total = guard.len() as u32;
     let mut status_out = Vec::with_capacity(total as usize);
-    for (submod_path, status) in guard.iter().filter(|(_, st)| **st != StatusSummary::CLEAN) {
+    for (submod_path, status) in guard
+        .iter()
+        .filter(|(_, st)| **st != StatusSummary::clean())
+    {
         status_out.push((submod_path.clone(), *status));
     }
     drop(guard);

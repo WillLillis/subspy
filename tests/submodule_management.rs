@@ -18,7 +18,7 @@ fn add_submodule_detected_by_server(_run: u32) {
 
     // Commit the addition, so it's no longer "new"
     harness.git_in_root(&["commit", "-m", "Add submodule sub_b"]);
-    harness.assert_submodule_status("sub_b", StatusSummary::CLEAN);
+    harness.assert_submodule_status("sub_b", StatusSummary::clean());
 
     // Dirty sub_b and verify the server picked it up
     harness.write_file("sub_b", "new_file.txt", "world\n");
@@ -47,7 +47,7 @@ fn add_submodule_without_commit_detected_by_server(_run: u32) {
     );
 
     // sub_a should be unaffected
-    harness.assert_submodule_status("sub_a", StatusSummary::CLEAN);
+    harness.assert_submodule_status("sub_a", StatusSummary::clean());
 }
 
 #[apply(common::repeat)]
@@ -71,7 +71,7 @@ fn remove_submodule_without_commit_detected_by_server(_run: u32) {
     harness.assert_deleted_submodule_paths(&["sub_b"]);
 
     // sub_a should be unaffected
-    harness.assert_submodule_status("sub_a", StatusSummary::CLEAN);
+    harness.assert_submodule_status("sub_a", StatusSummary::clean());
 }
 
 #[apply(common::repeat)]
@@ -93,7 +93,7 @@ fn remove_submodule_without_commit_shows_deleted_path(_run: u32) {
     harness.assert_deleted_submodule_paths(&["sub_b", "sub_c"]);
 
     // sub_a should not appear as deleted
-    harness.assert_submodule_status("sub_a", StatusSummary::CLEAN);
+    harness.assert_submodule_status("sub_a", StatusSummary::clean());
 }
 
 #[apply(common::repeat)]

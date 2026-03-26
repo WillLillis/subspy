@@ -256,7 +256,7 @@ fn gather_info(
                 Some(map) => Some(
                     map.get(path_str.as_str())
                         .copied()
-                        .unwrap_or(StatusSummary::CLEAN),
+                        .unwrap_or(StatusSummary::clean()),
                 ),
                 None if need_local_status => {
                     let repo = tl_repo.get_or_try(|| Repository::open(root_path))?;
@@ -437,7 +437,7 @@ mod tests {
 
     #[test]
     fn status_text_clean() {
-        assert_eq!(status_text(StatusSummary::CLEAN), "");
+        assert_eq!(status_text(StatusSummary::clean()), "");
     }
 
     #[test]
