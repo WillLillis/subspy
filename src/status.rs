@@ -55,6 +55,37 @@ fn unstaged_header(rm_in_workdir: bool, has_submod_changes: bool) -> String {
     )
 }
 
+// -- Submodule display predicates --
+//
+// These capture the filtering logic used by `print_staged_changes`,
+// `print_unstaged_changes`, and `print_lock_file_errors` so the
+// decisions about which submodules appear in each section are testable
+// independently of the rendering.
+
+/// Returns `true` if `st` should appear in the "Changes to be committed" section.
+const fn is_staged(st: StatusSummary) -> bool {
+    (st.contains(StatusSummary::STAGED) || st.contains(StatusSummary::STAGED_NEW))
+        && !st.contains(StatusSummary::LOCK_FAILURE)
+}
+
+/// Returns the display label for a staged submodule.
+const fn staged_label(st: StatusSummary) -> &'static str {
+    if st.contains(StatusSummary::STAGED_NEW) {
+        "new file:   "
+    } else {
+        "modified:   "
+    }
+}
+
+/// Returns `true` if `st` has unstaged changes that belong in the
+/// "Changes not staged for commit" section.
+fn is_unstaged(st: StatusSummary) -> bool {
+    !st.is_empty()
+        && st != StatusSummary::STAGED
+        && st != StatusSummary::STAGED_NEW
+        && !st.contains(StatusSummary::LOCK_FAILURE)
+}
+
 #[derive(Debug, PartialEq, Eq)]
 struct RebaseInfo {
     onto_short: String,
@@ -498,19 +529,12 @@ fn print_staged_changes(
         );
     }
 
-    for (submod_path, st) in submodule_statuses.iter().filter(|(_, st)| {
-        (st.contains(StatusSummary::STAGED) || st.contains(StatusSummary::STAGED_NEW))
-            && !st.contains(StatusSummary::LOCK_FAILURE)
-    }) {
+    for (submod_path, st) in submodule_statuses.iter().filter(|(_, st)| is_staged(*st)) {
         if !header {
             println!("{STAGED_HEADER}");
             header = true;
         }
-        let label = if st.contains(StatusSummary::STAGED_NEW) {
-            "new file:   "
-        } else {
-            "modified:   "
-        };
+        let label = staged_label(*st);
         println!(
             "{}",
             paint(Some(AnsiColor::Green), &format!("\t{label}{submod_path}"))
@@ -528,11 +552,7 @@ fn print_unstaged_changes(
     submodule_statuses: &[(String, StatusSummary)],
     rm_in_workdir: bool,
 ) -> bool {
-    let has_submod_changes = submodule_statuses.iter().any(|(_, st)| {
-        *st != StatusSummary::STAGED
-            && *st != StatusSummary::STAGED_NEW
-            && !st.contains(StatusSummary::LOCK_FAILURE)
-    });
+    let has_submod_changes = submodule_statuses.iter().any(|(_, st)| is_unstaged(*st));
     let mut header = false;
 
     for entry in non_submod.iter() {
@@ -574,11 +594,8 @@ fn print_unstaged_changes(
         }
     }
 
-    for (submod_path, submod_status) in submodule_statuses.iter().filter(|(_, st)| {
-        *st != StatusSummary::STAGED
-            && *st != StatusSummary::STAGED_NEW
-            && !st.contains(StatusSummary::LOCK_FAILURE)
-    }) {
+    for (submod_path, submod_status) in submodule_statuses.iter().filter(|(_, st)| is_unstaged(*st))
+    {
         if !header {
             println!("{}", unstaged_header(rm_in_workdir, true));
             header = true;
@@ -1217,6 +1234,272 @@ mod tests {
                 }
             ),
             "expected RebaseWithApplyBackend with conflicts, got {state:?}"
+        );
+    }
+
+    // -- Submodule display predicates --
+
+    #[test]
+    fn staged_modified_submodule() {
+        let st = StatusSummary::STAGED;
+        assert!(is_staged(st));
+        assert_eq!(staged_label(st), "modified:   ");
+        assert!(!is_unstaged(st));
+    }
+
+    #[test]
+    fn staged_new_submodule() {
+        let st = StatusSummary::STAGED_NEW;
+        assert!(is_staged(st));
+        assert_eq!(staged_label(st), "new file:   ");
+        assert!(!is_unstaged(st));
+    }
+
+    #[test]
+    fn staged_with_unstaged_changes() {
+        let st = StatusSummary::STAGED | StatusSummary::MODIFIED_CONTENT;
+        assert!(is_staged(st));
+        assert_eq!(staged_label(st), "modified:   ");
+        assert!(is_unstaged(st));
+    }
+
+    #[test]
+    fn staged_new_with_unstaged_changes() {
+        let st = StatusSummary::STAGED_NEW | StatusSummary::UNTRACKED_CONTENT;
+        assert!(is_staged(st));
+        assert_eq!(staged_label(st), "new file:   ");
+        assert!(is_unstaged(st));
+    }
+
+    #[test]
+    fn unstaged_only() {
+        let st = StatusSummary::MODIFIED_CONTENT;
+        assert!(!is_staged(st));
+        assert!(is_unstaged(st));
+    }
+
+    #[test]
+    fn new_commits_only() {
+        let st = StatusSummary::NEW_COMMITS;
+        assert!(!is_staged(st));
+        assert!(is_unstaged(st));
+    }
+
+    #[test]
+    fn lock_failure_excluded_from_both() {
+        let st = StatusSummary::LOCK_FAILURE;
+        assert!(!is_staged(st));
+        assert!(!is_unstaged(st));
+    }
+
+    #[test]
+    fn lock_failure_with_staged_excluded() {
+        let st = StatusSummary::STAGED | StatusSummary::LOCK_FAILURE;
+        assert!(!is_staged(st));
+        assert!(!is_unstaged(st));
+    }
+
+    #[test]
+    fn clean_is_not_unstaged() {
+        assert!(!is_unstaged(StatusSummary::clean()));
+    }
+
+    // -- get_upstream_status --
+
+    /// Creates a repo cloned from a local bare remote so that
+    /// `get_upstream_status` has a tracking branch to compare against.
+    fn init_repo_with_remote() -> (TempDir, Repository) {
+        let tmp = TempDir::new().unwrap();
+
+        // Create a bare "remote"
+        let remote_path = tmp.path().join("remote.git");
+        git(&["init", "--bare", &remote_path.display().to_string()]);
+
+        // Clone it to get a tracking branch
+        let local_path = tmp.path().join("local");
+        git(&[
+            "-c",
+            "protocol.file.allow=always",
+            "clone",
+            &remote_path.display().to_string(),
+            &local_path.display().to_string(),
+        ]);
+
+        // Add an initial commit and push
+        let local = local_path.display().to_string();
+        std::fs::write(local_path.join("file.txt"), "initial\n").unwrap();
+        git(&["-C", &local, "add", "-A"]);
+        git(&["-C", &local, "commit", "-m", "initial"]);
+        git(&["-C", &local, "push"]);
+
+        let repo = Repository::open(&local_path).unwrap();
+        (tmp, repo)
+    }
+
+    #[test]
+    fn upstream_up_to_date() {
+        let (_tmp, repo) = init_repo_with_remote();
+        let (status_line, hint) = get_upstream_status(&repo).unwrap().unwrap();
+        assert_eq!(
+            status_line,
+            "Your branch is up to date with 'origin/master'."
+        );
+        assert_eq!(hint, "");
+    }
+
+    #[test]
+    fn upstream_ahead() {
+        let (_tmp, repo) = init_repo_with_remote();
+        let local = repo.workdir().unwrap().display().to_string();
+        std::fs::write(repo.workdir().unwrap().join("file.txt"), "ahead\n").unwrap();
+        git(&["-C", &local, "add", "-A"]);
+        git(&["-C", &local, "commit", "-m", "local commit"]);
+
+        let repo = Repository::open(repo.workdir().unwrap()).unwrap();
+        let (status_line, hint) = get_upstream_status(&repo).unwrap().unwrap();
+        assert_eq!(
+            status_line,
+            "Your branch is ahead of 'origin/master' by 1 commit."
+        );
+        assert_eq!(hint, "(use \"git push\" to publish your local commits)");
+    }
+
+    #[test]
+    fn upstream_behind() {
+        let (tmp, repo) = init_repo_with_remote();
+        let remote_path = tmp.path().join("remote.git");
+
+        // Push a commit from a second clone so origin advances
+        let other = tmp.path().join("other");
+        git(&[
+            "-c",
+            "protocol.file.allow=always",
+            "clone",
+            &remote_path.display().to_string(),
+            &other.display().to_string(),
+        ]);
+        let other_str = other.display().to_string();
+        std::fs::write(other.join("file.txt"), "remote change\n").unwrap();
+        git(&["-C", &other_str, "add", "-A"]);
+        git(&["-C", &other_str, "commit", "-m", "remote commit"]);
+        git(&["-C", &other_str, "push"]);
+
+        // Fetch in the original clone
+        let local = repo.workdir().unwrap().display().to_string();
+        git(&["-C", &local, "fetch"]);
+
+        let repo = Repository::open(repo.workdir().unwrap()).unwrap();
+        let (status_line, hint) = get_upstream_status(&repo).unwrap().unwrap();
+        assert_eq!(
+            status_line,
+            "Your branch is behind 'origin/master' by 1 commit, and can be fast-forwarded."
+        );
+        assert_eq!(hint, "(use \"git pull\" to update your local branch)");
+    }
+
+    #[test]
+    fn upstream_diverged() {
+        let (tmp, repo) = init_repo_with_remote();
+        let remote_path = tmp.path().join("remote.git");
+
+        // Push a commit from a second clone
+        let other = tmp.path().join("other");
+        git(&[
+            "-c",
+            "protocol.file.allow=always",
+            "clone",
+            &remote_path.display().to_string(),
+            &other.display().to_string(),
+        ]);
+        let other_str = other.display().to_string();
+        std::fs::write(other.join("other.txt"), "remote\n").unwrap();
+        git(&["-C", &other_str, "add", "-A"]);
+        git(&["-C", &other_str, "commit", "-m", "remote commit"]);
+        git(&["-C", &other_str, "push"]);
+
+        // Make a local commit (without fetching first, then fetch)
+        let local = repo.workdir().unwrap().display().to_string();
+        std::fs::write(repo.workdir().unwrap().join("local.txt"), "local\n").unwrap();
+        git(&["-C", &local, "add", "-A"]);
+        git(&["-C", &local, "commit", "-m", "local commit"]);
+        git(&["-C", &local, "fetch"]);
+
+        let repo = Repository::open(repo.workdir().unwrap()).unwrap();
+        let (status_line, hint) = get_upstream_status(&repo).unwrap().unwrap();
+        assert_eq!(
+            status_line,
+            "Your branch and 'origin/master' have diverged,\n\
+             and have 1 and 1 different commits each, respectively."
+        );
+        assert_eq!(
+            hint,
+            "(use \"git pull\" if you want to integrate the remote branch with yours)"
+        );
+    }
+
+    #[test]
+    fn upstream_none_without_remote() {
+        let (_tmp, repo) = init_repo();
+        assert!(get_upstream_status(&repo).unwrap().is_none());
+    }
+
+    // -- parse_rebase_lines --
+
+    #[test]
+    fn rebase_lines_shortens_full_hash() {
+        let input = "pick abcdef1234567890abcdef1234567890abcdef12 Fix the bug\n";
+        let result = parse_rebase_lines(input);
+        assert_eq!(result, ["pick abcdef1 Fix the bug"]);
+    }
+
+    #[test]
+    fn rebase_lines_preserves_short_hash() {
+        let input = "pick abcdef1 Fix the bug\n";
+        let result = parse_rebase_lines(input);
+        assert_eq!(result, ["pick abcdef1 Fix the bug"]);
+    }
+
+    #[test]
+    fn rebase_lines_skips_comments_and_blanks() {
+        let input = "# This is a comment\n\npick abcdef1 Do stuff\n";
+        let result = parse_rebase_lines(input);
+        assert_eq!(result, ["pick abcdef1 Do stuff"]);
+    }
+
+    #[test]
+    fn rebase_lines_full_hash_no_message() {
+        let input = "drop abcdef1234567890abcdef1234567890abcdef12\n";
+        let result = parse_rebase_lines(input);
+        assert_eq!(result, ["drop abcdef1"]);
+    }
+
+    #[test]
+    fn rebase_lines_real_done_file_format() {
+        // Real git rebase done/todo files use full hashes and `# ` message prefix
+        let input = "\
+            pick 4e0411814cb5bd9cf38ee803978966a39df7ac54 # feature 1\n\
+            pick 66ec2060c6cb15d5ca911f52502d0f009f17233c # feature 2\n";
+        let result = parse_rebase_lines(input);
+        assert_eq!(
+            result,
+            ["pick 4e04118 # feature 1", "pick 66ec206 # feature 2"]
+        );
+    }
+
+    #[test]
+    fn rebase_lines_multiple_ops() {
+        let input = "\
+            pick aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa First commit\n\
+            fixup bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb Second commit\n\
+            reword cccccccccccccccccccccccccccccccccccccccc Third commit\n";
+        let result = parse_rebase_lines(input);
+        assert_eq!(
+            result,
+            [
+                "pick aaaaaaa First commit",
+                "fixup bbbbbbb Second commit",
+                "reword ccccccc Third commit",
+            ]
         );
     }
 }
