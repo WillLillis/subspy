@@ -4,20 +4,14 @@ use std::path::Path;
 
 use thiserror::Error;
 
-use crate::connection::client::request_shutdown;
+use crate::connection::{IpcError, client::request_shutdown};
 
 pub type ShutdownResult<T> = Result<T, ShutdownError>;
 
 #[derive(Debug, Error)]
 pub enum ShutdownError {
     #[error(transparent)]
-    BincodeEncode(#[from] bincode::error::EncodeError),
-    #[error(transparent)]
-    BincodeDecode(#[from] bincode::error::DecodeError),
-    #[error(transparent)]
-    IO(#[from] std::io::Error),
-    #[error(transparent)]
-    VersionMismatch(#[from] crate::connection::VersionMismatchError),
+    Ipc(#[from] IpcError),
 }
 
 /// Issues a shutdown request to the watch server for `root_path`.
@@ -27,5 +21,5 @@ pub enum ShutdownError {
 /// Returns `Err` if connecting to the server, encoding the request,
 /// or receiving the acknowledgement fails.
 pub fn shutdown(root_path: &Path) -> ShutdownResult<()> {
-    request_shutdown(root_path)
+    Ok(request_shutdown(root_path)?)
 }

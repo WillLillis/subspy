@@ -8,7 +8,10 @@ use thiserror::Error;
 
 use crate::{
     RepoKind, StatusSummary,
-    connection::client::{recv_status_response, send_status_request},
+    connection::{
+        IpcError,
+        client::{recv_status_response, send_status_request},
+    },
     paint,
     watch::{LockFileError, LockFileGuard},
 };
@@ -18,17 +21,11 @@ pub type StatusResult<T> = Result<T, StatusError>;
 #[derive(Error, Debug)]
 pub enum StatusError {
     #[error(transparent)]
-    BincodeEncode(#[from] bincode::error::EncodeError),
-    #[error(transparent)]
-    BincodeDecode(#[from] bincode::error::DecodeError),
-    #[error(transparent)]
-    IO(#[from] std::io::Error),
+    Ipc(#[from] IpcError),
     #[error(transparent)]
     Git(#[from] git2::Error),
     #[error(transparent)]
     LockFile(#[from] LockFileError),
-    #[error(transparent)]
-    VersionMismatch(#[from] crate::connection::VersionMismatchError),
 }
 
 const STAGED_HEADER: &str = "Changes to be committed:

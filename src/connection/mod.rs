@@ -95,6 +95,21 @@ pub enum ServerMessage {
     },
 }
 
+/// Errors that can occur during client-server IPC communication.
+#[derive(Debug, Error)]
+pub enum IpcError {
+    #[error(transparent)]
+    BincodeEncode(#[from] bincode::error::EncodeError),
+    #[error(transparent)]
+    BincodeDecode(#[from] bincode::error::DecodeError),
+    #[error(transparent)]
+    IO(#[from] std::io::Error),
+    #[error(transparent)]
+    VersionMismatch(#[from] VersionMismatchError),
+}
+
+pub type IpcResult<T> = Result<T, IpcError>;
+
 /// Error returned when the client and server IPC versions do not match.
 #[derive(Clone, Debug, Error)]
 pub struct VersionMismatchError {

@@ -5,20 +5,14 @@ use std::{fmt, path::Path};
 
 use thiserror::Error;
 
-use crate::connection::{DebugState, client::request_debug};
+use crate::connection::{DebugState, IpcError, client::request_debug};
 
 pub type DebugResult<T> = Result<T, DebugError>;
 
 #[derive(Debug, Error)]
 pub enum DebugError {
     #[error(transparent)]
-    BincodeEncode(#[from] bincode::error::EncodeError),
-    #[error(transparent)]
-    BincodeDecode(#[from] bincode::error::DecodeError),
-    #[error(transparent)]
-    IO(#[from] std::io::Error),
-    #[error(transparent)]
-    VersionMismatch(#[from] crate::connection::VersionMismatchError),
+    Ipc(#[from] IpcError),
 }
 
 /// Issues a debug state request to the watch server for `root_path` and prints

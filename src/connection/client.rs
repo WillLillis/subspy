@@ -13,15 +13,11 @@ use log::error;
 use crate::{
     StatusSummary,
     connection::{
-        BINCODE_CFG, ClientMessage, ClientRequest, DebugState, IPC_VERSION, IpcStream,
+        BINCODE_CFG, ClientMessage, ClientRequest, DebugState, IPC_VERSION, IpcResult, IpcStream,
         ServerMessage, VersionMismatchError, ipc_connect, ipc_socket_path, read_full_message,
         write_full_message,
     },
     create_progress_bar,
-    debug::DebugResult,
-    reindex::ReindexResult,
-    shutdown::ShutdownResult,
-    status::StatusResult,
     watch::spawn_daemon,
 };
 
@@ -34,7 +30,7 @@ pub fn request_reindex(
     root_path: &Path,
     replace_watchers: bool,
     display_progress: bool,
-) -> ReindexResult<()> {
+) -> IpcResult<()> {
     let sock_path = ipc_socket_path(root_path);
     let conn = ipc_connect(&sock_path)?;
     let mut conn = BufReader::new(conn);
@@ -105,7 +101,7 @@ pub fn request_reindex(
 /// # Errors
 ///
 /// Returns `Err` if client-server communication or bincode encoding/decoding fails.
-pub fn request_shutdown(root_path: &Path) -> ShutdownResult<()> {
+pub fn request_shutdown(root_path: &Path) -> IpcResult<()> {
     let sock_path = ipc_socket_path(root_path);
     let conn = ipc_connect(&sock_path)?;
     let mut conn = BufReader::new(conn);
@@ -153,7 +149,7 @@ pub fn request_shutdown(root_path: &Path) -> ShutdownResult<()> {
 /// call with no overhead. If the connection fails with `ConnectionRefused` or
 /// `NotFound`, a new server is spawned and the connection is retried until
 /// it succeeds, the user terminates the program, or 10 seconds pass.
-fn connect_to_server(root_path: &Path) -> StatusResult<BufReader<IpcStream>> {
+fn connect_to_server(root_path: &Path) -> IpcResult<BufReader<IpcStream>> {
     let sock_path = ipc_socket_path(root_path);
     match ipc_connect(&sock_path) {
         Ok(conn) => return Ok(BufReader::new(conn)),
@@ -233,7 +229,7 @@ pub fn server_not_started(e: &std::io::Error) -> bool {
 /// # Errors
 ///
 /// Returns error if the ipc channel cannot be created or the request cannot be sent.
-pub fn send_status_request(root_path: &Path) -> StatusResult<BufReader<IpcStream>> {
+pub fn send_status_request(root_path: &Path) -> IpcResult<BufReader<IpcStream>> {
     let mut conn = connect_to_server(root_path)?;
     let req = ClientRequest::new(ClientMessage::Status(std::process::id()));
     let mut req_msg = [0; 9]; // 1 byte version + 4 byte variant index + 4 byte u32 pid (fixint)
@@ -252,7 +248,7 @@ pub fn send_status_request(root_path: &Path) -> StatusResult<BufReader<IpcStream
 pub fn recv_status_response(
     conn: &mut BufReader<IpcStream>,
     display_progress: bool,
-) -> StatusResult<(Vec<(String, StatusSummary)>, u32)> {
+) -> IpcResult<(Vec<(String, StatusSummary)>, u32)> {
     let progress_bar = display_progress.then(|| create_progress_bar(0, "Indexing in progress..."));
     let mut buffer = Vec::with_capacity(4096); // empirically ~2 KiB on a test repo
     // TODO: This would be better as a `try` block if that's ever stabilized
@@ -308,7 +304,7 @@ pub fn recv_status_response(
 /// # Errors
 ///
 /// Returns `Err` if client-server communication or bincode encoding/decoding fails.
-pub fn request_debug(root_path: &Path) -> DebugResult<DebugState> {
+pub fn request_debug(root_path: &Path) -> IpcResult<DebugState> {
     let sock_path = ipc_socket_path(root_path);
     let conn = ipc_connect(&sock_path)?;
     let mut conn = BufReader::new(conn);

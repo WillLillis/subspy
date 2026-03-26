@@ -8,9 +8,11 @@ use thiserror::Error;
 
 use crate::{
     StatusSummary,
-    connection::client::{recv_status_response, send_status_request},
+    connection::{
+        IpcError,
+        client::{recv_status_response, send_status_request},
+    },
     git::parse_gitmodules,
-    status::StatusError,
     template::{
         TemplateError, expand_template, find_placeholder, find_unescaped, validate_template,
     },
@@ -23,7 +25,7 @@ pub enum ListError {
     #[error(transparent)]
     Git(#[from] git2::Error),
     #[error(transparent)]
-    Status(#[from] StatusError),
+    Ipc(#[from] IpcError),
     #[error(transparent)]
     Template(#[from] TemplateError),
 }
