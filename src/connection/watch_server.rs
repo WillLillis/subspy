@@ -1344,17 +1344,24 @@ impl WatchServer {
                     Some(EventType::RootGitOperation) => {
                         if !self.root_rebasing {
                             if index == DOT_GITMODULES_WATCHER_IDX {
+                                // .gitmodules changed, defer reindex. Don't
+                                // spawn submodule tasks here: individual
+                                // submodule statuses aren't affected until the
+                                // reindex runs, and the git operation that
+                                // modified .gitmodules will produce its own
+                                // root events (index rename, etc.) that spawn
+                                // tasks independently.
                                 gitmodules.on_gitmodules_changed();
                             } else {
                                 gitmodules.on_root_event(&event);
-                            }
-                            for i in ROOT_WATCHER_COUNT..self.watchers.len() {
-                                if !self.skip_set.contains(&i) {
-                                    self.try_spawn_submod_update(
-                                        i,
-                                        &in_flight,
-                                        &pending_lock_retries,
-                                    );
+                                for i in ROOT_WATCHER_COUNT..self.watchers.len() {
+                                    if !self.skip_set.contains(&i) {
+                                        self.try_spawn_submod_update(
+                                            i,
+                                            &in_flight,
+                                            &pending_lock_retries,
+                                        );
+                                    }
                                 }
                             }
                         }
