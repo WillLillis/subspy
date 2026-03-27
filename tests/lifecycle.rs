@@ -8,7 +8,7 @@ use subspy::{
     connection::{
         BINCODE_CFG, ClientMessage, ClientRequest, IPC_VERSION, ServerMessage,
         client::request_reindex, ipc_connect, ipc_socket_path, read_full_message_fixed,
-        uses_filesystem_sockets, write_full_message,
+        uses_filesystem_sockets, write_full_message_fixed,
     },
 };
 
@@ -70,7 +70,7 @@ fn version_mismatch_returns_error_and_server_stays_alive(_run: u32) {
     };
     let mut req_msg = [0; 9];
     let req_msg_len = bincode::encode_into_slice(&bad_request, &mut req_msg, BINCODE_CFG).unwrap();
-    write_full_message(&mut conn, &req_msg[..req_msg_len]).unwrap();
+    write_full_message_fixed(&mut conn, &req_msg[..req_msg_len]).unwrap();
 
     // Read the response - should be VersionMismatch
     let mut buffer = [0u8; 5];

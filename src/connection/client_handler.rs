@@ -15,8 +15,8 @@ use log::{error, info};
 use crate::{
     StatusSummary,
     connection::{
-        BINCODE_CFG, ClientMessage, ClientRequest, IPC_VERSION, ServerMessage,
-        read_full_message_fixed, write_full_message,
+        BINCODE_CFG, ClientMessage, ClientRequest, IPC_VERSION, ServerMessage, encode_and_write,
+        read_full_message_fixed, write_full_message_fixed,
     },
     watch::WatchResult,
 };
@@ -117,7 +117,7 @@ fn dispatch_client_message(
         // VersionMismatch: 4 byte variant index + 1 byte u8 (fixint)
         let mut resp_buf = [0u8; 5];
         let resp_len = bincode::encode_into_slice(resp, &mut resp_buf, BINCODE_CFG)?;
-        write_full_message(&mut conn, &resp_buf[..resp_len])?;
+        write_full_message_fixed(&mut conn, &resp_buf[..resp_len])?;
         return Ok(());
     }
 
@@ -188,9 +188,7 @@ fn handle_status_request(
         total,
     };
     ENCODE_BUF.with_borrow_mut(|buf| -> WatchResult<()> {
-        buf.clear();
-        bincode::encode_into_std_write(msg, buf, BINCODE_CFG)?;
-        write_full_message(&mut conn, buf)?;
+        encode_and_write(&mut conn, msg, buf)?;
         Ok(())
     })?;
 
@@ -250,7 +248,7 @@ fn try_send_progress_update(
     // 4 byte variant index + 4 byte u32 curr + 4 byte u32 total (fixint)
     let mut progress_msg = [0; 12];
     let progress_msg_len = bincode::encode_into_slice(progress, &mut progress_msg, BINCODE_CFG)?;
-    write_full_message(conn, &progress_msg[..progress_msg_len])?;
+    write_full_message_fixed(conn, &progress_msg[..progress_msg_len])?;
 
     Ok(curr == total)
 }

@@ -165,15 +165,23 @@ pub fn uses_filesystem_sockets() -> bool {
 }
 
 /// Sets the receive timeout on the IPC stream.
+///
+/// # Errors
+///
+/// Returns `std::io::Error` if the timeout cannot be set.
 #[cfg(not(target_os = "windows"))]
-fn set_recv_timeout(stream: &IpcStream, timeout: Option<Duration>) -> std::io::Result<()> {
+pub fn set_recv_timeout(stream: &IpcStream, timeout: Option<Duration>) -> std::io::Result<()> {
     use interprocess::local_socket::traits::Stream as _;
     stream.set_recv_timeout(timeout)
 }
 
 /// Sets the receive timeout on the IPC stream.
+///
+/// # Errors
+///
+/// Returns `std::io::Error` if the timeout cannot be set.
 #[cfg(target_os = "windows")]
-fn set_recv_timeout(stream: &IpcStream, timeout: Option<Duration>) -> std::io::Result<()> {
+pub fn set_recv_timeout(stream: &IpcStream, timeout: Option<Duration>) -> std::io::Result<()> {
     stream.set_read_timeout(timeout)
 }
 
@@ -191,24 +199,56 @@ const MAX_FIXED_MSG_LEN: usize = 12;
 /// Stack buffer size for [`write_full_message`]'s single-write fast path.
 const INLINE_WRITE_BUF_LEN: usize = MSG_PREFIX_LEN + MAX_FIXED_MSG_LEN;
 
-/// Writes all of `msg` to `conn`, prepended by the length as a LE u32.
+/// Encodes `msg` into `buf` with a LE u32 length prefix and writes the
+/// entire framed message to `conn` in a single `write_all` call.
+///
+/// `buf` is cleared and reused to avoid allocating on every call. The
+/// length prefix is reserved up front, the message is encoded after it,
+/// and the prefix is backfilled before writing.
 ///
 /// # Errors
 ///
-/// Returns `std::io::Error` if writing to `conn` fails
+/// Returns `Err` if bincode encoding or writing to `conn` fails.
+pub fn encode_and_write(
+    conn: &mut BufReader<IpcStream>,
+    msg: impl Encode,
+    buf: &mut Vec<u8>,
+) -> IpcResult<()> {
+    buf.clear();
+    buf.extend_from_slice(&[0u8; MSG_PREFIX_LEN]);
+    let msg_len = bincode::encode_into_std_write(msg, buf, BINCODE_CFG)? as u32;
+    buf[..MSG_PREFIX_LEN].copy_from_slice(&msg_len.to_le_bytes());
+    conn.get_mut().write_all(buf)?;
+    Ok(())
+}
+
+/// Writes a fixed-size `msg` to `conn`, prepended by the length as a LE u32.
+///
+/// The length prefix and body are combined into a single `write_all` call
+/// via a stack buffer.
+///
+/// # Errors
+///
+/// Returns `std::io::Error` if writing to `conn` fails.
+///
+/// # Panics
+///
+/// Debug-panics if `msg` exceeds [`MAX_FIXED_MSG_LEN`] bytes.
 #[inline]
-pub fn write_full_message(conn: &mut BufReader<IpcStream>, msg: &[u8]) -> std::io::Result<()> {
+pub fn write_full_message_fixed(
+    conn: &mut BufReader<IpcStream>,
+    msg: &[u8],
+) -> std::io::Result<()> {
+    debug_assert!(
+        msg.len() <= MAX_FIXED_MSG_LEN,
+        "Message length {} exceeds MAX_FIXED_MSG_LEN ({MAX_FIXED_MSG_LEN})",
+        msg.len(),
+    );
     let len_bytes = (msg.len() as u32).to_le_bytes();
-    let stream = conn.get_mut();
-    if msg.len() <= MAX_FIXED_MSG_LEN {
-        let mut buf = [0u8; INLINE_WRITE_BUF_LEN];
-        buf[..MSG_PREFIX_LEN].copy_from_slice(&len_bytes);
-        buf[MSG_PREFIX_LEN..MSG_PREFIX_LEN + msg.len()].copy_from_slice(msg);
-        stream.write_all(&buf[..MSG_PREFIX_LEN + msg.len()])
-    } else {
-        stream.write_all(&len_bytes)?;
-        stream.write_all(msg)
-    }
+    let mut buf = [0u8; INLINE_WRITE_BUF_LEN];
+    buf[..MSG_PREFIX_LEN].copy_from_slice(&len_bytes);
+    buf[MSG_PREFIX_LEN..MSG_PREFIX_LEN + msg.len()].copy_from_slice(msg);
+    conn.get_mut().write_all(&buf[..MSG_PREFIX_LEN + msg.len()])
 }
 
 /// Reads a length-prefixed message into a stack buffer of size `N`.
@@ -240,9 +280,8 @@ pub fn read_full_message_fixed<const N: usize>(
 
 /// Reads from `conn` into `buffer` expecting the message length as a LE u32 first.
 ///
-/// When `timeout` is `Some`, the socket's receive timeout is temporarily set
-/// for the duration of the read, then cleared on return. When `timeout` is
-/// `None`, reads block normally.
+/// The caller is responsible for setting any socket timeout via
+/// [`set_recv_timeout`] before calling this function.
 ///
 /// # Errors
 ///
@@ -250,30 +289,28 @@ pub fn read_full_message_fixed<const N: usize>(
 pub fn read_full_message(
     conn: &mut BufReader<IpcStream>,
     buffer: &mut Vec<u8>,
-    timeout: Option<Duration>,
 ) -> std::io::Result<()> {
     buffer.clear();
-
-    if let Some(duration) = timeout {
-        set_recv_timeout(conn.get_ref(), Some(duration))?;
-    }
-
-    // TODO: Yet another strong candidate for a `try` block
-    let result = (|| {
-        let msg_len = {
-            let mut len_buf = [0u8; 4];
-            conn.read_exact(&mut len_buf)?;
-            u32::from_le_bytes(len_buf) as usize
+    let msg_len = {
+        let mut len_buf = [0u8; 4];
+        conn.read_exact(&mut len_buf)?;
+        u32::from_le_bytes(len_buf) as usize
+    };
+    // SAFETY: `read_exact` will fill exactly `msg_len` bytes, so there's no
+    // risk of reading uninitialized memory. We set the length first so
+    // `read_exact` can write directly into the buffer without a redundant
+    // zero-fill from `resize`.
+    #[expect(
+        clippy::uninit_vec,
+        reason = "read_exact fills the buffer before it's read"
+    )]
+    {
+        buffer.reserve(msg_len);
+        unsafe {
+            buffer.set_len(msg_len);
         };
-        buffer.resize(msg_len, 0);
-        conn.read_exact(buffer)
-    })();
-
-    if timeout.is_some() {
-        let _ = set_recv_timeout(conn.get_ref(), None);
     }
-
-    result
+    conn.read_exact(buffer)
 }
 
 /// Returns the socket path used for IPC on the current platform.

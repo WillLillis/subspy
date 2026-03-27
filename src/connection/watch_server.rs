@@ -27,7 +27,7 @@ use crate::{
     DOT_GIT, DOT_GITMODULES, StatusSummary,
     connection::{
         BINCODE_CFG, DebugState, IpcStream, ServerMessage, cleanup_socket, create_listener,
-        ipc_socket_path, write_full_message,
+        encode_and_write, ipc_socket_path, write_full_message_fixed,
     },
     create_progress_bar,
     git::parse_gitmodules,
@@ -617,6 +617,12 @@ impl WatchServer {
         if place_submod_watches {
             self.modules_path_to_index.clear();
         }
+        // NOTE: Watcher placement must NOT be parallelized. Creating
+        // `notify::RecommendedWatcher` instances concurrently on rayon threads
+        // causes watchers to silently miss subsequent filesystem events, likely
+        // due to interference between rayon's work-stealing and notify's
+        // internal event threads. This was measured and reverted.
+        //
         // Every submodule occupies a slot in this loop regardless of whether
         // its status read succeeded. This keeps `index` (= ROOT_WATCHER_COUNT + i)
         // aligned with watcher positions across calls: rayon preserves order for
@@ -627,7 +633,7 @@ impl WatchServer {
             let index = ROOT_WATCHER_COUNT + i;
             // Only populate status/skip_set/modules_path_to_index on success.
             // Failed submodules get no status entry but still reserve a watcher
-            // slot — the watcher will generate events that trigger re-reads via
+            // slot -- the watcher will generate events that trigger re-reads via
             // try_spawn_submod_update, so the status will eventually converge.
             if let Ok((modules_path, status, is_in_rebase)) = inner {
                 status_guard.insert(relative_path.clone(), status);
@@ -734,7 +740,7 @@ impl WatchServer {
         let mut buf = [0; 4]; // unit variant: 4 byte variant index (fixint)
         match bincode::encode_into_slice(ServerMessage::ShutdownAck, &mut buf, BINCODE_CFG) {
             Ok(_) => {
-                if let Err(e) = write_full_message(&mut conn, &buf) {
+                if let Err(e) = write_full_message_fixed(&mut conn, &buf) {
                     error!("Failed to send shutdown ack -- {e}");
                 }
             }
@@ -1260,15 +1266,9 @@ impl WatchServer {
     ) {
         let state = self.gather_debug_state(in_flight);
         let msg = ServerMessage::DebugInfo(Box::new(state));
-        match bincode::encode_to_vec(msg, BINCODE_CFG) {
-            Ok(serialized) => {
-                if let Err(e) = write_full_message(conn, &serialized) {
-                    error!("Failed to send debug state -- {e}");
-                }
-            }
-            Err(e) => {
-                error!("Failed to encode debug state -- {e}");
-            }
+        let mut buf = Vec::with_capacity(1024);
+        if let Err(e) = encode_and_write(conn, msg, &mut buf) {
+            error!("Failed to send debug state -- {e}");
         }
     }
 

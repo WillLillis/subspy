@@ -15,7 +15,8 @@ use crate::{
     StatusSummary,
     connection::{
         BINCODE_CFG, ClientMessage, ClientRequest, ServerMessage, client::server_not_started,
-        ipc_connect, ipc_socket_path, read_full_message, write_full_message,
+        ipc_connect, ipc_socket_path, read_full_message, set_recv_timeout,
+        write_full_message_fixed,
     },
     git::parse_gitmodules,
     status::compute_local_statuses,
@@ -155,24 +156,33 @@ fn try_get_statuses(
     let req = ClientRequest::new(ClientMessage::Status(std::process::id()));
     let mut req_msg = [0; 9];
     let req_msg_len = bincode::encode_into_slice(&req, &mut req_msg, BINCODE_CFG).ok()?;
-    write_full_message(&mut conn, &req_msg[..req_msg_len]).ok()?;
+    write_full_message_fixed(&mut conn, &req_msg[..req_msg_len]).ok()?;
+
+    // Setting the timeout once here instead of per read will cause later reads to have more time
+    // than they actually should, however if something has gone wrong  the first failing read should
+    // cause a short circuit. Setting the timeout for every read is expensive, so we set it here
+    // instead.
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    set_recv_timeout(conn.get_ref(), Some(remaining)).ok()?;
 
     let mut buffer = Vec::with_capacity(4096);
-    loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        read_full_message(&mut conn, &mut buffer, Some(remaining)).ok()?;
+    let result = loop {
+        read_full_message(&mut conn, &mut buffer).ok()?;
         let (resp_msg, _): (ServerMessage, usize) =
             bincode::borrow_decode_from_slice(&buffer, BINCODE_CFG).ok()?;
         match resp_msg {
-            ServerMessage::Status { statuses, total } => return Some((statuses, total)),
+            ServerMessage::Status { statuses, total } => break Some((statuses, total)),
             ServerMessage::Indexing { .. } => {}
             ServerMessage::VersionMismatch { .. }
             | ServerMessage::ShutdownAck
             | ServerMessage::DebugInfo(_) => {
-                return None;
+                break None;
             }
         }
-    }
+    };
+
+    let _ = set_recv_timeout(conn.get_ref(), None);
+    result
 }
 
 #[cfg(test)]

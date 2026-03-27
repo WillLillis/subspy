@@ -15,7 +15,7 @@ use crate::{
     connection::{
         BINCODE_CFG, ClientMessage, ClientRequest, DebugState, IPC_VERSION, IpcResult, IpcStream,
         ServerMessage, VersionMismatchError, ipc_connect, ipc_socket_path, read_full_message,
-        read_full_message_fixed, write_full_message,
+        read_full_message_fixed, write_full_message_fixed,
     },
     create_progress_bar,
     watch::spawn_daemon,
@@ -42,7 +42,7 @@ pub fn request_reindex(
     // 1 byte version + 4 byte variant index + 4 byte u32 pid + 1 byte bool (fixint)
     let mut msg = [0; 10];
     let msg_len = bincode::encode_into_slice(&req, &mut msg, BINCODE_CFG)?;
-    write_full_message(&mut conn, &msg[..msg_len])?;
+    write_full_message_fixed(&mut conn, &msg[..msg_len])?;
 
     let progress_bar =
         display_progress.then(|| create_progress_bar(0, "Reindexing in progress..."));
@@ -100,7 +100,7 @@ pub fn request_shutdown(root_path: &Path) -> IpcResult<()> {
     let req = ClientRequest::new(ClientMessage::Shutdown);
     let mut msg = [0; 5]; // 1 byte version + 4 byte variant index (fixint)
     let msg_len = bincode::encode_into_slice(&req, &mut msg, BINCODE_CFG)?;
-    write_full_message(&mut conn, &msg[..msg_len])?;
+    write_full_message_fixed(&mut conn, &msg[..msg_len])?;
 
     // Wait for the watch server to acknowledge the shutdown.
     // VersionMismatch { u8 } = 5 bytes is the largest possible response.
@@ -219,7 +219,7 @@ pub fn send_status_request(root_path: &Path) -> IpcResult<BufReader<IpcStream>> 
     let req = ClientRequest::new(ClientMessage::Status(std::process::id()));
     let mut req_msg = [0; 9]; // 1 byte version + 4 byte variant index + 4 byte u32 pid (fixint)
     let req_msg_len = bincode::encode_into_slice(&req, &mut req_msg, BINCODE_CFG)?;
-    write_full_message(&mut conn, &req_msg[..req_msg_len])?;
+    write_full_message_fixed(&mut conn, &req_msg[..req_msg_len])?;
     Ok(conn)
 }
 
@@ -238,7 +238,7 @@ pub fn recv_status_response(
     let mut buffer = Vec::with_capacity(4096); // empirically ~2 KiB on a test repo
     // TODO: This would be better as a `try` block if that's ever stabilized
     let result = loop {
-        if let Err(e) = read_full_message(conn, &mut buffer, None) {
+        if let Err(e) = read_full_message(conn, &mut buffer) {
             break Err(e.into());
         }
 
@@ -296,10 +296,10 @@ pub fn request_debug(root_path: &Path) -> IpcResult<DebugState> {
     let req = ClientRequest::new(ClientMessage::Debug);
     let mut msg = [0; 5]; // 1 byte version + 4 byte variant index (fixint)
     let msg_len = bincode::encode_into_slice(&req, &mut msg, BINCODE_CFG)?;
-    write_full_message(&mut conn, &msg[..msg_len])?;
+    write_full_message_fixed(&mut conn, &msg[..msg_len])?;
 
     let mut buffer = Vec::with_capacity(1024);
-    read_full_message(&mut conn, &mut buffer, None)?;
+    read_full_message(&mut conn, &mut buffer)?;
     let (resp, _): (ServerMessage, usize) =
         bincode::borrow_decode_from_slice(&buffer, BINCODE_CFG)?;
 
