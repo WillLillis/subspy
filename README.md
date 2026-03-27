@@ -7,18 +7,19 @@ A faster `git status` when working in repositories with many submodules.
 Running `git status` at the top level of a repository with many submodules can take tens of seconds to minutes. This performance
 issue is amplified on Windows, which is hindered by Windows Defender as well as an inefficient [lstat implementation](https://git-scm.com/docs/git-update-index#_using_assume_unchanged_bit).
 
-There are a few potential workarounds you should try before using this tool, including 
+There are a few potential workarounds you should try before using this tool, including
 
 - Running `git gc`
 - Set `ignore = dirty` as needed in your `.gitmodules` file (Usually unacceptable for anything besides vendored dependencies)
-- Don't use submodules ;)
+- Don't use submodules
+- Don't use Windows ;)
 
 ### The Solution
 
 SubSpy provides a solution to this issue by placing recursive filesystem watches on your repository's `.git` folder, `.gitmodules`
 file, and all submodule directories. The status for all submodules is cached by an initial indexing operation and updated
-any time a change is detected in one of these locations. For sufficiently many submodules, `subspy status` is usually
-100-300x faster than `git status` on Windows, and 20-40x faster on Linux.
+any time a change is detected in one of these locations. For sufficiently many submodules, `subspy status` is typically
+100-1000x faster than `git status` on Windows and 30-160x faster on Linux, with the gap widening as working tree churn increases.
 
 ### Usage
 
@@ -91,11 +92,14 @@ Note that the project's current Minimum Supported Rust Version (MSRV) is 1.87.0.
 
 #### Outrageous Anecdotal Performance Claims
 
-For both of the following data points, the `subspy` measurement was taken twice and both times are shown. The first
-measures the time to start the watch server, connect to it, and display the status. The second measures the time to connect
-to the existing server and display the status. The `git` measurement was taken after already running `git status` to "preheat"
-any caching mechanisms git may have in place. Note that making changes within or performing git operations on a repository
-may increase the runtime of the next `git status` invocation, while `subspy status`'s should remain constant.
+The first two `subspy` measurements show cold and warm performance: the first starts a new watch server and waits for
+initial indexing, the second connects to the already-running server.
+
+`git status` must stat every tracked file to detect modifications, so its runtime scales with the size of the working tree
+and how recently files were touched. Operations like branch switches, bulk reformatting, or build systems that update
+timestamps force git to re-examine every file. `subspy status` reads from a cache maintained by filesystem watchers,
+so its runtime is constant regardless of working tree churn. The `touch` measurements below simulate this worst case by
+updating the timestamp on every tracked file.
 
 - Windows:
 
@@ -104,41 +108,62 @@ on a private repo with >200 submodules, running on Windows 11 with git bash. Not
 exits already takes ~80ms on the machine this measurement was performed on.
 
 ```sh
+~/very_large_project/ > time git status
+real    0m11.952s
+user    0m0.015s
+sys     0m0.000s
+
 ~/very_large_project/ > time subspy status # Spawns a new watch server
-real    0m0.745s
+real    0m0.463s
 user    0m0.000s
 sys     0m0.000s
 
 ~/very_large_project/ > time subspy status # Connects to previously spawned server
-real    0m0.117s
+real    0m0.102s
 user    0m0.000s
 sys     0m0.000s
 
+~/very_large_project/ > find . -not -path './.git/*' -exec touch {} + # simulate heavy working tree churn
+
 ~/very_large_project/ > time git status
-real    0m15.667s
-user    0m0.015s
+real    1m56.328s
+user    0m0.000s
 sys     0m0.000s
+
+~/very_large_project/ > time subspy status
+real    0m0.107s
+user    0m0.000s
+sys     0m0.015s
+
 ```
 
 - Linux:
 
-Git's performance is typically acceptable on Linux platforms. Testing on [boost](https://github.com/boostorg/boost), we
-see a much smaller performance gain:
+Git's performance is typically acceptable on Linux platforms. Testing on [boost](https://github.com/boostorg/boost) with
+172 submodules in a clean working tree, we see a smaller but still noticeable performance difference:
 
 ```sh
+~/boost/ > time git status
+git status  0.08s user 0.19s system 105% cpu 0.258 total
+
 ~/boost/ > time subspy status # Spawns a new watch server
-subspy status  0.01s user 0.00s system 3% cpu 0.375 total
+subspy status  0.01s user 0.00s system 4% cpu 0.211 total
 
 ~/boost/ > time subspy status # Connects to previously spawned server
-subspy status  0.01s user 0.00s system 97% cpu 0.012 total
+subspy status  0.01s user 0.00s system 93% cpu 0.009 total
+
+~/boost/ > find . -not -path './.git/*' -exec touch {} + # simulate heavy working tree churn
 
 ~/boost/ > time git status
-git st  0.07s user 0.21s system 104% cpu 0.264 total
+git status  1.08s user 0.38s system 100% cpu 1.442 total
+
+~/boost/ > time subspy status
+subspy status  0.01s user 0.00s system 97% cpu 0.009 total
 ```
 
 #### Limitations
 
-- Watch servers for nested submodules (submodules which contain submodules of their own) is not supported. `subspy` must
+- Nested submodules (submodules which contain submodules of their own) are not supported. `subspy` must
 be run from the top-level of the repository.
 - On Linux, each watch server consumes inotify watches. For very large repositories or many concurrent servers, you may
 need to increase the system limit (e.g. `sudo sysctl fs.inotify.max_user_watches=<value>`).
