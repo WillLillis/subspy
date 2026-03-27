@@ -11,7 +11,7 @@ use log::{error, trace};
 use notify::{RecursiveMode, Watcher as _};
 use thiserror::Error;
 
-use crate::connection::watch_server::ServerWatcher;
+use crate::connection::{IpcError, watch_server::ServerWatcher};
 
 pub type WatchResult<T> = Result<T, WatchError>;
 
@@ -21,6 +21,8 @@ pub enum WatchError {
     BincodeEncode(#[from] bincode::error::EncodeError),
     #[error(transparent)]
     BincodeDecode(#[from] bincode::error::DecodeError),
+    #[error(transparent)]
+    Ipc(#[from] IpcError),
     #[error(transparent)]
     FileWatch(#[from] notify::Error),
     #[error(transparent)]
