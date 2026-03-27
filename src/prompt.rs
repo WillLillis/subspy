@@ -158,15 +158,18 @@ fn try_get_statuses(
     let req_msg_len = bincode::encode_into_slice(&req, &mut req_msg, BINCODE_CFG).ok()?;
     write_full_message_fixed(&mut conn, &req_msg[..req_msg_len]).ok()?;
 
-    // Setting the timeout once here instead of per read will cause later reads to have more time
-    // than they actually should, however if something has gone wrong  the first failing read should
-    // cause a short circuit. Setting the timeout for every read is expensive, so we set it here
-    // instead.
+    // Setting the socket timeout per-read is expensive (setsockopt syscall), so we set it
+    // once here and check the deadline at the top of each iteration instead. This limits
+    // a catastrophically slow read to at most one, with the deadline check preventng the
+    // start of another.
     let remaining = deadline.saturating_duration_since(Instant::now());
     set_recv_timeout(conn.get_ref(), Some(remaining)).ok()?;
 
     let mut buffer = Vec::with_capacity(4096);
     let result = loop {
+        if Instant::now() >= deadline {
+            break None;
+        }
         read_full_message(&mut conn, &mut buffer).ok()?;
         let (resp_msg, _): (ServerMessage, usize) =
             bincode::borrow_decode_from_slice(&buffer, BINCODE_CFG).ok()?;
