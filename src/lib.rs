@@ -37,7 +37,7 @@ pub enum RepoKind {
 }
 
 #[derive(Clone, Copy, Eq, PartialEq, PartialOrd, Ord, Hash, Encode, BorrowDecode)]
-pub struct StatusSummary(u32);
+pub struct StatusSummary(u8);
 
 impl std::fmt::Debug for StatusSummary {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -58,13 +58,13 @@ impl std::fmt::Debug for StatusSummary {
 
 bitflags! {
     /// Represents the status of a submodule
-    impl StatusSummary: u32 {
+    impl StatusSummary: u8 {
         const MODIFIED_CONTENT  = 0b0000_0001;
         const UNTRACKED_CONTENT = 0b0000_0010;
         const NEW_COMMITS       = 0b0000_0100;
         const STAGED            = 0b0000_1000;
         const STAGED_NEW        = 0b0001_0000;
-        const LOCK_FAILURE      = 1 << 31;
+        const LOCK_FAILURE      = 0b1000_0000;
     }
 }
 
@@ -117,12 +117,6 @@ impl std::fmt::Display for StatusSummary {
         }
 
         Ok(())
-    }
-}
-
-impl From<u32> for StatusSummary {
-    fn from(value: u32) -> Self {
-        Self(value & Self::all().bits())
     }
 }
 

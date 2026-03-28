@@ -1575,7 +1575,10 @@ mod tests {
 
         let repo = Repository::open(&root).unwrap();
         let statuses = compute_local_statuses(&root, &repo).unwrap();
-        assert!(statuses.is_empty(), "clean repo should have no dirty submodules");
+        assert!(
+            statuses.is_empty(),
+            "clean repo should have no dirty submodules"
+        );
     }
 
     #[test]
