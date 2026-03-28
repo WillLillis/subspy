@@ -12,6 +12,7 @@ use crate::{
         IpcError,
         client::{recv_status_response, send_status_request},
     },
+    git::parse_gitmodules,
     paint,
     watch::{LockFileError, LockFileGuard},
 };
@@ -912,27 +913,21 @@ pub fn compute_local_statuses(
     use rayon::prelude::*;
 
     let lock_path = repo.path().join("index.lock");
-    let submodules = {
+    let gitmodule_entries = {
         let _lock = LockFileGuard::acquire(&lock_path)?;
-        repo.submodules()?
+        parse_gitmodules(root_path)?
     };
     let tl_repo = thread_local::ThreadLocal::new();
 
-    let paths: Vec<&str> = submodules
-        .iter()
-        .map(|s| s.path().to_str().expect("Submodule path is not UTF-8"))
-        .collect();
-
-    let statuses: StatusResult<Vec<_>> = paths
+    let statuses: StatusResult<Vec<_>> = gitmodule_entries
         .into_par_iter()
-        .map(|path| -> StatusResult<(&str, StatusSummary)> {
+        .map(|(_, path, _)| -> StatusResult<(String, StatusSummary)> {
             let repo = tl_repo.get_or_try(|| Repository::open(root_path))?;
-            let st = repo.submodule_status(path, git2::SubmoduleIgnore::None)?;
+            let st = repo.submodule_status(&path, git2::SubmoduleIgnore::None)?;
             let summary: StatusSummary = st.into();
             Ok((path, summary))
         })
         .filter(|r| !matches!(r, Ok((_, s)) if *s == StatusSummary::clean()))
-        .map(|r| r.map(|(path, s)| (path.to_string(), s)))
         .collect();
 
     statuses
@@ -1545,5 +1540,80 @@ mod tests {
                 "reword ccccccc Third commit",
             ]
         );
+    }
+
+    #[test]
+    fn compute_local_statuses_clean_repo() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().join("root");
+        let sub_src = tmp.path().join("sub_src");
+
+        // Create a source repo for the submodule
+        let sub_src_str = sub_src.display().to_string();
+        git(&["-C", &tmp.path().display().to_string(), "init", "sub_src"]);
+        std::fs::write(sub_src.join("README.md"), "sub\n").unwrap();
+        git(&["-C", &sub_src_str, "add", "-A"]);
+        git(&["-C", &sub_src_str, "commit", "-m", "init sub"]);
+
+        // Create root repo with a submodule
+        let root_str = root.display().to_string();
+        git(&["-C", &tmp.path().display().to_string(), "init", "root"]);
+        std::fs::write(root.join("file.txt"), "root\n").unwrap();
+        git(&["-C", &root_str, "add", "-A"]);
+        git(&["-C", &root_str, "commit", "-m", "init root"]);
+        git(&[
+            "-C",
+            &root_str,
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            &sub_src_str,
+            "my_sub",
+        ]);
+        git(&["-C", &root_str, "commit", "-m", "add submodule"]);
+
+        let repo = Repository::open(&root).unwrap();
+        let statuses = compute_local_statuses(&root, &repo).unwrap();
+        assert!(statuses.is_empty(), "clean repo should have no dirty submodules");
+    }
+
+    #[test]
+    fn compute_local_statuses_dirty_submodule() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().join("root");
+        let sub_src = tmp.path().join("sub_src");
+
+        let sub_src_str = sub_src.display().to_string();
+        git(&["-C", &tmp.path().display().to_string(), "init", "sub_src"]);
+        std::fs::write(sub_src.join("README.md"), "sub\n").unwrap();
+        git(&["-C", &sub_src_str, "add", "-A"]);
+        git(&["-C", &sub_src_str, "commit", "-m", "init sub"]);
+
+        let root_str = root.display().to_string();
+        git(&["-C", &tmp.path().display().to_string(), "init", "root"]);
+        std::fs::write(root.join("file.txt"), "root\n").unwrap();
+        git(&["-C", &root_str, "add", "-A"]);
+        git(&["-C", &root_str, "commit", "-m", "init root"]);
+        git(&[
+            "-C",
+            &root_str,
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            &sub_src_str,
+            "my_sub",
+        ]);
+        git(&["-C", &root_str, "commit", "-m", "add submodule"]);
+
+        // Dirty the submodule
+        std::fs::write(root.join("my_sub").join("new.txt"), "untracked\n").unwrap();
+
+        let repo = Repository::open(&root).unwrap();
+        let statuses = compute_local_statuses(&root, &repo).unwrap();
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].0, "my_sub");
+        assert!(statuses[0].1.contains(StatusSummary::UNTRACKED_CONTENT));
     }
 }
