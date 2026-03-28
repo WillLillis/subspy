@@ -1033,37 +1033,55 @@ impl WatchServer {
     /// Returns the path to the submodule's `.git/modules/` entry (e.g.
     /// `.git/modules/libs/foo` for a submodule at `libs/foo`).
     fn get_modules_path(&self, submod_rel_path: &str) -> WatchResult<PathBuf> {
-        // NOTE: There is a hypothetical bug here where if two submodules were renamed
-        // to each other's names _and_ their `.git/modules` entries weren't updated (i.e.,
-        // only the relative path in each submodule's `.git` file), the two paths
-        // will be swapped. This is highly unlikely to cause a bug in real use, and until
-        // it's proven to I would prefer to not pessimize the common case with a full read
-        // and parse of the `.git` file.
-        let alleged_submod_path = self.root_modules_path.join(submod_rel_path);
-        if alleged_submod_path.exists() {
-            return Ok(alleged_submod_path);
-        }
-
-        // The submodule was renamed at some point but its `.git` directory inside
-        // `.git/modules` wasn't updated, so we have to read the submodule's `.git`
-        // file to get the _actual_ relative path
+        // Read the submodule's `.git` file to find its actual modules path.
+        // We can't just assume `.git/modules/<submod_rel_path>` because git
+        // doesn't update the modules directory when a submodule is renamed.
         let dot_git_path = self.root_path.join(submod_rel_path).join(DOT_GIT);
-        let dot_git_contents = std::fs::read_to_string(&dot_git_path)?;
-        let actual_rel_path = dot_git_contents
-            .strip_prefix("gitdir: ")
+        let dot_git_bytes = std::fs::read(&dot_git_path)?;
+
+        // The file content is "gitdir: ../../.git/modules/name\n". We only
+        // need the part after ".git/modules/", so find that marker directly
+        // on the raw bytes (the marker is ASCII) and UTF-8 validate only
+        // the suffix (the submodule name, which may contain non-ASCII).
+        // The marker never appears before byte 10 ("gitdir: ../"), so skip
+        // that prefix when searching.
+        #[expect(
+            clippy::items_after_statements,
+            reason = "constants are function-local"
+        )]
+        const MODULES_MARKER: &[u8] = b".git/modules/";
+        #[expect(
+            clippy::items_after_statements,
+            reason = "constants are function-local"
+        )]
+        const MIN_PREFIX_LEN: usize = "gitdir: ../".len();
+        let suffix_start = dot_git_bytes
+            .get(MIN_PREFIX_LEN..)
+            .and_then(|tail| {
+                tail.windows(MODULES_MARKER.len())
+                    .position(|w| w == MODULES_MARKER)
+            })
             .ok_or_else(|| {
                 std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
                     format!(
-                        "Expected {} to start with \"gitdir: \"",
+                        "Expected {} to contain \".git/modules/\"",
                         dot_git_path.display()
                     ),
                 )
             })?
-            .trim();
-        Ok(dunce::canonicalize(
-            self.root_path.join(submod_rel_path).join(actual_rel_path),
-        )?)
+            + MIN_PREFIX_LEN
+            + MODULES_MARKER.len();
+
+        let suffix =
+            std::str::from_utf8(dot_git_bytes[suffix_start..].trim_ascii()).map_err(|e| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("{}: {e}", dot_git_path.display()),
+                )
+            })?;
+
+        Ok(self.root_modules_path.join(suffix))
     }
 
     /// Attempts to spawn a rayon task to update the status of the submodule at watcher `index`.
