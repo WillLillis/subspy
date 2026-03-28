@@ -4,7 +4,7 @@
 use std::{
     cell::RefCell,
     collections::{BTreeMap, VecDeque},
-    io::BufReader,
+    io::{BufReader, Write as _},
     sync::{Arc, MutexGuard},
 };
 
@@ -15,7 +15,7 @@ use log::{error, info};
 use crate::{
     StatusSummary,
     connection::{
-        BINCODE_CFG, ClientMessage, ClientRequest, IPC_VERSION, ServerMessage, encode_and_write,
+        BINCODE_CFG, ClientMessage, ClientRequest, IPC_VERSION, MSG_PREFIX_LEN, ServerMessage,
         read_full_message_fixed, write_full_message_fixed,
     },
     watch::WatchResult,
@@ -173,26 +173,65 @@ fn handle_status_request(
     _ = progress.lock().expect("Mutex poisoned").remove(&client_pid);
     let guard = result?;
 
-    let total = guard.len() as u32;
-    let mut status_out = Vec::with_capacity(total as usize);
-    for (submod_path, status) in guard
-        .iter()
-        .filter(|(_, st)| **st != StatusSummary::clean())
-    {
-        status_out.push((submod_path.clone(), *status));
-    }
-    drop(guard);
-
-    let msg = ServerMessage::Status {
-        statuses: status_out,
-        total,
-    };
     ENCODE_BUF.with_borrow_mut(|buf| -> WatchResult<()> {
-        encode_and_write(&mut conn, msg, buf)?;
+        encode_status_response(&mut conn, &guard, buf)?;
         Ok(())
     })?;
+    drop(guard);
 
     Ok(())
+}
+
+/// Encodes a `ServerMessage::Status` response directly from the status map guard,
+/// avoiding String clones by writing borrowed `&str` keys into the buffer.
+///
+/// The wire format matches the derived `Encode` for `ServerMessage::Status`:
+/// `variant(u32) | vec_len(u64) | [str_len(u64) + str_bytes + status(u8)]... | total(u32)`
+///
+/// # Errors
+///
+/// Returns `Err` if writing to `conn` fails.
+fn encode_status_response(
+    conn: &mut BufReader<IpcStream>,
+    guard: &MutexGuard<'_, BTreeMap<String, StatusSummary>>,
+    buf: &mut Vec<u8>,
+) -> WatchResult<()> {
+    encode_status_into(guard, buf);
+    conn.get_mut().write_all(buf)?;
+    Ok(())
+}
+
+/// Encodes a length-prefixed `ServerMessage::Status` into `buf` directly from
+/// the status map, avoiding String clones.
+///
+/// The payload after the length prefix is byte-identical to bincode's derived
+/// `Encode` for `ServerMessage::Status { statuses, total }`.
+fn encode_status_into(map: &BTreeMap<String, StatusSummary>, buf: &mut Vec<u8>) {
+    let total = map.len() as u32;
+    let dirty_count = map
+        .values()
+        .filter(|st| **st != StatusSummary::clean())
+        .count();
+
+    buf.clear();
+    buf.extend_from_slice(&[0u8; MSG_PREFIX_LEN]); // length prefix placeholder
+
+    // variant discriminant: Status = 0
+    buf.extend_from_slice(&0u32.to_le_bytes());
+    // vec length
+    buf.extend_from_slice(&dirty_count.to_le_bytes());
+    // entries
+    for (path, status) in map.iter().filter(|(_, st)| **st != StatusSummary::clean()) {
+        buf.extend_from_slice(&path.len().to_le_bytes());
+        buf.extend_from_slice(path.as_bytes());
+        buf.push(status.bits());
+    }
+    // total submodule count
+    buf.extend_from_slice(&total.to_le_bytes());
+
+    // Backfill the length prefix
+    let msg_len = (buf.len() - MSG_PREFIX_LEN) as u32;
+    buf[..MSG_PREFIX_LEN].copy_from_slice(&msg_len.to_le_bytes());
 }
 
 /// Handles a client's request to reindex the watch server. The reindex signal has already
@@ -269,5 +308,91 @@ fn get_status_guard_with_progress<'a>(
         if !try_send_progress_update(conn, client_pid, progress)? {
             std::thread::yield_now();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::connection::BINCODE_CFG;
+
+    /// Builds a reference encoding using bincode's derived Encode, and compares
+    /// it against our manual `encode_status_into`.
+    fn assert_encoding_matches(map: &BTreeMap<String, StatusSummary>) {
+        // Manual encoding
+        let mut manual_buf = Vec::new();
+        encode_status_into(map, &mut manual_buf);
+
+        // Derived encoding: replicate the old clone+encode path
+        let total = map.len() as u32;
+        let status_out: Vec<(String, StatusSummary)> = map
+            .iter()
+            .filter(|(_, st)| **st != StatusSummary::clean())
+            .map(|(path, st)| (path.clone(), *st))
+            .collect();
+        let msg = ServerMessage::Status {
+            statuses: status_out,
+            total,
+        };
+        let derived_payload = bincode::encode_to_vec(&msg, BINCODE_CFG).unwrap();
+
+        // manual_buf has a 4-byte length prefix; derived_payload does not
+        let manual_payload = &manual_buf[MSG_PREFIX_LEN..];
+        assert_eq!(
+            manual_payload,
+            &derived_payload[..],
+            "manual encoding does not match derived encoding"
+        );
+
+        // Verify the length prefix is correct
+        let prefix = u32::from_le_bytes(manual_buf[..MSG_PREFIX_LEN].try_into().unwrap()) as usize;
+        assert_eq!(prefix, manual_payload.len());
+    }
+
+    #[test]
+    fn encode_empty_map() {
+        assert_encoding_matches(&BTreeMap::new());
+    }
+
+    #[test]
+    fn encode_all_clean() {
+        let mut map = BTreeMap::new();
+        map.insert("sub_a".to_string(), StatusSummary::clean());
+        map.insert("sub_b".to_string(), StatusSummary::clean());
+        assert_encoding_matches(&map);
+    }
+
+    #[test]
+    fn encode_all_dirty() {
+        let mut map = BTreeMap::new();
+        map.insert("sub_a".to_string(), StatusSummary::MODIFIED_CONTENT);
+        map.insert("sub_b".to_string(), StatusSummary::UNTRACKED_CONTENT);
+        map.insert("sub_c".to_string(), StatusSummary::NEW_COMMITS);
+        assert_encoding_matches(&map);
+    }
+
+    #[test]
+    fn encode_mixed_clean_and_dirty() {
+        let mut map = BTreeMap::new();
+        map.insert("clean_one".to_string(), StatusSummary::clean());
+        map.insert("dirty_one".to_string(), StatusSummary::MODIFIED_CONTENT);
+        map.insert("clean_two".to_string(), StatusSummary::clean());
+        map.insert(
+            "dirty_two".to_string(),
+            StatusSummary::STAGED | StatusSummary::NEW_COMMITS,
+        );
+        assert_encoding_matches(&map);
+    }
+
+    #[test]
+    fn encode_combined_flags() {
+        let mut map = BTreeMap::new();
+        map.insert(
+            "libs/system".to_string(),
+            StatusSummary::MODIFIED_CONTENT
+                | StatusSummary::UNTRACKED_CONTENT
+                | StatusSummary::NEW_COMMITS,
+        );
+        assert_encoding_matches(&map);
     }
 }

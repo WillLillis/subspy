@@ -543,8 +543,6 @@ impl WatchServer {
         let results: Vec<_> = gitmodule_entries
             .into_par_iter()
             .map(|(_, relative_path, _)| {
-                let sub_start = std::time::Instant::now();
-
                 let full_path = root_path.join(&relative_path);
 
                 // TODO: This would be better as a `try` block if that's ever stabilized
@@ -601,12 +599,6 @@ impl WatchServer {
                 if let Some(pb) = &progress_bar {
                     pb.inc(1);
                 }
-                trace!(
-                    "Indexed {} in {}ms ({})",
-                    full_path.display(),
-                    sub_start.elapsed().as_millis(),
-                    if inner.is_ok() { "ok" } else { "error" },
-                );
 
                 (relative_path, full_path, inner)
             })

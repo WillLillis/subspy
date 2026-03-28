@@ -186,7 +186,7 @@ pub fn set_recv_timeout(stream: &IpcStream, timeout: Option<Duration>) -> std::i
 }
 
 /// Size of the LE u32 length prefix prepended to every IPC message.
-const MSG_PREFIX_LEN: usize = size_of::<u32>();
+pub(super) const MSG_PREFIX_LEN: usize = size_of::<u32>();
 
 /// Maximum encoded size of any fixed-size IPC message (i.e. messages that
 /// use stack buffers rather than `Vec`s). Currently the largest is

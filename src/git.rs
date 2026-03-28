@@ -20,6 +20,7 @@ pub fn parse_gitmodules(
     let config = git2::Config::open(&gitmodules_path)?;
     let mut entries = Vec::new();
 
+    let mut branch_key = String::from("submodule.");
     let mut iter = config.entries(Some("submodule\\..*\\.path"))?;
     while let Some(entry) = iter.next() {
         let entry = entry?;
@@ -33,7 +34,9 @@ pub fn parse_gitmodules(
             .value()
             .expect("non-UTF-8 path in .gitmodules")
             .to_string();
-        let branch_key = format!("submodule.{name}.branch");
+        branch_key.truncate("submodule.".len());
+        branch_key.push_str(name);
+        branch_key.push_str(".branch");
         let branch = config.get_string(&branch_key).ok();
         entries.push((name.to_string(), path, branch));
     }
