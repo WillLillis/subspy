@@ -135,6 +135,8 @@ fn parse_rebase_lines(content: &str) -> Vec<String> {
         .collect()
 }
 
+/// Reads rebase state from `.git/rebase-merge/` if an interactive or merge-backend
+/// rebase is in progress. Returns `None` if no such rebase is active.
 fn get_rebase_info(repo: &Repository) -> StatusResult<Option<RebaseInfo>> {
     // Use git2 for state detection; `open_rebase()` is not used because libgit2 does not
     // support opening interactive rebases started by the git command-line.
@@ -190,6 +192,7 @@ fn get_rebase_info(repo: &Repository) -> StatusResult<Option<RebaseInfo>> {
     }))
 }
 
+/// Prints the rebase status header with done/remaining operation lists.
 fn print_rebase_header(info: &RebaseInfo) {
     let label = if info.is_interactive {
         "interactive rebase"
@@ -343,6 +346,8 @@ fn read_short_oid(repo: &Repository, filename: &str) -> String {
     trimmed.get(..7).unwrap_or(trimmed).to_string()
 }
 
+/// Determines the repository's current operation state (rebase, merge, cherry-pick,
+/// etc.) and returns it along with branch/upstream info for display.
 fn get_header_state(repo: &Repository) -> StatusResult<HeaderState> {
     if let Some(info) = get_rebase_info(repo)? {
         return Ok(HeaderState::Rebase(info));
@@ -391,12 +396,15 @@ fn get_header_state(repo: &Repository) -> StatusResult<HeaderState> {
     }
 }
 
+/// Prints the status header: branch name, upstream tracking info, and any
+/// in-progress operation (rebase, merge, cherry-pick, etc.).
 fn print_header(repo: &Repository) -> StatusResult<()> {
     let state = get_header_state(repo)?;
     print_header_state(&state);
     Ok(())
 }
 
+/// Prints the operation-specific portion of the header (hints, conflict guidance, etc.).
 fn print_header_state(state: &HeaderState) {
     match state {
         HeaderState::Rebase(info) => print_rebase_header(info),
@@ -482,6 +490,8 @@ fn print_header_state(state: &HeaderState) {
     }
 }
 
+/// Prints the "Changes to be committed:" section for staged files, submodules,
+/// and deleted submodule paths. Returns `true` if anything was printed.
 fn print_staged_changes(
     non_submod: &Statuses<'_>,
     submodule_statuses: &[(String, StatusSummary)],
@@ -557,6 +567,8 @@ fn print_staged_changes(
     header
 }
 
+/// Prints the "Changes not staged for commit:" section for modified, deleted,
+/// and dirty-submodule entries. Returns `true` if anything was printed.
 fn print_unstaged_changes(
     non_submod: &Statuses<'_>,
     submodule_statuses: &[(String, StatusSummary)],
@@ -633,6 +645,7 @@ fn print_unstaged_changes(
     header
 }
 
+/// Prints the "Untracked files:" section. Returns `true` if any were printed.
 fn print_untracked_files(non_submod: &Statuses<'_>) -> bool {
     let mut header = false;
     for entry in non_submod
@@ -660,6 +673,7 @@ fn print_untracked_files(non_submod: &Statuses<'_>) -> bool {
     header
 }
 
+/// Prints the footer hint (e.g. "nothing added to commit but untracked files present").
 fn print_summary(changes_in_index: bool, changed_in_workdir: bool, has_untracked: bool) {
     match (changes_in_index, changed_in_workdir, has_untracked) {
         (false, true, _) => {
@@ -675,6 +689,7 @@ fn print_summary(changes_in_index: bool, changed_in_workdir: bool, has_untracked
     }
 }
 
+/// Prints error messages for submodules whose `index.lock` could not be acquired.
 fn print_lock_file_errors(submodule_statuses: &[(String, StatusSummary)]) {
     let mut footer = false;
     for (submod_path, _) in submodule_statuses
@@ -692,6 +707,7 @@ fn print_lock_file_errors(submodule_statuses: &[(String, StatusSummary)]) {
     }
 }
 
+/// Returns the "On branch <name>" or "HEAD detached at <oid>" display string.
 fn current_branch_display(repo: &Repository) -> StatusResult<String> {
     let head_ref = repo.head()?;
     if !head_ref.is_branch() {
@@ -708,6 +724,8 @@ fn current_branch_display(repo: &Repository) -> StatusResult<String> {
     Ok(format!("On branch {branch_name}"))
 }
 
+/// Returns the upstream tracking status (e.g. "ahead 3", "behind 1") and a hint
+/// string, or `None` if HEAD is detached or has no upstream configured.
 fn get_upstream_status(repo: &Repository) -> StatusResult<Option<(String, &'static str)>> {
     let head_ref = repo.head()?;
     if !head_ref.is_branch() {
@@ -765,6 +783,8 @@ fn get_upstream_status(repo: &Repository) -> StatusResult<Option<(String, &'stat
     }
 }
 
+/// Formats and prints the full `git status`-style output: header, staged changes,
+/// unmerged paths, unstaged changes, untracked files, and lock file errors.
 // Basic logic originally adapted from https://github.com/rust-lang/git2-rs/blob/master/examples/status.rs
 fn display_status(
     repo: &Repository,
