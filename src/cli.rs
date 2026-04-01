@@ -116,11 +116,20 @@ pub struct List {
     #[allow(rustdoc::broken_intra_doc_links)]
     /// Custom format string with {placeholder} substitution.
     ///
-    /// Available placeholders: {name}, {path}, {commit}, {commit_long},
-    /// {head}, {head_long}, {branch}, {head_branch}, {status}.
+    /// Available placeholders:
+    ///   {name}        - submodule name (from .gitmodules [submodule "name"])
+    ///   {path}        - submodule path (relative to repo root)
+    ///   {commit}      - committed OID in the parent repo (short, 7 chars)
+    ///   {commit_long} - committed OID (full 40 chars)
+    ///   {head}        - current HEAD OID in the submodule workdir (short)
+    ///   {head_long}   - current HEAD OID in the submodule workdir (full)
+    ///   {branch}      - tracking branch from .gitmodules (if set)
+    ///   {head_branch} - checked-out branch in the submodule workdir (empty if detached)
+    ///   {status}      - submodule status (e.g. "modified content, new commits")
+    ///
     /// Extra text inside braces is preserved and padded as a unit, e.g.
     /// {[name]} outputs [value] with alignment applied to the whole [value].
-    /// Escape sequences: \n (newline), \r (carriage return), \t (tab), \\ (backslash), \{ and \} (literal braces).
+    /// Escape sequences: \n, \r, \t, \\, \{, \}.
     #[arg(short, long, verbatim_doc_comment)]
     pub format: Option<String>,
     /// Omit the header row
@@ -148,7 +157,14 @@ pub struct Prompt {
     )]
     /// Format string with {placeholder} substitution.
     ///
-    /// Available placeholders: {dirty}, {staged}, {new_commits}, {clean}, {total}.
+    /// Available placeholders:
+    ///   {dirty}       - submodules with modified or untracked content
+    ///   {staged}      - submodules staged in the parent index
+    ///   {new_commits} - submodules whose HEAD differs from the parent gitlink
+    ///   {clean}       - submodules with no changes
+    ///   {total}       - total number of submodules
+    ///
+    /// Default format: "{dirty} {staged} {new_commits} {clean} {total}"
     /// Escape sequences: \n, \r, \t, \\, \{, \}.
     #[arg(short, long, verbatim_doc_comment)]
     pub format: Option<String>,

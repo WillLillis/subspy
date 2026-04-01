@@ -59,7 +59,8 @@ fn run() -> RunResult<()> {
         .subcommand_required(true)
         .arg_required_else_help(true)
         .disable_help_subcommand(true)
-        .disable_colored_help(false);
+        .disable_colored_help(false)
+        .after_help("Use `subspy <COMMAND> --help` for more information on a subcommand.");
     let cli = Commands::augment_subcommands(cli);
 
     let command = Commands::from_arg_matches(&cli.get_matches())?;
