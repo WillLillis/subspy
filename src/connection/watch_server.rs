@@ -25,6 +25,7 @@ use notify::{
 
 use crate::{
     DOT_GIT, DOT_GITMODULES, StatusSummary,
+    bitset::BitSet,
     connection::{
         BINCODE_CFG, DebugState, IpcStream, ServerMessage, cleanup_socket, create_listener,
         encode_and_write, ipc_socket_path, write_full_message_fixed,
@@ -99,7 +100,7 @@ struct WatchServer {
     /// Filesystem watchers
     watchers: WatchList,
     /// Watcher indices of submodules to skip updating (due to being in a rebase)
-    skip_set: FxHashSet<usize>,
+    skip_set: BitSet,
     /// Whether a rebase is in progress in the root repository
     root_rebasing: bool,
 
@@ -350,7 +351,7 @@ impl WatchServer {
 
         Self {
             watchers: Vec::new(),
-            skip_set: FxHashSet::default(),
+            skip_set: BitSet::with_capacity(0),
             root_rebasing: false,
             root_path: root_path.to_path_buf(),
             root_path_shared: Arc::from(root_path),
@@ -605,7 +606,8 @@ impl WatchServer {
             .collect();
 
         status_guard.clear();
-        self.skip_set.clear();
+        self.skip_set
+            .clear_and_resize(ROOT_WATCHER_COUNT + results.len());
         if place_submod_watches {
             self.modules_path_to_index.clear();
         }
@@ -669,7 +671,7 @@ impl WatchServer {
         let skip_set: Vec<String> = self
             .skip_set
             .iter()
-            .filter_map(|&idx| self.watchers.get(idx).map(|w| w.relative_path.clone()))
+            .filter_map(|idx| self.watchers.get(idx).map(|w| w.relative_path.clone()))
             .collect();
 
         let submodule_statuses = try_lock_for(&self.submod_statuses, DEBUG_LOCK_TIMEOUT)
@@ -1089,12 +1091,12 @@ impl WatchServer {
         &self,
         index: usize,
         in_flight: &Arc<(Mutex<InFlightTracker>, Condvar)>,
-        pending_lock_retries: &Arc<Mutex<FxHashSet<usize>>>,
+        pending_lock_retries: &Arc<Mutex<BitSet>>,
     ) {
         pending_lock_retries
             .lock()
             .expect("pending_lock_retries mutex poisoned")
-            .remove(&index);
+            .remove(index);
 
         let mut tracker = in_flight.0.lock().expect("InFlightTracker mutex poisoned");
         if let Some(task) = tracker.tasks.get_mut(&index) {
@@ -1229,7 +1231,7 @@ impl WatchServer {
                     pending_retries
                         .lock()
                         .expect("pending_retries mutex poisoned")
-                        .remove(&index);
+                        .remove(index);
                 }
 
                 // Dirty check + task removal under a single lock hold.
@@ -1312,8 +1314,8 @@ impl WatchServer {
         // Watcher indices whose rayon task failed a non-blocking lock acquisition.
         // When the corresponding `index.lock` is removed (lock released), the event
         // loop re-fires the status read.
-        let pending_lock_retries: Arc<Mutex<FxHashSet<usize>>> =
-            Arc::new(Mutex::new(FxHashSet::default()));
+        let pending_lock_retries: Arc<Mutex<BitSet>> =
+            Arc::new(Mutex::new(BitSet::with_capacity(self.watchers.len())));
         let mut gitmodules = GitmodulesTracker::new();
 
         loop {
@@ -1365,7 +1367,7 @@ impl WatchServer {
                             } else {
                                 gitmodules.on_root_event(&event);
                                 for i in ROOT_WATCHER_COUNT..self.watchers.len() {
-                                    if !self.skip_set.contains(&i) {
+                                    if !self.skip_set.contains(i) {
                                         self.try_spawn_submod_update(
                                             i,
                                             &in_flight,
@@ -1385,13 +1387,13 @@ impl WatchServer {
                         return Ok(HandleEventsExit::ReindexEvent);
                     }
                     Some(EventType::SubmoduleChange) => {
-                        if !self.skip_set.contains(&index) {
+                        if !self.skip_set.contains(index) {
                             self.try_spawn_submod_update(index, &in_flight, &pending_lock_retries);
                         }
                     }
                     Some(EventType::SubmoduleGitOperation) => {
                         if let Some(i) = self.submod_for_event(&event)
-                            && !self.skip_set.contains(&i)
+                            && !self.skip_set.contains(i)
                         {
                             self.try_spawn_submod_update(i, &in_flight, &pending_lock_retries);
                         }
@@ -1414,17 +1416,17 @@ impl WatchServer {
                     }
                     Some(EventType::SubmoduleRebaseEnd) => {
                         if let Some(i) = self.submod_for_event(&event) {
-                            self.skip_set.remove(&i);
+                            self.skip_set.remove(i);
                             self.try_spawn_submod_update(i, &in_flight, &pending_lock_retries);
                         }
                     }
                     Some(EventType::SubmoduleLockRelease) => {
                         if let Some(i) = self.submod_for_event(&event)
-                            && !self.skip_set.contains(&i)
+                            && !self.skip_set.contains(i)
                             && pending_lock_retries
                                 .lock()
                                 .expect("pending_lock_retries mutex poisoned")
-                                .remove(&i)
+                                .remove(i)
                         {
                             self.try_spawn_submod_update(i, &in_flight, &pending_lock_retries);
                         }
