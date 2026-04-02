@@ -19,7 +19,7 @@ There are a few potential workarounds you should try before using this tool, inc
 SubSpy provides a solution to this issue by placing recursive filesystem watches on your repository's `.git` folder, `.gitmodules`
 file, and all submodule directories. The status for all submodules is cached by an initial indexing operation and updated
 any time a change is detected in one of these locations. For sufficiently many submodules, `subspy status` is typically
-100-1000x faster than `git status` on Windows and 30-160x faster on Linux, with the gap widening as working tree churn increases.
+100-1000x faster than `git status` on Windows and 67-360x faster on Linux, with the gap widening as working tree churn increases.
 
 ### Usage
 
@@ -144,13 +144,13 @@ Git's performance is typically acceptable on Linux platforms. Testing on [boost]
 
 ```sh
 ~/boost/ > time git status
-git status  0.08s user 0.19s system 105% cpu 0.258 total
+git status  0.08s user 0.19s system 103% cpu 0.267 total
 
 ~/boost/ > time subspy status # Spawns a new watch server
-subspy status  0.01s user 0.00s system 4% cpu 0.211 total
+subspy status  0.00s user 0.00s system 2% cpu 0.222 total
 
 ~/boost/ > time subspy status # Connects to previously spawned server
-subspy status  0.01s user 0.00s system 93% cpu 0.009 total
+subspy status  0.00s user 0.00s system 94% cpu 0.004 total
 
 ~/boost/ > find . -not -path './.git/*' -exec touch {} + # simulate heavy working tree churn
 
@@ -158,7 +158,7 @@ subspy status  0.01s user 0.00s system 93% cpu 0.009 total
 git status  1.08s user 0.38s system 100% cpu 1.442 total
 
 ~/boost/ > time subspy status
-subspy status  0.01s user 0.00s system 97% cpu 0.009 total
+subspy status  0.00s user 0.00s system 94% cpu 0.004 total
 ```
 
 #### Limitations
