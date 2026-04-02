@@ -920,9 +920,7 @@ impl WatchServer {
                 && event.paths.iter().any(|p| {
                     (p.starts_with(&self.root_modules_path)
                         && (p.file_name().is_some_and(|n| {
-                            n.to_str().is_some_and(|name| {
-                                matches!(name, "index" | "index.lock" | "HEAD" | "HEAD.lock")
-                            })
+                            n == "index" || n == "index.lock" || n == "HEAD" || n == "HEAD.lock"
                         }) || self.is_submod_refs_heads(p)))
                         || p.eq(&self.root_index_path)
                         || p.eq(&self.root_lock_path)
