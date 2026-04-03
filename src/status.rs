@@ -399,7 +399,8 @@ fn get_header_state(repo: &Repository) -> StatusResult<HeaderState> {
         return Ok(HeaderState::RebaseWithApplyBackend { has_conflicts });
     }
 
-    let branch_display = current_branch_display(repo)?;
+    let head_ref = repo.head()?;
+    let branch_display = current_branch_display(&head_ref);
     let has_conflicts = repo.index()?.has_conflicts();
 
     match repo.state() {
@@ -429,7 +430,7 @@ fn get_header_state(repo: &Repository) -> StatusResult<HeaderState> {
         }
         _ => Ok(HeaderState::Normal {
             branch_display,
-            upstream: get_upstream_status(repo)?,
+            upstream: get_upstream_status(repo, head_ref)?,
         }),
     }
 }
@@ -831,26 +832,27 @@ fn print_lock_file_errors(
 }
 
 /// Returns the "On branch <name>" or "HEAD detached at <oid>" display string.
-fn current_branch_display(repo: &Repository) -> StatusResult<String> {
-    let head_ref = repo.head()?;
+fn current_branch_display(head_ref: &git2::Reference<'_>) -> String {
     if !head_ref.is_branch() {
-        return Ok(format!(
+        return format!(
             "{} {}",
             paint(Some(AnsiColor::Red), "HEAD detached at"),
             head_ref.target().map_or_else(
                 || "unknown".to_string(),
                 |oid| oid.to_string().chars().take(7).collect()
             ),
-        ));
+        );
     }
-    let branch_name = head_ref.shorthand().unwrap().to_string();
-    Ok(format!("On branch {branch_name}"))
+    let branch_name = head_ref.shorthand().unwrap();
+    format!("On branch {branch_name}")
 }
 
 /// Returns the upstream tracking status (e.g. "ahead 3", "behind 1") and a hint
 /// string, or `None` if HEAD is detached or has no upstream configured.
-fn get_upstream_status(repo: &Repository) -> StatusResult<Option<(String, &'static str)>> {
-    let head_ref = repo.head()?;
+fn get_upstream_status(
+    repo: &Repository,
+    head_ref: git2::Reference<'_>,
+) -> StatusResult<Option<(String, &'static str)>> {
     if !head_ref.is_branch() {
         return Ok(None);
     }
@@ -1531,7 +1533,9 @@ mod tests {
     #[test]
     fn upstream_up_to_date() {
         let (_tmp, repo) = init_repo_with_remote();
-        let (status_line, hint) = get_upstream_status(&repo).unwrap().unwrap();
+        let (status_line, hint) = get_upstream_status(&repo, repo.head().unwrap())
+            .unwrap()
+            .unwrap();
         assert_eq!(
             status_line,
             "Your branch is up to date with 'origin/master'."
@@ -1548,7 +1552,9 @@ mod tests {
         git(&["-C", &local, "commit", "-m", "local commit"]);
 
         let repo = Repository::open(repo.workdir().unwrap()).unwrap();
-        let (status_line, hint) = get_upstream_status(&repo).unwrap().unwrap();
+        let (status_line, hint) = get_upstream_status(&repo, repo.head().unwrap())
+            .unwrap()
+            .unwrap();
         assert_eq!(
             status_line,
             "Your branch is ahead of 'origin/master' by 1 commit."
@@ -1581,7 +1587,9 @@ mod tests {
         git(&["-C", &local, "fetch"]);
 
         let repo = Repository::open(repo.workdir().unwrap()).unwrap();
-        let (status_line, hint) = get_upstream_status(&repo).unwrap().unwrap();
+        let (status_line, hint) = get_upstream_status(&repo, repo.head().unwrap())
+            .unwrap()
+            .unwrap();
         assert_eq!(
             status_line,
             "Your branch is behind 'origin/master' by 1 commit, and can be fast-forwarded."
@@ -1617,7 +1625,9 @@ mod tests {
         git(&["-C", &local, "fetch"]);
 
         let repo = Repository::open(repo.workdir().unwrap()).unwrap();
-        let (status_line, hint) = get_upstream_status(&repo).unwrap().unwrap();
+        let (status_line, hint) = get_upstream_status(&repo, repo.head().unwrap())
+            .unwrap()
+            .unwrap();
         assert_eq!(
             status_line,
             "Your branch and 'origin/master' have diverged,\n\
@@ -1632,7 +1642,11 @@ mod tests {
     #[test]
     fn upstream_none_without_remote() {
         let (_tmp, repo) = init_repo();
-        assert!(get_upstream_status(&repo).unwrap().is_none());
+        assert!(
+            get_upstream_status(&repo, repo.head().unwrap())
+                .unwrap()
+                .is_none()
+        );
     }
 
     // -- parse_rebase_lines --

@@ -429,7 +429,7 @@ pub fn get_project_path(path: Option<PathBuf>) -> RunResult<(PathBuf, RepoKind)>
                 return Ok((current_path.to_path_buf(), RepoKind::Submodule));
             }
             let dot_gitmodules_path = current_path.join(DOT_GITMODULES);
-            let has_gitmodules = dot_gitmodules_path.exists() && dot_gitmodules_path.is_file();
+            let has_gitmodules = dot_gitmodules_path.is_file();
             let repo_kind = if has_gitmodules {
                 RepoKind::WithSubmodules
             } else {

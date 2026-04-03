@@ -161,6 +161,16 @@ fn handle_status_request(
     progress: &ProgressMap,
     subscribers: &ProgressSubscribers,
 ) -> WatchResult<()> {
+    // Fast path: status map available immediately (no indexing in progress).
+    // Skip the 3 mutex lock/unlock pairs for progress subscriber management.
+    if let Some(guard) = try_lock(statuses) {
+        return ENCODE_BUF.with_borrow_mut(|buf| -> WatchResult<()> {
+            encode_status_response(&mut conn, &guard, buf)?;
+            Ok(())
+        });
+    }
+
+    // Slow path: indexing in progress, subscribe for progress updates.
     subscribers
         .lock()
         .expect("Subscribers mutex poisoned")
@@ -208,24 +218,31 @@ fn encode_status_response(
 /// `Encode` for `ServerMessage::Status { statuses, total }`.
 fn encode_status_into(map: &BTreeMap<String, StatusSummary>, buf: &mut Vec<u8>) {
     let total = map.len() as u32;
-    let dirty_count = map
-        .values()
-        .filter(|st| **st != StatusSummary::clean())
-        .count();
 
     buf.clear();
     buf.extend_from_slice(&[0u8; MSG_PREFIX_LEN]); // length prefix placeholder
 
     // variant discriminant: Status = 0
     buf.extend_from_slice(&0u32.to_le_bytes());
-    // vec length
-    buf.extend_from_slice(&dirty_count.to_le_bytes());
-    // entries
-    for (path, status) in map.iter().filter(|(_, st)| **st != StatusSummary::clean()) {
+    // vec length placeholder (backfilled after the loop)
+    let vec_len_offset = buf.len();
+    buf.extend_from_slice(&[0u8; size_of::<usize>()]);
+
+    // entries (single pass: count + encode)
+    let mut dirty_count: usize = 0;
+    for (path, status) in map {
+        if *status == StatusSummary::clean() {
+            continue;
+        }
+        dirty_count += 1;
         buf.extend_from_slice(&path.len().to_le_bytes());
         buf.extend_from_slice(path.as_bytes());
         buf.push(status.bits());
     }
+
+    // Backfill vec length
+    buf[vec_len_offset..vec_len_offset + size_of::<usize>()]
+        .copy_from_slice(&dirty_count.to_le_bytes());
     // total submodule count
     buf.extend_from_slice(&total.to_le_bytes());
 
