@@ -889,7 +889,10 @@ pub fn status(
     let mut opts = git2::StatusOptions::new();
     opts.include_untracked(true)
         .recurse_untracked_dirs(false)
-        .include_ignored(false);
+        .include_ignored(false)
+        // The repo was just opened, so the index is already fresh from disk.
+        // Skip the redundant stat-cache refresh pass.
+        .no_refresh(true);
 
     // Ignore submodules _only_ if we are the top level, in which case submodule statuses
     // are provided by the watch server or computed locally below.
