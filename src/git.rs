@@ -2,6 +2,24 @@
 
 use std::path::Path;
 
+/// Configures global libgit2 options for subspy's read-only, local-only use case.
+///
+/// Skips ownership validation and SHA1 hash verification on object reads.
+/// Must be called before any threads are spawned, as these options mutate
+/// global libgit2 state.
+pub fn configure_git2() {
+    // SAFETY: Caller guarantees single-threaded context.
+    unsafe {
+        // Skip the per-open ownership stat checks that verify the .git directory
+        // is owned by the current user (CVE-2022-24765 mitigation). We only open
+        // repos the user explicitly points us at.
+        let _ = git2::opts::set_verify_owner_validation(false);
+        // Skip SHA1 checksum verification on object reads. We trust the local
+        // filesystem and don't need to detect repository corruption.
+        git2::opts::strict_hash_verification(false);
+    }
+}
+
 /// Parses `.gitmodules` to extract submodule name, path, and branch without
 /// going through `repo.submodules()` (which triggers expensive per-submodule
 /// config snapshot parsing in libgit2).

@@ -1,9 +1,12 @@
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
+    sync::LazyLock,
     thread::JoinHandle,
     time::{Duration, Instant},
 };
+
+use subspy::git::configure_git2;
 
 use git2::{Repository, Signature};
 use subspy::{
@@ -15,6 +18,15 @@ use subspy::{
     },
 };
 use tempfile::TempDir;
+
+/// Configures global libgit2 options once across all test threads.
+/// See `git::configure_git2` for rationale.
+static GIT2_INIT: LazyLock<()> = LazyLock::new(|| {
+    // SAFETY: LazyLock guarantees this runs exactly once. All other
+    // threads calling HarnessBuilder::build will block on the LazyLock
+    // until this completes.
+    configure_git2();
+});
 
 /// Default timeout for polling assertions.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -60,6 +72,7 @@ impl HarnessBuilder {
     /// Build the harness: create temp dir, init repos with submodules,
     /// optionally start the watch server, and wait for initial indexing.
     pub fn build(self) -> TestHarness {
+        LazyLock::force(&GIT2_INIT);
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let root_path = temp_dir.path().join("root_repo");
         std::fs::create_dir_all(&root_path).unwrap();

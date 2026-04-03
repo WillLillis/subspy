@@ -10,6 +10,7 @@ use log::{error, info};
 
 use subspy::{
     cli::{Commands, LogLevel, RunResult},
+    git::configure_git2,
     paint,
 };
 
@@ -55,6 +56,11 @@ fn setup_logging(command: &Commands) -> RunResult<bool> {
 }
 
 fn run() -> RunResult<()> {
+    // This is the first git2 call in the process, so it triggers libgit2's
+    // one-time global initialization (~80-200K cycles). The configure_git2
+    // function itself is ~430 cycles; the rest is the init overhead that
+    // would otherwise be paid on the first Repository::open call.
+    configure_git2();
     let cli = Command::new("subspy")
         .subcommand_required(true)
         .arg_required_else_help(true)
