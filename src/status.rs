@@ -3,7 +3,12 @@
 
 use anstyle::AnsiColor;
 use git2::{Repository, Statuses};
-use std::{cmp::Ordering, fs, path::Path};
+use std::{
+    cmp::Ordering,
+    fs,
+    io::{self, Write},
+    path::Path,
+};
 use thiserror::Error;
 
 use crate::{
@@ -27,6 +32,8 @@ pub enum StatusError {
     Git(#[from] git2::Error),
     #[error(transparent)]
     LockFile(#[from] LockFileError),
+    #[error(transparent)]
+    IO(#[from] io::Error),
 }
 
 const STAGED_HEADER: &str = "Changes to be committed:
@@ -193,84 +200,114 @@ fn get_rebase_info(repo: &Repository) -> StatusResult<Option<RebaseInfo>> {
 }
 
 /// Prints the rebase status header with done/remaining operation lists.
-fn print_rebase_header(info: &RebaseInfo) {
+fn print_rebase_header(info: &RebaseInfo, stdout: &mut impl Write) -> Result<(), io::Error> {
     let label = if info.is_interactive {
         "interactive rebase"
     } else {
         "rebase"
     };
-    println!(
+    writeln!(
+        stdout,
         "{} {}",
-        paint(Some(AnsiColor::Red), &format!("{label} in progress; onto")),
+        paint(Some(AnsiColor::Red), &format!("{label} in progress?; onto")),
         info.onto_short
-    );
+    )?;
 
     if info.total_done > 0 {
         let shown = info.done_ops.len();
         if shown == 1 {
-            println!("Last command done ({} command done):", info.total_done);
+            writeln!(
+                stdout,
+                "Last command done ({} command done):",
+                info.total_done
+            )?;
         } else {
-            println!(
+            writeln!(
+                stdout,
                 "Last {shown} commands done ({} commands done):",
                 info.total_done
-            );
+            )?;
         }
         for cmd in &info.done_ops {
-            println!("   {cmd}");
+            writeln!(stdout, "   {cmd}")?;
         }
     }
 
     if info.total_remaining == 0 {
-        println!("No commands remaining.");
+        writeln!(stdout, "No commands remaining.")?;
     } else {
         let shown = info.remaining_ops.len();
         if shown == 1 {
-            println!(
+            writeln!(
+                stdout,
                 "Next command to do ({} remaining command):",
                 info.total_remaining
-            );
+            )?;
         } else {
-            println!(
+            writeln!(
+                stdout,
                 "Next {shown} commands to do ({} remaining commands):",
                 info.total_remaining
-            );
+            )?;
         }
         for cmd in &info.remaining_ops {
-            println!("   {cmd}");
+            writeln!(stdout, "   {cmd}")?;
         }
-        println!("  (use \"git rebase --edit-todo\" to view and edit)");
+        writeln!(
+            stdout,
+            "  (use \"git rebase --edit-todo\" to view and edit)"
+        )?;
     }
 
     if info.is_editing {
-        println!(
+        writeln!(
+            stdout,
             "You are currently editing a commit while rebasing branch '{}' on '{}'.",
             info.head_name, info.onto_short
-        );
-        println!("  (use \"git commit --amend\" to amend the current commit)");
-        println!("  (use \"git rebase --continue\" once you are satisfied with your changes)");
+        )?;
+        writeln!(
+            stdout,
+            "  (use \"git commit --amend\" to amend the current commit)"
+        )?;
+        writeln!(
+            stdout,
+            "  (use \"git rebase --continue\" once you are satisfied with your changes)"
+        )?;
     } else {
-        println!(
+        writeln!(
+            stdout,
             "You are currently rebasing branch '{}' on '{}'.",
             info.head_name, info.onto_short
-        );
-        println!("  (fix conflicts and then run \"git rebase --continue\")");
-        println!("  (use \"git rebase --skip\" to skip this patch)");
-        println!("  (use \"git rebase --abort\" to check out the original branch)");
+        )?;
+        writeln!(
+            stdout,
+            "  (fix conflicts and then run \"git rebase --continue\")"
+        )?;
+        writeln!(stdout, "  (use \"git rebase --skip\" to skip this patch)")?;
+        writeln!(
+            stdout,
+            "  (use \"git rebase --abort\" to check out the original branch)"
+        )?;
     }
-    println!();
+    writeln!(stdout,)?;
+
+    Ok(())
 }
 
 /// Prints the "Unmerged paths:" section for any conflicts in the index.
 /// Returns `true` if there were conflicts.
-fn print_unmerged_paths(repo: &Repository) -> StatusResult<bool> {
+fn print_unmerged_paths(repo: &Repository, stdout: &mut impl Write) -> StatusResult<bool> {
     let index = repo.index()?;
     if !index.has_conflicts() {
         return Ok(false);
     }
 
-    println!("Unmerged paths:");
-    println!("  (use \"git restore --staged <file>...\" to unstage)");
-    println!("  (use \"git add <file>...\" to mark resolution)");
+    writeln!(stdout, "Unmerged paths:")?;
+    writeln!(
+        stdout,
+        "  (use \"git restore --staged <file>...\" to unstage)"
+    )?;
+    writeln!(stdout, "  (use \"git add <file>...\" to mark resolution)")?;
 
     for conflict in index.conflicts()? {
         let conflict = conflict?;
@@ -298,12 +335,13 @@ fn print_unmerged_paths(repo: &Repository) -> StatusResult<bool> {
             (false, false, true) => "added by them:   ",
             (false, false, false) => "both modified:   ",
         };
-        println!(
+        writeln!(
+            stdout,
             "{}",
             paint(Some(AnsiColor::Red), &format!("\t{type_str}{path}"))
-        );
+        )?;
     }
-    println!();
+    writeln!(stdout)?;
     Ok(true)
 }
 
@@ -398,96 +436,141 @@ fn get_header_state(repo: &Repository) -> StatusResult<HeaderState> {
 
 /// Prints the status header: branch name, upstream tracking info, and any
 /// in-progress operation (rebase, merge, cherry-pick, etc.).
-fn print_header(repo: &Repository) -> StatusResult<()> {
+fn print_header(repo: &Repository, stdout: &mut impl Write) -> StatusResult<()> {
     let state = get_header_state(repo)?;
-    print_header_state(&state);
+    print_header_state(&state, stdout)?;
     Ok(())
 }
 
 /// Prints the operation-specific portion of the header (hints, conflict guidance, etc.).
-fn print_header_state(state: &HeaderState) {
+#[expect(clippy::too_many_lines, reason = "git has so much to say")]
+fn print_header_state(state: &HeaderState, stdout: &mut impl Write) -> Result<(), io::Error> {
     match state {
-        HeaderState::Rebase(info) => print_rebase_header(info),
+        HeaderState::Rebase(info) => print_rebase_header(info, stdout)?,
         HeaderState::CherryPick {
             short_oid,
             has_conflicts,
         } => {
-            println!("You are currently cherry-picking commit {short_oid}.");
+            writeln!(
+                stdout,
+                "You are currently cherry-picking commit {short_oid}."
+            )?;
             if *has_conflicts {
-                println!("  (fix conflicts and run \"git cherry-pick --continue\")");
+                writeln!(
+                    stdout,
+                    "  (fix conflicts and run \"git cherry-pick --continue\")"
+                )?;
             } else {
-                println!("  (all conflicts fixed: run \"git cherry-pick --continue\")");
+                writeln!(
+                    stdout,
+                    "  (all conflicts fixed: run \"git cherry-pick --continue\")"
+                )?;
             }
-            println!("  (use \"git cherry-pick --skip\" to skip this patch)");
-            println!("  (use \"git cherry-pick --abort\" to cancel the cherry-pick operation)");
-            println!();
+            writeln!(
+                stdout,
+                "  (use \"git cherry-pick --skip\" to skip this patch)"
+            )?;
+            writeln!(
+                stdout,
+                "  (use \"git cherry-pick --abort\" to cancel the cherry-pick operation)"
+            )?;
+            writeln!(stdout)?;
         }
         HeaderState::Merge { has_conflicts } => {
             if *has_conflicts {
-                println!("You have unmerged paths.");
-                println!("  (fix conflicts and run \"git commit\")");
-                println!("  (use \"git merge --abort\" to abort the merge)");
+                writeln!(stdout, "You have unmerged paths.")?;
+                writeln!(stdout, "  (fix conflicts and run \"git commit\")")?;
+                writeln!(stdout, "  (use \"git merge --abort\" to abort the merge)")?;
             } else {
-                println!("All conflicts fixed but you are still merging.");
-                println!("  (use \"git commit\" to conclude merge)");
+                writeln!(stdout, "All conflicts fixed but you are still merging.")?;
+                writeln!(stdout, "  (use \"git commit\" to conclude merge)")?;
             }
-            println!();
+            writeln!(stdout)?;
         }
         HeaderState::Revert {
             short_oid,
             has_conflicts,
         } => {
-            println!("You are currently reverting commit {short_oid}.");
+            writeln!(stdout, "You are currently reverting commit {short_oid}.")?;
             if *has_conflicts {
-                println!("  (fix conflicts and run \"git revert --continue\")");
+                writeln!(
+                    stdout,
+                    "  (fix conflicts and run \"git revert --continue\")"
+                )?;
             } else {
-                println!("  (all conflicts fixed: run \"git revert --continue\")");
+                writeln!(
+                    stdout,
+                    "  (all conflicts fixed: run \"git revert --continue\")"
+                )?;
             }
-            println!("  (use \"git revert --skip\" to skip this patch)");
-            println!("  (use \"git revert --abort\" to cancel the revert operation)");
-            println!();
+            writeln!(stdout, "  (use \"git revert --skip\" to skip this patch)")?;
+            writeln!(
+                stdout,
+                "  (use \"git revert --abort\" to cancel the revert operation)"
+            )?;
+            writeln!(stdout)?;
         }
         HeaderState::Bisect => {
-            println!("You are currently bisecting.");
-            println!("  (use \"git bisect reset\" to get back to the original branch)");
-            println!();
+            writeln!(stdout, "You are currently bisecting.")?;
+            writeln!(
+                stdout,
+                "  (use \"git bisect reset\" to get back to the original branch)"
+            )?;
+            writeln!(stdout)?;
         }
         HeaderState::ApplyMailbox { has_conflicts } => {
-            println!("You are in the middle of an am session.");
+            writeln!(stdout, "You are in the middle of an am session.")?;
             if *has_conflicts {
-                println!("  (fix conflicts and then run \"git am --continue\")");
+                writeln!(
+                    stdout,
+                    "  (fix conflicts and then run \"git am --continue\")"
+                )?;
             } else {
-                println!("  (all conflicts fixed: run \"git am --continue\")");
+                writeln!(stdout, "  (all conflicts fixed: run \"git am --continue\")")?;
             }
-            println!("  (use \"git am --skip\" to skip this patch)");
-            println!("  (use \"git am --abort\" to restore the original branch)");
-            println!();
+            writeln!(stdout, "  (use \"git am --skip\" to skip this patch)")?;
+            writeln!(
+                stdout,
+                "  (use \"git am --abort\" to restore the original branch)"
+            )?;
+            writeln!(stdout)?;
         }
         HeaderState::RebaseWithApplyBackend { has_conflicts } => {
-            println!("You are currently rebasing.");
+            writeln!(stdout, "You are currently rebasing.")?;
             if *has_conflicts {
-                println!("  (fix conflicts and then run \"git rebase --continue\")");
+                writeln!(
+                    stdout,
+                    "  (fix conflicts and then run \"git rebase --continue\")"
+                )?;
             } else {
-                println!("  (all conflicts fixed: run \"git rebase --continue\")");
+                writeln!(
+                    stdout,
+                    "  (all conflicts fixed: run \"git rebase --continue\")"
+                )?;
             }
-            println!("  (use \"git rebase --skip\" to skip this patch)");
-            println!("  (use \"git rebase --abort\" to check out the original branch)");
-            println!();
+            writeln!(stdout, "  (use \"git rebase --skip\" to skip this patch)")?;
+            writeln!(
+                stdout,
+                "  (use \"git rebase --abort\" to check out the original branch)"
+            )?;
+            writeln!(stdout)?;
         }
         HeaderState::Normal {
             branch_display,
             upstream,
         } => {
-            println!("{branch_display}");
+            writeln!(stdout, "{branch_display}")?;
             if let Some((status_line, hint)) = upstream {
-                println!("{status_line}");
+                writeln!(stdout, "{status_line}")?;
                 if !hint.is_empty() {
-                    println!("  {hint}");
+                    writeln!(stdout, "  {hint}")?;
                 }
-                println!();
+                writeln!(stdout)?;
             }
         }
     }
+
+    Ok(())
 }
 
 /// Prints the "Changes to be committed:" section for staged files, submodules,
@@ -496,7 +579,8 @@ fn print_staged_changes(
     non_submod: &Statuses<'_>,
     submodule_statuses: &[(String, StatusSummary)],
     deleted_submodule_paths: &[String],
-) -> bool {
+    stdout: &mut impl Write,
+) -> Result<bool, io::Error> {
     let mut header = false;
 
     for entry in non_submod
@@ -512,7 +596,7 @@ fn print_staged_changes(
             _ => continue,
         };
         if !header {
-            println!("{STAGED_HEADER}");
+            writeln!(stdout, "{STAGED_HEADER}")?;
             header = true;
         }
         let Some(index) = entry.head_to_index() else {
@@ -521,50 +605,54 @@ fn print_staged_changes(
         let old_path = index.old_file().path();
         let new_path = index.new_file().path();
         match (old_path, new_path) {
-            (Some(old), Some(new)) if old != new => println!(
+            (Some(old), Some(new)) if old != new => writeln!(
+                stdout,
                 "{}",
                 paint(
                     Some(AnsiColor::Green),
                     &format!("\t{istatus}{} -> {}", old.display(), new.display()),
                 )
-            ),
-            (old, new) => println!(
+            )?,
+            (old, new) => writeln!(
+                stdout,
                 "{}",
                 paint(
                     Some(AnsiColor::Green),
                     &format!("\t{istatus}{}", old.or(new).unwrap().display()),
                 )
-            ),
+            )?,
         }
     }
 
     for path in deleted_submodule_paths {
         if !header {
-            println!("{STAGED_HEADER}");
+            writeln!(stdout, "{STAGED_HEADER}")?;
             header = true;
         }
-        println!(
+        writeln!(
+            stdout,
             "{}",
             paint(Some(AnsiColor::Green), &format!("\tdeleted:    {path}"))
-        );
+        )?;
     }
 
     for (submod_path, st) in submodule_statuses.iter().filter(|(_, st)| is_staged(*st)) {
         if !header {
-            println!("{STAGED_HEADER}");
+            writeln!(stdout, "{STAGED_HEADER}")?;
             header = true;
         }
         let label = staged_label(*st);
-        println!(
+        writeln!(
+            stdout,
             "{}",
             paint(Some(AnsiColor::Green), &format!("\t{label}{submod_path}"))
-        );
+        )?;
     }
 
     if header {
-        println!();
+        writeln!(stdout)?;
     }
-    header
+    Ok(header)
 }
 
 /// Prints the "Changes not staged for commit:" section for modified, deleted,
@@ -573,7 +661,8 @@ fn print_unstaged_changes(
     non_submod: &Statuses<'_>,
     submodule_statuses: &[(String, StatusSummary)],
     rm_in_workdir: bool,
-) -> bool {
+    stdout: &mut impl Write,
+) -> Result<bool, io::Error> {
     let has_submod_changes = submodule_statuses
         .iter()
         .any(|(_, st)| has_workdir_changes(*st));
@@ -595,58 +684,72 @@ fn print_unstaged_changes(
             _ => continue,
         };
         if !header {
-            println!("{}", unstaged_header(rm_in_workdir, has_submod_changes));
+            writeln!(
+                stdout,
+                "{}",
+                unstaged_header(rm_in_workdir, has_submod_changes)
+            )?;
             header = true;
         }
         let old_path = workdir.old_file().path();
         let new_path = workdir.new_file().path();
         match (old_path, new_path) {
-            (Some(old), Some(new)) if old != new => println!(
+            (Some(old), Some(new)) if old != new => writeln!(
+                stdout,
                 "{}",
                 paint(
                     Some(AnsiColor::Red),
                     &format!("\t{istatus}{} -> {}", old.display(), new.display()),
                 )
-            ),
-            (old, new) => println!(
+            )?,
+            (old, new) => writeln!(
+                stdout,
                 "{}",
                 paint(
                     Some(AnsiColor::Red),
                     &format!("\t{istatus}{}", old.or(new).unwrap().display()),
                 )
-            ),
+            )?,
         }
     }
 
     for (submod_path, submod_status) in submodule_statuses.iter().filter(|(_, st)| is_unstaged(*st))
     {
         if !header {
-            println!("{}", unstaged_header(rm_in_workdir, has_submod_changes));
+            writeln!(
+                stdout,
+                "{}",
+                unstaged_header(rm_in_workdir, has_submod_changes)
+            )?;
             header = true;
         }
         let istatus = submod_status.to_string();
-        print!(
+        write!(
+            stdout,
             "{}",
             paint(
                 Some(AnsiColor::Red),
                 &format!("\tmodified:   {submod_path}")
             )
-        );
+        )?;
         if istatus.is_empty() {
-            println!();
+            writeln!(stdout)?;
         } else {
-            println!(" {istatus}");
+            writeln!(stdout, " {istatus}")?;
         }
     }
 
     if header {
-        println!();
+        writeln!(stdout)?;
     }
-    header
+    Ok(header)
 }
 
 /// Prints the "Untracked files:" section. Returns `true` if any were printed.
-fn print_untracked_files(non_submod: &Statuses<'_>) -> bool {
+fn print_untracked_files(
+    non_submod: &Statuses<'_>,
+    stdout: &mut impl Write,
+) -> Result<bool, io::Error> {
     let mut header = false;
     for entry in non_submod
         .iter()
@@ -659,52 +762,72 @@ fn print_untracked_files(non_submod: &Statuses<'_>) -> bool {
             continue;
         };
         if !header {
-            println!("{UNTRACKED_HEADER}");
+            writeln!(stdout, "{UNTRACKED_HEADER}")?;
             header = true;
         }
-        println!(
+        writeln!(
+            stdout,
             "\t{}",
             paint(Some(AnsiColor::Red), &format!("{}", file.display()))
-        );
+        )?;
     }
     if header {
-        println!();
+        writeln!(stdout)?;
     }
-    header
+    Ok(header)
 }
 
 /// Prints the footer hint (e.g. "nothing added to commit but untracked files present").
-fn print_summary(changes_in_index: bool, changed_in_workdir: bool, has_untracked: bool) {
+fn print_summary(
+    changes_in_index: bool,
+    changed_in_workdir: bool,
+    has_untracked: bool,
+    stdout: &mut impl Write,
+) -> Result<(), io::Error> {
     match (changes_in_index, changed_in_workdir, has_untracked) {
         (false, true, _) => {
-            println!("no changes added to commit (use \"git add\" and/or \"git commit -a\")");
+            writeln!(
+                stdout,
+                "no changes added to commit (use \"git add\" and/or \"git commit -a\")"
+            )?;
         }
-        (false, false, false) => println!("nothing to commit, working tree clean"),
+        (false, false, false) => writeln!(stdout, "nothing to commit, working tree clean")?,
         (false, false, true) => {
-            println!(
+            writeln!(
+                stdout,
                 "nothing added to commit but untracked files present (use \"git add\" to track)"
-            );
+            )?;
         }
         _ => {}
     }
+
+    Ok(())
 }
 
 /// Prints error messages for submodules whose `index.lock` could not be acquired.
-fn print_lock_file_errors(submodule_statuses: &[(String, StatusSummary)]) {
+fn print_lock_file_errors(
+    submodule_statuses: &[(String, StatusSummary)],
+    stdout: &mut impl Write,
+) -> Result<(), io::Error> {
     let mut footer = false;
     for (submod_path, _) in submodule_statuses
         .iter()
         .filter(|(_, st)| st.contains(StatusSummary::LOCK_FAILURE))
     {
         if !footer {
-            println!();
+            writeln!(stdout)?;
         }
         footer = true;
-        println!("error: Unable to create index.lock file for '{submod_path}': File exists.");
+        writeln!(
+            stdout,
+            "error: Unable to create index.lock file for '{submod_path}': File exists."
+        )?;
     }
     if footer {
-        println!("\n{LOCK_FILE_ERROR_FOOTER}");
+        writeln!(stdout, "\n{LOCK_FILE_ERROR_FOOTER}")?;
     }
+
+    Ok(())
 }
 
 /// Returns the "On branch <name>" or "HEAD detached at <oid>" display string.
@@ -792,17 +915,18 @@ fn display_status(
     submodule_statuses: &[(String, StatusSummary)],
     deleted_submodule_paths: &[String],
 ) -> StatusResult<()> {
+    let mut stdout = io::BufWriter::with_capacity(64 * 1024, io::stdout().lock());
     // Fast path: nothing dirty
     if non_submodule_statuses.is_empty()
         && submodule_statuses.is_empty()
         && deleted_submodule_paths.is_empty()
     {
-        print_header(repo)?;
-        println!("nothing to commit, working tree clean");
+        print_header(repo, &mut stdout)?;
+        writeln!(&mut stdout, "nothing to commit, working tree clean")?;
         return Ok(());
     }
 
-    print_header(repo)?;
+    print_header(repo, &mut stdout)?;
 
     let rm_in_workdir = non_submodule_statuses
         .iter()
@@ -812,19 +936,25 @@ fn display_status(
         non_submodule_statuses,
         submodule_statuses,
         deleted_submodule_paths,
-    );
-    let has_conflicts = print_unmerged_paths(repo)?;
-    let changed_in_workdir =
-        print_unstaged_changes(non_submodule_statuses, submodule_statuses, rm_in_workdir);
-    let has_untracked = print_untracked_files(non_submodule_statuses);
+        &mut stdout,
+    )?;
+    let has_conflicts = print_unmerged_paths(repo, &mut stdout)?;
+    let changed_in_workdir = print_unstaged_changes(
+        non_submodule_statuses,
+        submodule_statuses,
+        rm_in_workdir,
+        &mut stdout,
+    )?;
+    let has_untracked = print_untracked_files(non_submodule_statuses, &mut stdout)?;
 
     print_summary(
         changes_in_index,
         changed_in_workdir || has_conflicts,
         has_untracked,
-    );
+        &mut stdout,
+    )?;
 
-    print_lock_file_errors(submodule_statuses);
+    print_lock_file_errors(submodule_statuses, &mut stdout)?;
 
     Ok(())
 }
