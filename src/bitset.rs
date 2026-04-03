@@ -1,64 +1,70 @@
 //! A compact bitset optimized for small dense integer sets.
 //!
-//! Uses an inline `[u64; 8]` (512 bits, one cache line) for the common case
-//! (up to 510 submodules, covering repos as large as Chromium at 257). Falls
-//! back to a heap-allocated `Vec<u64>` for larger repos.
+//! Uses an inline `[u64; 8]` (512 bits, one cache line) for the common case (up
+//! to 510 submodules. Falls back to a heap-allocated `Vec<u64>` for larger repos.
 
 /// A compact bitset for tracking small dense integer sets (watcher indices).
 ///
 /// All accesses use unchecked indexing since callers control the index range
 /// (watcher indices are bounded by the watchers array length).
 #[derive(Debug)]
-pub struct BitSet {
-    inline: [u64; Self::INLINE_WORDS],
+pub enum BitSet {
+    Inline([u64; Self::INLINE_WORDS]),
     /// Overflow storage for repos with > `INLINE_WORDS * 64` indices.
     /// Empty when the inline buffer suffices.
-    overflow: Vec<u64>,
+    Heap(Vec<u64>),
 }
 
 impl BitSet {
     const INLINE_WORDS: usize = 8; // 512 bits = 1 cache line
 
     #[inline]
+    #[must_use]
     pub fn with_capacity(n: usize) -> Self {
         let needed = n.div_ceil(64);
-        Self {
-            inline: [0; Self::INLINE_WORDS],
-            overflow: if needed > Self::INLINE_WORDS {
-                vec![0; needed]
-            } else {
-                Vec::new()
-            },
+        if needed <= Self::INLINE_WORDS {
+            Self::Inline([0; Self::INLINE_WORDS])
+        } else {
+            Self::Heap(vec![0; needed])
         }
     }
 
     /// Returns a slice over the active word array (inline or overflow).
     #[inline]
     fn words(&self) -> &[u64] {
-        if self.overflow.is_empty() {
-            &self.inline
-        } else {
-            &self.overflow
+        match self {
+            Self::Inline(buf) => buf,
+            Self::Heap(buf) => buf,
         }
     }
 
     /// Returns a mutable slice over the active word array (inline or overflow).
     #[inline]
     fn words_mut(&mut self) -> &mut [u64] {
-        if self.overflow.is_empty() {
-            &mut self.inline
-        } else {
-            &mut self.overflow
+        match self {
+            Self::Inline(buf) => buf,
+            Self::Heap(buf) => buf,
         }
     }
 
+    /// Returns whether the bit at index `i` is set.
+    ///
+    /// Safety:
+    ///
+    /// `i` must be less than the capacity of `self`.
     #[inline]
+    #[must_use]
     pub fn contains(&self, i: usize) -> bool {
         // SAFETY: callers only pass watcher indices, which are bounded by the
         // capacity established in `with_capacity` / `clear_and_resize`.
         unsafe { *self.words().get_unchecked(i / 64) & (1u64 << (i % 64)) != 0 }
     }
 
+    /// Set the bit at index `i`.
+    ///
+    /// Safety:
+    ///
+    /// `i` must be less than the capacity of `self`.
     #[inline]
     pub fn insert(&mut self, i: usize) {
         // SAFETY: same as `contains`
@@ -83,17 +89,26 @@ impl BitSet {
     pub fn clear_and_resize(&mut self, n: usize) {
         let needed = n.div_ceil(64);
         if needed <= Self::INLINE_WORDS {
-            self.inline.fill(0);
-            self.overflow.clear();
+            if let Self::Inline(buf) = self {
+                buf.fill(0);
+            } else {
+                *self = Self::Inline([0; Self::INLINE_WORDS]);
+            }
         } else {
-            self.overflow.resize(needed, 0);
-            self.overflow.fill(0);
+            if let Self::Heap(buf) = self {
+                buf.resize(needed, 0);
+                buf.fill(0);
+            } else {
+                *self = Self::Heap(vec![0; needed]);
+            }
         }
     }
 
     /// Iterates over the indices of all set bits. Skips zero words entirely
     /// and uses `trailing_zeros()` within each word to jump to set bits.
     #[inline]
+    #[must_use]
+    #[expect(clippy::iter_without_into_iter, reason = "YAGNI")]
     pub fn iter(&self) -> BitSetIter<'_> {
         let data = self.words();
         BitSetIter {
