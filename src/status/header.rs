@@ -1,116 +1,23 @@
-//! The `status` subcommand: displays submodule and working-tree status
-//! in a format that mirrors `git status`.
+//! Branch/upstream/operation-state header rendering for the human-readable
+//! `git status` output.
+//!
+//! Detects in-progress operations (rebase, merge, cherry-pick, revert,
+//! bisect, am, apply-backend rebase) and renders the same hint blocks
+//! git uses, plus the `On branch X` / `HEAD detached at Y` line and
+//! upstream tracking summary for the normal case.
 
 use anstyle::AnsiColor;
-use git2::{Repository, Statuses};
+use git2::Repository;
+
 use std::{
     cmp::Ordering,
     fs,
     io::{self, Write},
-    path::Path,
-};
-use thiserror::Error;
-
-use crate::{
-    RepoKind, StatusSummary,
-    connection::{
-        IpcError,
-        client::{recv_status_response, send_status_request},
-    },
-    git::parse_gitmodules,
-    paint,
-    watch::{LockFileError, LockFileGuard},
 };
 
-pub type StatusResult<T> = Result<T, StatusError>;
+use crate::paint;
 
-#[derive(Error, Debug)]
-pub enum StatusError {
-    #[error(transparent)]
-    Ipc(#[from] IpcError),
-    #[error(transparent)]
-    Git(#[from] git2::Error),
-    #[error(transparent)]
-    LockFile(#[from] LockFileError),
-    #[error(transparent)]
-    IO(#[from] io::Error),
-}
-
-const STAGED_HEADER: &str = "Changes to be committed:
-  (use \"git restore --staged <file>...\" to unstage)";
-
-const UNTRACKED_HEADER: &str = "Untracked files:
-  (use \"git add <file>...\" to include in what will be committed)";
-
-const LOCK_FILE_ERROR_FOOTER: &str =
-    "Another git/subspy process seems to be running in this repository, e.g.
-an editor opened by 'git commit'. Please make sure all processes
-are terminated then try `subspy reindex`. If it still fails, a git/subspy
-process may have crashed in this repository earlier:
-remove the file manually, `subspy reindex`, and retry to continue.";
-
-fn unstaged_header(rm_in_workdir: bool, has_submod_changes: bool) -> String {
-    format!(
-        "Changes not staged for commit:
-  (use \"git add{} <file>...\" to update what will be committed)
-  (use \"git restore <file>...\" to discard changes in working directory){}",
-        if rm_in_workdir { "/rm" } else { "" },
-        if has_submod_changes {
-            "\n  (commit or discard the untracked or modified content in submodules)"
-        } else {
-            ""
-        }
-    )
-}
-
-// -- Submodule display predicates --
-//
-// These capture the filtering logic used by `print_staged_changes`,
-// `print_unstaged_changes`, and `print_lock_file_errors` so the
-// decisions about which submodules appear in each section are testable
-// independently of the rendering.
-
-/// Returns `true` if `st` should appear in the "Changes to be committed" section.
-const fn is_staged(st: StatusSummary) -> bool {
-    (st.contains(StatusSummary::STAGED) || st.contains(StatusSummary::STAGED_NEW))
-        && !st.contains(StatusSummary::LOCK_FAILURE)
-}
-
-/// Returns the display label for a staged submodule.
-const fn staged_label(st: StatusSummary) -> &'static str {
-    if st.contains(StatusSummary::STAGED_NEW) {
-        "new file:   "
-    } else {
-        "modified:   "
-    }
-}
-
-/// Returns `true` if `st` has unstaged changes that belong in the
-/// "Changes not staged for commit" section.
-fn is_unstaged(st: StatusSummary) -> bool {
-    !st.is_empty()
-        && st != StatusSummary::STAGED
-        && st != StatusSummary::STAGED_NEW
-        && !st.contains(StatusSummary::LOCK_FAILURE)
-}
-
-/// Returns the display label for an unstaged submodule entry.
-const fn unstaged_label(st: StatusSummary) -> &'static str {
-    if st.contains(StatusSummary::DELETED_WORKDIR) {
-        "deleted:    "
-    } else {
-        "modified:   "
-    }
-}
-
-/// Returns `true` if `st` has untracked or modified content within the
-/// submodule's working tree. Controls whether the
-/// "(commit or discard the untracked or modified content in submodules)"
-/// hint appears in the unstaged header. `NEW_COMMITS` alone (a gitlink
-/// divergence) does not qualify.
-const fn has_workdir_changes(st: StatusSummary) -> bool {
-    st.contains(StatusSummary::MODIFIED_CONTENT) || st.contains(StatusSummary::UNTRACKED_CONTENT)
-}
+use super::StatusResult;
 
 #[derive(Debug, PartialEq, Eq)]
 struct RebaseInfo {
@@ -305,7 +212,10 @@ fn print_rebase_header(info: &RebaseInfo, stdout: &mut impl Write) -> Result<(),
 
 /// Prints the "Unmerged paths:" section for any conflicts in the index.
 /// Returns `true` if there were conflicts.
-fn print_unmerged_paths(repo: &Repository, stdout: &mut impl Write) -> StatusResult<bool> {
+pub(super) fn print_unmerged_paths(
+    repo: &Repository,
+    stdout: &mut impl Write,
+) -> StatusResult<bool> {
     let index = repo.index()?;
     if !index.has_conflicts() {
         return Ok(false);
@@ -446,7 +356,7 @@ fn get_header_state(repo: &Repository) -> StatusResult<HeaderState> {
 
 /// Prints the status header: branch name, upstream tracking info, and any
 /// in-progress operation (rebase, merge, cherry-pick, etc.).
-fn print_header(repo: &Repository, stdout: &mut impl Write) -> StatusResult<()> {
+pub(super) fn print_header(repo: &Repository, stdout: &mut impl Write) -> StatusResult<()> {
     let state = get_header_state(repo)?;
     print_header_state(&state, stdout)?;
     Ok(())
@@ -583,261 +493,6 @@ fn print_header_state(state: &HeaderState, stdout: &mut impl Write) -> Result<()
     Ok(())
 }
 
-/// Prints the "Changes to be committed:" section for staged files, submodules,
-/// and deleted submodule paths. Returns `true` if anything was printed.
-fn print_staged_changes(
-    non_submod: &Statuses<'_>,
-    submodule_statuses: &[(String, StatusSummary)],
-    deleted_submodule_paths: &[String],
-    stdout: &mut impl Write,
-) -> Result<bool, io::Error> {
-    let mut header = false;
-
-    for entry in non_submod
-        .iter()
-        .filter(|e| e.status() != git2::Status::CURRENT)
-    {
-        let istatus = match entry.status() {
-            s if s.contains(git2::Status::INDEX_NEW) => "new file:   ",
-            s if s.contains(git2::Status::INDEX_MODIFIED) => "modified:   ",
-            s if s.contains(git2::Status::INDEX_DELETED) => "deleted:    ",
-            s if s.contains(git2::Status::INDEX_RENAMED) => "renamed:    ",
-            s if s.contains(git2::Status::INDEX_TYPECHANGE) => "typechange: ",
-            _ => continue,
-        };
-        if !header {
-            writeln!(stdout, "{STAGED_HEADER}")?;
-            header = true;
-        }
-        let Some(index) = entry.head_to_index() else {
-            continue;
-        };
-        let old_path = index.old_file().path();
-        let new_path = index.new_file().path();
-        match (old_path, new_path) {
-            (Some(old), Some(new)) if old != new => writeln!(
-                stdout,
-                "{}",
-                paint(
-                    Some(AnsiColor::Green),
-                    &format!("\t{istatus}{} -> {}", old.display(), new.display()),
-                )
-            )?,
-            (old, new) => writeln!(
-                stdout,
-                "{}",
-                paint(
-                    Some(AnsiColor::Green),
-                    &format!("\t{istatus}{}", old.or(new).unwrap().display()),
-                )
-            )?,
-        }
-    }
-
-    for path in deleted_submodule_paths {
-        if !header {
-            writeln!(stdout, "{STAGED_HEADER}")?;
-            header = true;
-        }
-        writeln!(
-            stdout,
-            "{}",
-            paint(Some(AnsiColor::Green), &format!("\tdeleted:    {path}"))
-        )?;
-    }
-
-    for (submod_path, st) in submodule_statuses.iter().filter(|(_, st)| is_staged(*st)) {
-        if !header {
-            writeln!(stdout, "{STAGED_HEADER}")?;
-            header = true;
-        }
-        let label = staged_label(*st);
-        writeln!(
-            stdout,
-            "{}",
-            paint(Some(AnsiColor::Green), &format!("\t{label}{submod_path}"))
-        )?;
-    }
-
-    if header {
-        writeln!(stdout)?;
-    }
-    Ok(header)
-}
-
-/// Prints the "Changes not staged for commit:" section for modified, deleted,
-/// and dirty-submodule entries. Returns `true` if anything was printed.
-fn print_unstaged_changes(
-    non_submod: &Statuses<'_>,
-    submodule_statuses: &[(String, StatusSummary)],
-    rm_in_workdir: bool,
-    stdout: &mut impl Write,
-) -> Result<bool, io::Error> {
-    let has_submod_changes = submodule_statuses
-        .iter()
-        .any(|(_, st)| has_workdir_changes(*st));
-    let mut header = false;
-
-    for entry in non_submod.iter() {
-        let status = entry.status();
-        if status == git2::Status::CURRENT || status.contains(git2::Status::CONFLICTED) {
-            continue;
-        }
-        let Some(workdir) = entry.index_to_workdir() else {
-            continue;
-        };
-        let istatus = match status {
-            s if s.contains(git2::Status::WT_MODIFIED) => "modified:   ",
-            s if s.contains(git2::Status::WT_DELETED) => "deleted:    ",
-            s if s.contains(git2::Status::WT_RENAMED) => "renamed:    ",
-            s if s.contains(git2::Status::WT_TYPECHANGE) => "typechange: ",
-            _ => continue,
-        };
-        if !header {
-            writeln!(
-                stdout,
-                "{}",
-                unstaged_header(rm_in_workdir, has_submod_changes)
-            )?;
-            header = true;
-        }
-        let old_path = workdir.old_file().path();
-        let new_path = workdir.new_file().path();
-        match (old_path, new_path) {
-            (Some(old), Some(new)) if old != new => writeln!(
-                stdout,
-                "{}",
-                paint(
-                    Some(AnsiColor::Red),
-                    &format!("\t{istatus}{} -> {}", old.display(), new.display()),
-                )
-            )?,
-            (old, new) => writeln!(
-                stdout,
-                "{}",
-                paint(
-                    Some(AnsiColor::Red),
-                    &format!("\t{istatus}{}", old.or(new).unwrap().display()),
-                )
-            )?,
-        }
-    }
-
-    for (submod_path, submod_status) in submodule_statuses.iter().filter(|(_, st)| is_unstaged(*st))
-    {
-        if !header {
-            writeln!(
-                stdout,
-                "{}",
-                unstaged_header(rm_in_workdir, has_submod_changes)
-            )?;
-            header = true;
-        }
-        let label = unstaged_label(*submod_status);
-        let istatus = submod_status.to_string();
-        write!(
-            stdout,
-            "{}",
-            paint(Some(AnsiColor::Red), &format!("\t{label}{submod_path}"))
-        )?;
-        if istatus.is_empty() {
-            writeln!(stdout)?;
-        } else {
-            writeln!(stdout, " {istatus}")?;
-        }
-    }
-
-    if header {
-        writeln!(stdout)?;
-    }
-    Ok(header)
-}
-
-/// Prints the "Untracked files:" section. Returns `true` if any were printed.
-fn print_untracked_files(
-    non_submod: &Statuses<'_>,
-    stdout: &mut impl Write,
-) -> Result<bool, io::Error> {
-    let mut header = false;
-    for entry in non_submod
-        .iter()
-        .filter(|e| e.status() == git2::Status::WT_NEW)
-    {
-        let Some(file) = entry
-            .index_to_workdir()
-            .and_then(|idx| idx.old_file().path())
-        else {
-            continue;
-        };
-        if !header {
-            writeln!(stdout, "{UNTRACKED_HEADER}")?;
-            header = true;
-        }
-        writeln!(
-            stdout,
-            "\t{}",
-            paint(Some(AnsiColor::Red), &format!("{}", file.display()))
-        )?;
-    }
-    if header {
-        writeln!(stdout)?;
-    }
-    Ok(header)
-}
-
-/// Prints the footer hint (e.g. "nothing added to commit but untracked files present").
-fn print_summary(
-    changes_in_index: bool,
-    changed_in_workdir: bool,
-    has_untracked: bool,
-    stdout: &mut impl Write,
-) -> Result<(), io::Error> {
-    match (changes_in_index, changed_in_workdir, has_untracked) {
-        (false, true, _) => {
-            writeln!(
-                stdout,
-                "no changes added to commit (use \"git add\" and/or \"git commit -a\")"
-            )?;
-        }
-        (false, false, false) => writeln!(stdout, "nothing to commit, working tree clean")?,
-        (false, false, true) => {
-            writeln!(
-                stdout,
-                "nothing added to commit but untracked files present (use \"git add\" to track)"
-            )?;
-        }
-        _ => {}
-    }
-
-    Ok(())
-}
-
-/// Prints error messages for submodules whose `index.lock` could not be acquired.
-fn print_lock_file_errors(
-    submodule_statuses: &[(String, StatusSummary)],
-    stdout: &mut impl Write,
-) -> Result<(), io::Error> {
-    let mut footer = false;
-    for (submod_path, _) in submodule_statuses
-        .iter()
-        .filter(|(_, st)| st.contains(StatusSummary::LOCK_FAILURE))
-    {
-        if !footer {
-            writeln!(stdout)?;
-        }
-        footer = true;
-        writeln!(
-            stdout,
-            "error: Unable to create index.lock file for '{submod_path}': File exists."
-        )?;
-    }
-    if footer {
-        writeln!(stdout, "\n{LOCK_FILE_ERROR_FOOTER}")?;
-    }
-
-    Ok(())
-}
-
 /// Returns the "On branch <name>" or "HEAD detached at <oid>" display string.
 fn current_branch_display(head_ref: &git2::Reference<'_>) -> String {
     if !head_ref.is_branch() {
@@ -915,192 +570,10 @@ fn get_upstream_status(
     }
 }
 
-/// Formats and prints the full `git status`-style output: header, staged changes,
-/// unmerged paths, unstaged changes, untracked files, and lock file errors.
-// Basic logic originally adapted from https://github.com/rust-lang/git2-rs/blob/master/examples/status.rs
-fn display_status(
-    repo: &Repository,
-    non_submodule_statuses: &Statuses<'_>,
-    submodule_statuses: &[(String, StatusSummary)],
-    deleted_submodule_paths: &[String],
-) -> StatusResult<()> {
-    let mut stdout = io::BufWriter::with_capacity(64 * 1024, io::stdout().lock());
-    // Fast path: nothing dirty
-    if non_submodule_statuses.is_empty()
-        && submodule_statuses.is_empty()
-        && deleted_submodule_paths.is_empty()
-    {
-        print_header(repo, &mut stdout)?;
-        writeln!(&mut stdout, "nothing to commit, working tree clean")?;
-        return Ok(());
-    }
-
-    print_header(repo, &mut stdout)?;
-
-    let rm_in_workdir = non_submodule_statuses
-        .iter()
-        .any(|e| e.status().contains(git2::Status::WT_DELETED))
-        || submodule_statuses
-            .iter()
-            .any(|(_, st)| st.contains(StatusSummary::DELETED_WORKDIR));
-
-    let changes_in_index = print_staged_changes(
-        non_submodule_statuses,
-        submodule_statuses,
-        deleted_submodule_paths,
-        &mut stdout,
-    )?;
-    let has_conflicts = print_unmerged_paths(repo, &mut stdout)?;
-    let changed_in_workdir = print_unstaged_changes(
-        non_submodule_statuses,
-        submodule_statuses,
-        rm_in_workdir,
-        &mut stdout,
-    )?;
-    let has_untracked = print_untracked_files(non_submodule_statuses, &mut stdout)?;
-
-    print_summary(
-        changes_in_index,
-        changed_in_workdir || has_conflicts,
-        has_untracked,
-        &mut stdout,
-    )?;
-
-    print_lock_file_errors(submodule_statuses, &mut stdout)?;
-
-    Ok(())
-}
-
-/// Returns the relative paths of submodules staged for deletion.
-///
-/// These are submodules whose gitlink is in the HEAD commit but has been removed
-/// from the index (via `git rm`).
-///
-/// # Errors
-///
-/// Returns `Err` if the HEAD tree cannot be walked or the index cannot be read.
-pub fn deleted_submodule_paths(repo: &Repository) -> StatusResult<Vec<String>> {
-    let Some(head_tree) = repo.head().ok().and_then(|h| h.peel_to_tree().ok()) else {
-        return Ok(Vec::new());
-    };
-    let index = repo.index()?;
-
-    let mut deleted = Vec::new();
-    head_tree.walk(git2::TreeWalkMode::PreOrder, |root, entry| {
-        if entry.filemode() == i32::from(git2::FileMode::Commit) {
-            let Some(name) = entry.name() else {
-                return git2::TreeWalkResult::Skip;
-            };
-            let path = if root.is_empty() {
-                name.to_string()
-            } else {
-                format!("{root}{name}")
-            };
-            if index.get_path(Path::new(&path), 0).is_none() {
-                deleted.push(path);
-            }
-            git2::TreeWalkResult::Skip
-        } else {
-            git2::TreeWalkResult::Ok
-        }
-    })?;
-
-    Ok(deleted)
-}
-
-/// Retrieves and displays the statuses for the repository at `path`.
-///
-/// # Errors
-///
-/// Returns `Err` if statuses cannot be retrieved from the repository or watch server
-pub fn status(
-    root_path: &Path,
-    repo_kind: RepoKind,
-    display_progress: bool,
-    use_server: bool,
-) -> StatusResult<()> {
-    // Send IPC request early so the server starts processing while we do local work.
-    let mut conn = if use_server {
-        Some(send_status_request(root_path)?)
-    } else {
-        None
-    };
-
-    let repo = Repository::open(root_path)?;
-
-    let mut opts = git2::StatusOptions::new();
-    opts.include_untracked(true)
-        .recurse_untracked_dirs(false)
-        .include_ignored(false)
-        // The repo was just opened, so the index is already fresh from disk.
-        // Skip the redundant stat-cache refresh pass.
-        .no_refresh(true);
-
-    // Ignore submodules _only_ if we are the top level, in which case submodule statuses
-    // are provided by the watch server or computed locally below.
-    if repo_kind == RepoKind::WithSubmodules {
-        opts.exclude_submodules(true);
-    }
-
-    let non_submodule_statuses = repo.statuses(Some(&mut opts))?;
-    let deleted_submodule_paths = deleted_submodule_paths(&repo)?;
-
-    let submodule_statuses = match conn {
-        Some(ref mut c) => recv_status_response(c, display_progress)?.0,
-        None if repo_kind == RepoKind::WithSubmodules => compute_local_statuses(root_path, &repo)?,
-        None => Vec::new(),
-    };
-
-    display_status(
-        &repo,
-        &non_submodule_statuses,
-        &submodule_statuses,
-        &deleted_submodule_paths,
-    )?;
-
-    Ok(())
-}
-
-/// Computes submodule statuses locally via git2 without the watch server.
-///
-/// # Errors
-///
-/// Returns `StatusError` if the lock file cannot be acquired or git2 fails
-/// to read submodule status.
-///
-/// # Panics
-///
-/// Panics if a submodule path contains non-UTF-8.
-pub fn compute_local_statuses(
-    root_path: &Path,
-    repo: &Repository,
-) -> StatusResult<Vec<(String, StatusSummary)>> {
-    use rayon::prelude::*;
-
-    let lock_path = repo.path().join("index.lock");
-    let gitmodule_entries = {
-        let _lock = LockFileGuard::acquire(&lock_path)?;
-        parse_gitmodules(root_path)?
-    };
-    let tl_repo = thread_local::ThreadLocal::new();
-
-    let statuses: StatusResult<Vec<_>> = gitmodule_entries
-        .into_par_iter()
-        .map(|(_, path, _)| -> StatusResult<(String, StatusSummary)> {
-            let repo = tl_repo.get_or_try(|| Repository::open(root_path))?;
-            let st = repo.submodule_status(&path, git2::SubmoduleIgnore::None)?;
-            let summary: StatusSummary = st.into();
-            Ok((path, summary))
-        })
-        .filter(|r| !matches!(r, Ok((_, s)) if *s == StatusSummary::clean()))
-        .collect();
-
-    statuses
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
     use tempfile::TempDir;
 
     fn git(args: &[&str]) {
@@ -1157,7 +630,6 @@ mod tests {
         let root = tmp.path().display().to_string();
         create_conflicting_branch(&root, tmp.path(), "pick-me");
 
-        // Cherry-pick the conflicting commit (will fail with conflict)
         let output = std::process::Command::new("git")
             .args(["-c", "user.name=Test", "-c", "user.email=test@test.com"])
             .args(["-C", &root, "cherry-pick", "pick-me"])
@@ -1165,7 +637,6 @@ mod tests {
             .unwrap();
         assert!(!output.status.success(), "expected cherry-pick to conflict");
 
-        // Re-open repo to pick up state changes
         let repo = Repository::open(tmp.path()).unwrap();
         let state = get_header_state(&repo).unwrap();
         assert!(
@@ -1213,18 +684,14 @@ mod tests {
         let (tmp, _repo) = init_repo();
         let root = tmp.path().display().to_string();
 
-        // Commit A: change file.txt to "aaa"
         std::fs::write(tmp.path().join("file.txt"), "aaa\n").unwrap();
         git(&["-C", &root, "add", "-A"]);
         git(&["-C", &root, "commit", "-m", "commit A"]);
 
-        // Commit B: change file.txt to "bbb"
         std::fs::write(tmp.path().join("file.txt"), "bbb\n").unwrap();
         git(&["-C", &root, "add", "-A"]);
         git(&["-C", &root, "commit", "-m", "commit B"]);
 
-        // Revert commit A (changes "aaa" -> "initial"), but current is "bbb",
-        // so git can't apply the reverse patch cleanly.
         let output = std::process::Command::new("git")
             .args([
                 "-c",
@@ -1271,7 +738,6 @@ mod tests {
             .unwrap();
         assert!(!output.status.success(), "expected cherry-pick to conflict");
 
-        // Resolve the conflict by accepting the incoming content and staging
         std::fs::write(tmp.path().join("file.txt"), "resolved\n").unwrap();
         git(&["-C", &root, "add", "file.txt"]);
 
@@ -1301,7 +767,6 @@ mod tests {
             .unwrap();
         assert!(!output.status.success(), "expected merge to conflict");
 
-        // Resolve and stage
         std::fs::write(tmp.path().join("file.txt"), "resolved\n").unwrap();
         git(&["-C", &root, "add", "file.txt"]);
 
@@ -1323,7 +788,6 @@ mod tests {
         let (tmp, _repo) = init_repo();
         let root = tmp.path().display().to_string();
 
-        // Add a second commit so we have a range to bisect
         std::fs::write(tmp.path().join("file.txt"), "changed\n").unwrap();
         git(&["-C", &root, "add", "-A"]);
         git(&["-C", &root, "commit", "-m", "second"]);
@@ -1343,7 +807,6 @@ mod tests {
         let root = tmp.path().display().to_string();
         create_conflicting_branch(&root, tmp.path(), "patch-src");
 
-        // Generate a patch from the conflicting branch
         let patch_output = std::process::Command::new("git")
             .args(["-C", &root, "format-patch", "master..patch-src", "--stdout"])
             .output()
@@ -1352,7 +815,6 @@ mod tests {
         let patch_file = tmp.path().join("conflict.patch");
         std::fs::write(&patch_file, &patch_output.stdout).unwrap();
 
-        // Apply the patch (will conflict with master's diverged file.txt)
         let output = std::process::Command::new("git")
             .args(["-C", &root, "am", &patch_file.display().to_string()])
             .output()
@@ -1375,7 +837,6 @@ mod tests {
         let root = tmp.path().display().to_string();
         create_conflicting_branch(&root, tmp.path(), "rebase-src");
 
-        // Rebase master onto rebase-src using the apply backend
         let output = std::process::Command::new("git")
             .args([
                 "-c",
@@ -1408,104 +869,63 @@ mod tests {
         );
     }
 
-    // -- Submodule display predicates --
+    // -- parse_rebase_lines --
 
     #[test]
-    fn staged_modified_submodule() {
-        let st = StatusSummary::STAGED;
-        assert!(is_staged(st));
-        assert_eq!(staged_label(st), "modified:   ");
-        assert!(!is_unstaged(st));
+    fn rebase_lines_shortens_full_hash() {
+        let input = "pick abcdef1234567890abcdef1234567890abcdef12 Fix the bug\n";
+        let result = parse_rebase_lines(input);
+        assert_eq!(result, ["pick abcdef1 Fix the bug"]);
     }
 
     #[test]
-    fn staged_new_submodule() {
-        let st = StatusSummary::STAGED_NEW;
-        assert!(is_staged(st));
-        assert_eq!(staged_label(st), "new file:   ");
-        assert!(!is_unstaged(st));
+    fn rebase_lines_preserves_short_hash() {
+        let input = "pick abcdef1 Fix the bug\n";
+        let result = parse_rebase_lines(input);
+        assert_eq!(result, ["pick abcdef1 Fix the bug"]);
     }
 
     #[test]
-    fn staged_with_unstaged_changes() {
-        let st = StatusSummary::STAGED | StatusSummary::MODIFIED_CONTENT;
-        assert!(is_staged(st));
-        assert_eq!(staged_label(st), "modified:   ");
-        assert!(is_unstaged(st));
+    fn rebase_lines_skips_comments_and_blanks() {
+        let input = "# This is a comment\n\npick abcdef1 Do stuff\n";
+        let result = parse_rebase_lines(input);
+        assert_eq!(result, ["pick abcdef1 Do stuff"]);
     }
 
     #[test]
-    fn staged_new_with_unstaged_changes() {
-        let st = StatusSummary::STAGED_NEW | StatusSummary::UNTRACKED_CONTENT;
-        assert!(is_staged(st));
-        assert_eq!(staged_label(st), "new file:   ");
-        assert!(is_unstaged(st));
+    fn rebase_lines_full_hash_no_message() {
+        let input = "drop abcdef1234567890abcdef1234567890abcdef12\n";
+        let result = parse_rebase_lines(input);
+        assert_eq!(result, ["drop abcdef1"]);
     }
 
     #[test]
-    fn unstaged_only() {
-        let st = StatusSummary::MODIFIED_CONTENT;
-        assert!(!is_staged(st));
-        assert!(is_unstaged(st));
+    fn rebase_lines_real_done_file_format() {
+        let input = "\
+            pick 4e0411814cb5bd9cf38ee803978966a39df7ac54 # feature 1\n\
+            pick 66ec2060c6cb15d5ca911f52502d0f009f17233c # feature 2\n";
+        let result = parse_rebase_lines(input);
+        assert_eq!(
+            result,
+            ["pick 4e04118 # feature 1", "pick 66ec206 # feature 2"]
+        );
     }
 
     #[test]
-    fn new_commits_only() {
-        let st = StatusSummary::NEW_COMMITS;
-        assert!(!is_staged(st));
-        assert!(is_unstaged(st));
-    }
-
-    #[test]
-    fn lock_failure_excluded_from_both() {
-        let st = StatusSummary::LOCK_FAILURE;
-        assert!(!is_staged(st));
-        assert!(!is_unstaged(st));
-    }
-
-    #[test]
-    fn lock_failure_with_staged_excluded() {
-        let st = StatusSummary::STAGED | StatusSummary::LOCK_FAILURE;
-        assert!(!is_staged(st));
-        assert!(!is_unstaged(st));
-    }
-
-    #[test]
-    fn clean_is_not_unstaged() {
-        assert!(!is_unstaged(StatusSummary::clean()));
-    }
-
-    // -- has_workdir_changes --
-
-    #[test]
-    fn workdir_changes_modified_content() {
-        assert!(has_workdir_changes(StatusSummary::MODIFIED_CONTENT));
-    }
-
-    #[test]
-    fn workdir_changes_untracked_content() {
-        assert!(has_workdir_changes(StatusSummary::UNTRACKED_CONTENT));
-    }
-
-    #[test]
-    fn workdir_changes_new_commits_only() {
-        assert!(!has_workdir_changes(StatusSummary::NEW_COMMITS));
-    }
-
-    #[test]
-    fn workdir_changes_staged_only() {
-        assert!(!has_workdir_changes(StatusSummary::STAGED));
-    }
-
-    #[test]
-    fn workdir_changes_new_commits_with_untracked() {
-        let st = StatusSummary::NEW_COMMITS | StatusSummary::UNTRACKED_CONTENT;
-        assert!(has_workdir_changes(st));
-    }
-
-    #[test]
-    fn workdir_changes_clean() {
-        assert!(!has_workdir_changes(StatusSummary::clean()));
+    fn rebase_lines_multiple_ops() {
+        let input = "\
+            pick aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa First commit\n\
+            fixup bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb Second commit\n\
+            reword cccccccccccccccccccccccccccccccccccccccc Third commit\n";
+        let result = parse_rebase_lines(input);
+        assert_eq!(
+            result,
+            [
+                "pick aaaaaaa First commit",
+                "fixup bbbbbbb Second commit",
+                "reword ccccccc Third commit",
+            ]
+        );
     }
 
     // -- get_upstream_status --
@@ -1515,11 +935,9 @@ mod tests {
     fn init_repo_with_remote() -> (TempDir, Repository) {
         let tmp = TempDir::new().unwrap();
 
-        // Create a bare "remote"
         let remote_path = tmp.path().join("remote.git");
         git(&["init", "--bare", &remote_path.display().to_string()]);
 
-        // Clone it to get a tracking branch
         let local_path = tmp.path().join("local");
         git(&[
             "-c",
@@ -1529,7 +947,6 @@ mod tests {
             &local_path.display().to_string(),
         ]);
 
-        // Add an initial commit and push
         let local = local_path.display().to_string();
         std::fs::write(local_path.join("file.txt"), "initial\n").unwrap();
         git(&["-C", &local, "add", "-A"]);
@@ -1577,7 +994,6 @@ mod tests {
         let (tmp, repo) = init_repo_with_remote();
         let remote_path = tmp.path().join("remote.git");
 
-        // Push a commit from a second clone so origin advances
         let other = tmp.path().join("other");
         git(&[
             "-c",
@@ -1592,7 +1008,6 @@ mod tests {
         git(&["-C", &other_str, "commit", "-m", "remote commit"]);
         git(&["-C", &other_str, "push"]);
 
-        // Fetch in the original clone
         let local = repo.workdir().unwrap().display().to_string();
         git(&["-C", &local, "fetch"]);
 
@@ -1612,7 +1027,6 @@ mod tests {
         let (tmp, repo) = init_repo_with_remote();
         let remote_path = tmp.path().join("remote.git");
 
-        // Push a commit from a second clone
         let other = tmp.path().join("other");
         git(&[
             "-c",
@@ -1627,7 +1041,6 @@ mod tests {
         git(&["-C", &other_str, "commit", "-m", "remote commit"]);
         git(&["-C", &other_str, "push"]);
 
-        // Make a local commit (without fetching first, then fetch)
         let local = repo.workdir().unwrap().display().to_string();
         std::fs::write(repo.workdir().unwrap().join("local.txt"), "local\n").unwrap();
         git(&["-C", &local, "add", "-A"]);
@@ -1657,143 +1070,5 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-    }
-
-    // -- parse_rebase_lines --
-
-    #[test]
-    fn rebase_lines_shortens_full_hash() {
-        let input = "pick abcdef1234567890abcdef1234567890abcdef12 Fix the bug\n";
-        let result = parse_rebase_lines(input);
-        assert_eq!(result, ["pick abcdef1 Fix the bug"]);
-    }
-
-    #[test]
-    fn rebase_lines_preserves_short_hash() {
-        let input = "pick abcdef1 Fix the bug\n";
-        let result = parse_rebase_lines(input);
-        assert_eq!(result, ["pick abcdef1 Fix the bug"]);
-    }
-
-    #[test]
-    fn rebase_lines_skips_comments_and_blanks() {
-        let input = "# This is a comment\n\npick abcdef1 Do stuff\n";
-        let result = parse_rebase_lines(input);
-        assert_eq!(result, ["pick abcdef1 Do stuff"]);
-    }
-
-    #[test]
-    fn rebase_lines_full_hash_no_message() {
-        let input = "drop abcdef1234567890abcdef1234567890abcdef12\n";
-        let result = parse_rebase_lines(input);
-        assert_eq!(result, ["drop abcdef1"]);
-    }
-
-    #[test]
-    fn rebase_lines_real_done_file_format() {
-        // Real git rebase done/todo files use full hashes and `# ` message prefix
-        let input = "\
-            pick 4e0411814cb5bd9cf38ee803978966a39df7ac54 # feature 1\n\
-            pick 66ec2060c6cb15d5ca911f52502d0f009f17233c # feature 2\n";
-        let result = parse_rebase_lines(input);
-        assert_eq!(
-            result,
-            ["pick 4e04118 # feature 1", "pick 66ec206 # feature 2"]
-        );
-    }
-
-    #[test]
-    fn rebase_lines_multiple_ops() {
-        let input = "\
-            pick aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa First commit\n\
-            fixup bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb Second commit\n\
-            reword cccccccccccccccccccccccccccccccccccccccc Third commit\n";
-        let result = parse_rebase_lines(input);
-        assert_eq!(
-            result,
-            [
-                "pick aaaaaaa First commit",
-                "fixup bbbbbbb Second commit",
-                "reword ccccccc Third commit",
-            ]
-        );
-    }
-
-    #[test]
-    fn compute_local_statuses_clean_repo() {
-        let tmp = TempDir::new().unwrap();
-        let root = tmp.path().join("root");
-        let sub_src = tmp.path().join("sub_src");
-
-        // Create a source repo for the submodule
-        let sub_src_str = sub_src.display().to_string();
-        git(&["-C", &tmp.path().display().to_string(), "init", "sub_src"]);
-        std::fs::write(sub_src.join("README.md"), "sub\n").unwrap();
-        git(&["-C", &sub_src_str, "add", "-A"]);
-        git(&["-C", &sub_src_str, "commit", "-m", "init sub"]);
-
-        // Create root repo with a submodule
-        let root_str = root.display().to_string();
-        git(&["-C", &tmp.path().display().to_string(), "init", "root"]);
-        std::fs::write(root.join("file.txt"), "root\n").unwrap();
-        git(&["-C", &root_str, "add", "-A"]);
-        git(&["-C", &root_str, "commit", "-m", "init root"]);
-        git(&[
-            "-C",
-            &root_str,
-            "-c",
-            "protocol.file.allow=always",
-            "submodule",
-            "add",
-            &sub_src_str,
-            "my_sub",
-        ]);
-        git(&["-C", &root_str, "commit", "-m", "add submodule"]);
-
-        let repo = Repository::open(&root).unwrap();
-        let statuses = compute_local_statuses(&root, &repo).unwrap();
-        assert!(
-            statuses.is_empty(),
-            "clean repo should have no dirty submodules"
-        );
-    }
-
-    #[test]
-    fn compute_local_statuses_dirty_submodule() {
-        let tmp = TempDir::new().unwrap();
-        let root = tmp.path().join("root");
-        let sub_src = tmp.path().join("sub_src");
-
-        let sub_src_str = sub_src.display().to_string();
-        git(&["-C", &tmp.path().display().to_string(), "init", "sub_src"]);
-        std::fs::write(sub_src.join("README.md"), "sub\n").unwrap();
-        git(&["-C", &sub_src_str, "add", "-A"]);
-        git(&["-C", &sub_src_str, "commit", "-m", "init sub"]);
-
-        let root_str = root.display().to_string();
-        git(&["-C", &tmp.path().display().to_string(), "init", "root"]);
-        std::fs::write(root.join("file.txt"), "root\n").unwrap();
-        git(&["-C", &root_str, "add", "-A"]);
-        git(&["-C", &root_str, "commit", "-m", "init root"]);
-        git(&[
-            "-C",
-            &root_str,
-            "-c",
-            "protocol.file.allow=always",
-            "submodule",
-            "add",
-            &sub_src_str,
-            "my_sub",
-        ]);
-        git(&["-C", &root_str, "commit", "-m", "add submodule"]);
-
-        // Dirty the submodule
-        std::fs::write(root.join("my_sub").join("new.txt"), "untracked\n").unwrap();
-
-        let repo = Repository::open(&root).unwrap();
-        let statuses = compute_local_statuses(&root, &repo).unwrap();
-        assert_eq!(statuses.len(), 1);
-        assert_eq!(statuses[0].0, "my_sub");
-        assert!(statuses[0].1.contains(StatusSummary::UNTRACKED_CONTENT));
     }
 }

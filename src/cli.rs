@@ -14,7 +14,7 @@ use crate::{
     prompt::{PromptError, prompt},
     reindex::{ReindexError, reindex},
     shutdown::{ShutdownError, shutdown},
-    status::{StatusError, status},
+    status::{IgnoreSubmodules, OutputOpts, PorcelainVersion, StatusError, UntrackedFiles, status},
     watch::{WatchError, spawn_daemon},
 };
 
@@ -67,6 +67,10 @@ pub struct Reindex {
 
 #[derive(Args, Debug)]
 #[command(visible_aliases = ["st", "s"])]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "fields mirror independent git-status flags"
+)]
 pub struct Status {
     /// The directory to query `git status` for
     #[arg(index = 1)]
@@ -77,6 +81,35 @@ pub struct Status {
     /// Skip the watch server and compute status locally via libgit2
     #[arg(long)]
     pub no_server: bool,
+    /// Use porcelain machine-readable format (version 1 or 2)
+    #[arg(long, value_name = "VERSION", default_missing_value = "1", num_args = 0..=1)]
+    pub porcelain: Option<PorcelainVersion>,
+    /// Terminate entries with NUL instead of newline
+    #[arg(short = 'z')]
+    pub null_terminate: bool,
+    /// How to handle submodule changes in the output
+    #[arg(
+        long = "ignore-submodules",
+        value_name = "WHEN",
+        default_value = "none"
+    )]
+    pub ignore_submodules: IgnoreSubmodules,
+    /// Show untracked files
+    #[arg(
+        long = "untracked-files",
+        short = 'u',
+        value_name = "MODE",
+        default_missing_value = "normal",
+        num_args = 0..=1
+    )]
+    pub untracked_files: Option<UntrackedFiles>,
+    /// Show ignored files in the output
+    #[arg(long)]
+    pub ignored: bool,
+    /// Show branch and tracking info (porcelain modes only;
+    /// human-readable output always shows branch info)
+    #[arg(short = 'b', long)]
+    pub branch: bool,
 }
 
 #[derive(Args, Debug)]
@@ -326,12 +359,22 @@ impl Status {
     pub fn run(self) -> RunResult<()> {
         let (true_path, repo_kind) = get_project_path(self.dir)?;
         let display_progress = std::io::stderr().is_terminal();
-        let use_server = !self.no_server && repo_kind == RepoKind::WithSubmodules;
+        let use_server = !self.no_server
+            && repo_kind == RepoKind::WithSubmodules
+            && self.ignore_submodules != IgnoreSubmodules::All;
         Ok(status(
             true_path.as_path(),
             repo_kind,
             display_progress,
             use_server,
+            OutputOpts {
+                porcelain: self.porcelain,
+                null_terminate: self.null_terminate,
+                ignore_submodules: self.ignore_submodules,
+                untracked_files: self.untracked_files.unwrap_or_default(),
+                show_ignored: self.ignored,
+                branch: self.branch,
+            },
         )?)
     }
 }

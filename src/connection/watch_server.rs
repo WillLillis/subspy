@@ -1382,10 +1382,8 @@ impl WatchServer {
                         self.root_rebasing = false;
                         return Ok(HandleEventsExit::ReindexEvent);
                     }
-                    Some(EventType::SubmoduleChange) => {
-                        if !self.skip_set.contains(index) {
-                            self.try_spawn_submod_update(index, &in_flight, &pending_lock_retries);
-                        }
+                    Some(EventType::SubmoduleChange) if !self.skip_set.contains(index) => {
+                        self.try_spawn_submod_update(index, &in_flight, &pending_lock_retries);
                     }
                     Some(EventType::SubmoduleGitOperation) => {
                         if let Some(i) = self.submod_for_event(&event)
@@ -1427,7 +1425,7 @@ impl WatchServer {
                             self.try_spawn_submod_update(i, &in_flight, &pending_lock_retries);
                         }
                     }
-                    Some(EventType::RootGitOperation) | None => {}
+                    Some(EventType::RootGitOperation | EventType::SubmoduleChange) | None => {}
                 },
                 Err(e) => {
                     wait_for_in_flight(&in_flight);

@@ -79,6 +79,32 @@ when = "subspy prompt -f '{dirty}!{staged}+{new_commits}↑'"
 format = "[$output]($style) "
 ```
 
+#### Git Extensions Integration (**Experimental**)
+
+[Git Extensions](https://gitextensions.github.io/) calls `git status --porcelain ...` before many operations (checkout,
+merge, opening the commit dialog) and on a background timer. In repositories with many submodules this check can take
+tens of seconds, blocking the UI.
+
+subspy ships a second binary, `subspy-git`, that acts as a drop-in replacement for `git`: it intercepts `git status`
+and routes it through subspy's machinery, while every other git invocation (`fetch`, `log`, `rev-parse`, `diff`, ...)
+is forwarded to the real `git` on `PATH` unchanged via `execvp` (Unix) or `Command::spawn` (Windows). After
+`cargo install --path . --locked` the binary lives next to `subspy` (e.g. `~/.cargo/bin/subspy-git`).
+
+To use it: open Git Extensions -> Settings -> Git -> Path to git, set the path to the absolute path of `subspy-git`
+(or `subspy-git.exe` on Windows), and click OK.
+
+To verify it's working from the command line:
+
+```sh
+> subspy-git status --porcelain=2 -z --untracked-files --ignore-submodules=none | head
+# Output should be byte-identical to `git status` with the same args, but much faster on submodule-heavy repos.
+```
+
+> **Linux / Mono caveat:** Git Extensions resets the "Path to git" setting on every startup on non-Windows builds
+> ([`CheckSettingsLogic.cs#L176-L177`](https://github.com/gitextensions/gitextensions/blob/1e95a8736a5e3b3ccb4054458f8e18c7c0eed7ef/src/app/GitUI/CommandsDialogs/SettingsDialog/CheckSettingsLogic.cs#L176-L177)
+> hardcodes `"git"`), so you'll need to re-enter it each time you launch the application. The Windows build persists
+> the value to the registry and is unaffected.
+
 ### Installation
 
 Installing subspy requires the [Rust toolchain](https://rust-lang.org/tools/install/).
