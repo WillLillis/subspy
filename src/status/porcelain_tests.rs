@@ -138,6 +138,40 @@ fn setup_detached_head(root: &Path) {
         .checkout("HEAD~1");
 }
 
+/// Merge with several conflict shapes: UU (both modified), AA (both added),
+/// UD (deleted by them), DU (deleted by us). Exercises the conflict XY codes
+/// in v1 and the `u`-line in v2.
+fn setup_merge_conflict(root: &Path) {
+    let r = Repo::init(root);
+    r.write("shared.txt", "base\n")
+        .write("us_delete.txt", "base\n")
+        .write("them_delete.txt", "base\n")
+        .add_all()
+        .commit("base")
+        .branch("feature")
+        .write("shared.txt", "feature\n")
+        .rm_file("us_delete.txt")
+        .write("them_delete.txt", "modified in feature\n")
+        .write("both_add.txt", "feature version\n")
+        .add_all()
+        .commit("feature")
+        .checkout("master")
+        .write("shared.txt", "master\n")
+        .write("us_delete.txt", "modified in master\n")
+        .rm_file("them_delete.txt")
+        .write("both_add.txt", "master version\n")
+        .add_all()
+        .commit("master");
+    // Attempt the merge - expected to fail with conflicts. Assert on the
+    // exit code so a future tweak that accidentally makes the merge succeed
+    // fails loudly rather than silently testing a clean state.
+    let output = r.try_git(&["merge", "feature", "--no-edit"]);
+    assert!(
+        !output.status.success(),
+        "expected `git merge feature` to conflict, but it succeeded"
+    );
+}
+
 /// A test scenario: a setup function that builds the repo state, plus the
 /// options we want both git and subspy to see.
 struct Case {
@@ -212,6 +246,10 @@ const CASES: &[Case] = &[
     Case {
         name: "ignored files",
         setup: setup_ignored_files,
+    },
+    Case {
+        name: "merge conflict (UU/AA/UD/DU)",
+        setup: setup_merge_conflict,
     },
 ];
 
