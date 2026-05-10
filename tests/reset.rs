@@ -9,12 +9,14 @@ fn submodule_reset_soft(_run: u32) {
     harness.assert_all_clean();
 
     // Commit a new file in the submodule
-    harness.write_file("sub_a", "new.txt", "content\n");
-    harness.commit_in_submodule("sub_a", "add new.txt");
+    harness.submodule("sub_a").write("new.txt", "content\n");
+    harness.submodule("sub_a").add_all().commit("add new.txt");
     harness.assert_submodule_status("sub_a", StatusSummary::NEW_COMMITS);
 
     // Soft reset: HEAD moves back, but changes remain staged
-    harness.git_in_submodule("sub_a", &["reset", "--soft", "HEAD~1"]);
+    harness
+        .submodule("sub_a")
+        .run_git(&["reset", "--soft", "HEAD~1"]);
 
     // HEAD now matches parent gitlink again, but there are staged changes
     harness.assert_submodule_status("sub_a", StatusSummary::MODIFIED_CONTENT);
@@ -26,12 +28,12 @@ fn submodule_reset_mixed(_run: u32) {
     harness.assert_all_clean();
 
     // Commit a new file in the submodule
-    harness.write_file("sub_a", "new.txt", "content\n");
-    harness.commit_in_submodule("sub_a", "add new.txt");
+    harness.submodule("sub_a").write("new.txt", "content\n");
+    harness.submodule("sub_a").add_all().commit("add new.txt");
     harness.assert_submodule_status("sub_a", StatusSummary::NEW_COMMITS);
 
     // Mixed reset (default): HEAD moves back, changes become unstaged/untracked
-    harness.git_in_submodule("sub_a", &["reset", "HEAD~1"]);
+    harness.submodule("sub_a").run_git(&["reset", "HEAD~1"]);
 
     // The new file is now untracked
     harness.assert_submodule_status("sub_a", StatusSummary::UNTRACKED_CONTENT);
@@ -43,12 +45,14 @@ fn submodule_reset_hard(_run: u32) {
     harness.assert_all_clean();
 
     // Commit a new file in the submodule
-    harness.write_file("sub_a", "new.txt", "content\n");
-    harness.commit_in_submodule("sub_a", "add new.txt");
+    harness.submodule("sub_a").write("new.txt", "content\n");
+    harness.submodule("sub_a").add_all().commit("add new.txt");
     harness.assert_submodule_status("sub_a", StatusSummary::NEW_COMMITS);
 
     // Hard reset: HEAD moves back, all changes discarded
-    harness.git_in_submodule("sub_a", &["reset", "--hard", "HEAD~1"]);
+    harness
+        .submodule("sub_a")
+        .run_git(&["reset", "--hard", "HEAD~1"]);
 
     // Everything is clean again
     harness.assert_all_clean();
@@ -60,15 +64,15 @@ fn root_reset_staged_gitlink(_run: u32) {
     harness.assert_all_clean();
 
     // Commit in submodule-> creates NEW_COMMITS
-    harness.write_file("sub_a", "new.txt", "content\n");
-    harness.commit_in_submodule("sub_a", "add new.txt");
+    harness.submodule("sub_a").write("new.txt", "content\n");
+    harness.submodule("sub_a").add_all().commit("add new.txt");
     harness.assert_submodule_status("sub_a", StatusSummary::NEW_COMMITS);
 
     // Stage the gitlink in the parent repo
-    harness.stage_submodule("sub_a");
+    harness.root().add("sub_a");
     harness.assert_submodule_status("sub_a", StatusSummary::STAGED);
 
     // Reset the staged gitlink-> back to NEW_COMMITS
-    harness.git_in_root(&["reset", "HEAD", "--", "sub_a"]);
+    harness.root().run_git(&["reset", "HEAD", "--", "sub_a"]);
     harness.assert_submodule_status("sub_a", StatusSummary::NEW_COMMITS);
 }

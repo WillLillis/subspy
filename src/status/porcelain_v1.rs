@@ -17,6 +17,7 @@ use super::{
     conflict::{ConflictEntry, build_conflict_map},
     line_terminator,
     quote::{QuoteMode, maybe_quote},
+    unborn_branch_name,
 };
 
 /// Porcelain v1 uses `QuoteSpace` mode to match `git status --porcelain`,
@@ -77,10 +78,14 @@ fn submodule_xy(st: StatusSummary) -> (char, char) {
 
 /// Writes the `## branch...upstream [ahead/behind]` header for porcelain v1.
 fn write_branch_header(repo: &Repository, out: &mut impl Write) -> StatusResult<()> {
-    let head = repo.head().ok();
+    let Ok(head) = repo.head() else {
+        // Unborn HEAD (empty repo, no commits yet).
+        let branch = unborn_branch_name(repo).unwrap_or_else(|| "(unknown)".to_string());
+        writeln!(out, "## No commits yet on {branch}")?;
+        return Ok(());
+    };
 
-    let branch_name = head
-        .as_ref()
+    let branch_name = Some(&head)
         .filter(|h| h.is_branch())
         .and_then(|h| h.shorthand())
         .map(str::to_string);

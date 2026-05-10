@@ -26,10 +26,10 @@ fn reindex_preserves_status(_run: u32) {
     let harness = common::HarnessBuilder::new().submodule("sub_a").build();
     harness.assert_all_clean();
 
-    harness.write_file("sub_a", "dirty.txt", "dirty\n");
+    harness.submodule("sub_a").write("dirty.txt", "dirty\n");
     harness.assert_submodule_status("sub_a", StatusSummary::UNTRACKED_CONTENT);
 
-    request_reindex(harness.root_path(), false, false).unwrap();
+    request_reindex(harness.root().path(), false, false).unwrap();
 
     harness.assert_submodule_status("sub_a", StatusSummary::UNTRACKED_CONTENT);
 }
@@ -39,19 +39,19 @@ fn reindex_replace_watchers_preserves_status(_run: u32) {
     let harness = common::HarnessBuilder::new().submodule("sub_a").build();
     harness.assert_all_clean();
 
-    harness.write_file("sub_a", "dirty.txt", "dirty\n");
+    harness.submodule("sub_a").write("dirty.txt", "dirty\n");
     harness.assert_submodule_status("sub_a", StatusSummary::UNTRACKED_CONTENT);
 
-    request_reindex(harness.root_path(), true, false).unwrap();
+    request_reindex(harness.root().path(), true, false).unwrap();
 
     // Existing status should survive the reindex
     harness.assert_submodule_status("sub_a", StatusSummary::UNTRACKED_CONTENT);
 
     // New watchers should detect subsequent changes
-    harness.remove_file("sub_a", "dirty.txt");
+    harness.submodule("sub_a").rm_file("dirty.txt");
     harness.assert_submodule_status("sub_a", StatusSummary::clean());
 
-    harness.write_file("sub_a", "README.md", "modified\n");
+    harness.submodule("sub_a").write("README.md", "modified\n");
     harness.assert_submodule_status("sub_a", StatusSummary::MODIFIED_CONTENT);
 }
 
@@ -61,7 +61,7 @@ fn version_mismatch_returns_error_and_server_stays_alive(_run: u32) {
     harness.assert_all_clean();
 
     // Send a request with a wrong version
-    let sock_path = ipc_socket_path(harness.root_path());
+    let sock_path = ipc_socket_path(harness.root().path());
     let conn = ipc_connect(&sock_path).unwrap();
     let mut conn = BufReader::new(conn);
     let bad_request = ClientRequest {
@@ -96,7 +96,7 @@ fn socket_file_removed_after_shutdown(_run: u32) {
     let mut harness = common::HarnessBuilder::new().submodule("sub_a").build();
     harness.assert_all_clean();
 
-    let sock_path = ipc_socket_path(harness.root_path());
+    let sock_path = ipc_socket_path(harness.root().path());
     assert!(
         std::path::Path::new(&sock_path).exists(),
         "socket file should exist while server is running"
@@ -120,7 +120,7 @@ fn stale_socket_file_recovered_on_start(_run: u32) {
         .build();
 
     // Create a stale socket file (no server listening)
-    let sock_path = ipc_socket_path(harness.root_path());
+    let sock_path = ipc_socket_path(harness.root().path());
     std::fs::write(&sock_path, "stale").unwrap();
     assert!(std::path::Path::new(&sock_path).exists());
 

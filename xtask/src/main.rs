@@ -299,17 +299,25 @@ impl FuzzerState {
 
         // Create a feature branch with different submodule commits so that
         // CheckoutBranch can toggle between two known states.
-        harness.git_in_root(&["checkout", "-b", "feature"]);
+        harness.root().run_git(&["checkout", "-b", "feature"]);
         for sub in &submod_names {
-            harness.git_in_submodule(sub, &["checkout", "-b", "feature"]);
-            harness.write_file(sub, "feature_file.txt", "feature content\n");
-            harness.git_in_submodule(sub, &["add", "-A"]);
-            harness.git_in_submodule(sub, &["commit", "-m", "feature commit"]);
-            harness.stage_submodule(sub);
-            harness.git_in_submodule(sub, &["checkout", "master"]);
+            harness
+                .submodule(sub)
+                .run_git(&["checkout", "-b", "feature"]);
+            harness
+                .submodule(sub)
+                .write("feature_file.txt", "feature content\n");
+            harness.submodule(sub).run_git(&["add", "-A"]);
+            harness
+                .submodule(sub)
+                .run_git(&["commit", "-m", "feature commit"]);
+            harness.root().add(sub);
+            harness.submodule(sub).run_git(&["checkout", "master"]);
         }
-        harness.git_in_root(&["commit", "-m", "update submodules on feature"]);
-        harness.git_in_root(&["checkout", "master"]);
+        harness
+            .root()
+            .run_git(&["commit", "-m", "update submodules on feature"]);
+        harness.root().run_git(&["checkout", "master"]);
 
         let untracked_files: HashMap<String, HashSet<String>> = submod_names
             .iter()
@@ -354,35 +362,41 @@ impl FuzzerState {
     /// old commit chains alive and pack size grows without bound.
     fn repack(&self) {
         self.harness
-            .git_in_root(&["reflog", "expire", "--expire=now", "--all"]);
-        self.harness.git_in_root(&["repack", "-a", "-d"]);
-        self.harness.git_in_root(&["prune"]);
+            .root()
+            .run_git(&["reflog", "expire", "--expire=now", "--all"]);
+        self.harness.root().run_git(&["repack", "-a", "-d"]);
+        self.harness.root().run_git(&["prune"]);
         for sub in self.submodule_names() {
             // Delete old fuzz branches to keep ref count bounded. Each
             // SubmoduleUpdate creates a new fuzz_br_N; the old ones keep
             // history reachable and slow down git2.
             let output = self
                 .harness
-                .git_in_submodule_may_fail(&sub, &["branch", "--list", "fuzz_br_*"]);
-            let current = self
-                .harness
-                .git_in_submodule_may_fail(&sub, &["rev-parse", "--abbrev-ref", "HEAD"]);
+                .submodule(&sub)
+                .try_git(&["branch", "--list", "fuzz_br_*"]);
+            let current =
+                self.harness
+                    .submodule(&sub)
+                    .try_git(&["rev-parse", "--abbrev-ref", "HEAD"]);
             let current_branch = String::from_utf8_lossy(&current.stdout);
             let current_branch = current_branch.trim();
             for line in String::from_utf8_lossy(&output.stdout).lines() {
                 let branch = line.trim().trim_start_matches("* ");
                 if !branch.is_empty() && branch != current_branch {
                     self.harness
-                        .git_in_submodule(&sub, &["branch", "-D", branch]);
+                        .submodule(&sub)
+                        .run_git(&["branch", "-D", branch]);
                 }
             }
-            self.harness.git_in_submodule(&sub, &["repack", "-a", "-d"]);
+            self.harness
+                .submodule(&sub)
+                .run_git(&["repack", "-a", "-d"]);
         }
     }
 
     /// Collects git repository diagnostics for the root repo.
     fn git_stats(&self) -> GitStats {
-        let root = self.harness.root_path();
+        let root = self.harness.root().path();
         let git_dir = root.join(".git");
 
         // Count refs (branches + tags + other)
@@ -441,7 +455,7 @@ impl FuzzerState {
     /// operations like soft/mixed reset where we can't track the resulting
     /// dirty state at file granularity.
     fn sync_dirty_state(&mut self, submodule: &str) {
-        let path = self.harness.submodule_path(submodule);
+        let path = self.harness.submodule(submodule).path();
         let path_str = path.display().to_string();
         let output = testutil::git_may_fail(&["-C", &path_str, "status", "--porcelain"]);
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -737,7 +751,7 @@ impl FuzzerState {
         match op {
             Op::WriteNewFile { submodule, file } => {
                 let content = format!("fuzz content {}\n", self.file_counter);
-                self.harness.write_file(submodule, file, &content);
+                self.harness.submodule(submodule).write(file, &content);
                 self.untracked_files
                     .get_mut(submodule)
                     .unwrap()
@@ -747,12 +761,14 @@ impl FuzzerState {
             Op::OverwriteTrackedFile { submodule } => {
                 self.file_counter += 1;
                 let content = format!("modified {}\n", self.file_counter);
-                self.harness.write_file(submodule, "README.md", &content);
+                self.harness
+                    .submodule(submodule)
+                    .write("README.md", &content);
                 self.submodules_with_changes.insert(submodule.clone());
                 self.readme_modified.insert(submodule.clone());
             }
             Op::DeleteFile { submodule, file } => {
-                self.harness.remove_file(submodule, file);
+                self.harness.submodule(submodule).rm_file(file);
                 self.untracked_files
                     .get_mut(submodule)
                     .unwrap()
@@ -765,7 +781,7 @@ impl FuzzerState {
                 }
             }
             Op::StageFile { submodule, file } => {
-                self.harness.stage_file(submodule, file);
+                self.harness.submodule(submodule).add(file);
                 self.untracked_files
                     .get_mut(submodule)
                     .unwrap()
@@ -777,7 +793,7 @@ impl FuzzerState {
                 self.submodules_with_changes.insert(submodule.clone());
             }
             Op::UnstageFile { submodule, file } => {
-                self.harness.unstage_file(submodule, file);
+                self.harness.submodule(submodule).restore_staged(file);
                 self.staged_files.get_mut(submodule).unwrap().remove(file);
                 self.untracked_files
                     .get_mut(submodule)
@@ -785,7 +801,7 @@ impl FuzzerState {
                     .insert(file.clone());
             }
             Op::CommitInSubmodule { submodule } => {
-                let path = self.harness.submodule_path(submodule);
+                let path = self.harness.submodule(submodule).path();
                 let path_str = path.display().to_string();
                 testutil::git(&["-C", &path_str, "add", "-A"]);
                 testutil::git(&["-C", &path_str, "commit", "-m", "fuzz commit"]);
@@ -800,13 +816,14 @@ impl FuzzerState {
                 *self.history_epoch.entry(submodule.clone()).or_insert(0) += 1;
             }
             Op::StageSubmoduleGitlink { submodule } => {
-                self.harness.stage_submodule(submodule);
+                self.harness.root().add(submodule);
                 self.staged_gitlinks.insert(submodule.clone());
             }
             Op::CommitInParent => {
-                let output =
-                    self.harness
-                        .git_in_root_may_fail(&["commit", "-m", "fuzz parent commit"]);
+                let output = self
+                    .harness
+                    .root()
+                    .try_git(&["commit", "-m", "fuzz parent commit"]);
                 if output.status.success() {
                     for sub in &self.staged_gitlinks {
                         self.local_commit_count.remove(sub);
@@ -815,26 +832,26 @@ impl FuzzerState {
                 }
             }
             Op::CleanSubmodule { submodule } => {
-                let path = self.harness.submodule_path(submodule);
+                let path = self.harness.submodule(submodule).path();
                 let path_str = path.display().to_string();
                 testutil::git(&["-C", &path_str, "clean", "-fd"]);
                 self.untracked_files.get_mut(submodule).unwrap().clear();
                 self.sync_dirty_state(submodule);
             }
             Op::RestoreFile { submodule } => {
-                let path = self.harness.submodule_path(submodule);
+                let path = self.harness.submodule(submodule).path();
                 let path_str = path.display().to_string();
                 testutil::git(&["-C", &path_str, "restore", "README.md"]);
                 self.readme_modified.remove(submodule);
                 self.sync_dirty_state(submodule);
             }
             Op::UnstageGitlink { submodule } => {
-                let root = self.harness.root_path().display().to_string();
+                let root = self.harness.root().path().display().to_string();
                 testutil::git(&["-C", &root, "reset", "HEAD", "--", submodule]);
                 self.staged_gitlinks.remove(submodule);
             }
             Op::ResetHardInSubmodule { submodule } => {
-                let path = self.harness.submodule_path(submodule);
+                let path = self.harness.submodule(submodule).path();
                 let path_str = path.display().to_string();
                 testutil::git(&["-C", &path_str, "reset", "--hard", "HEAD"]);
                 self.staged_files.get_mut(submodule).unwrap().clear();
@@ -842,7 +859,7 @@ impl FuzzerState {
                 self.sync_dirty_state(submodule);
             }
             Op::AmendInSubmodule { submodule } => {
-                let path = self.harness.submodule_path(submodule);
+                let path = self.harness.submodule(submodule).path();
                 let path_str = path.display().to_string();
                 testutil::git(&["-C", &path_str, "add", "-A"]);
                 let output =
@@ -859,7 +876,7 @@ impl FuzzerState {
                 self.harness.request_reindex(*replace_watchers);
             }
             Op::StashInSubmodule { submodule } => {
-                let path = self.harness.submodule_path(submodule);
+                let path = self.harness.submodule(submodule).path();
                 let path_str = path.display().to_string();
                 let output = testutil::git_may_fail(&["-C", &path_str, "stash", "-u"]);
                 if !output.status.success() {
@@ -886,7 +903,7 @@ impl FuzzerState {
                 }
             }
             Op::StashPopInSubmodule { submodule } => {
-                let path = self.harness.submodule_path(submodule);
+                let path = self.harness.submodule(submodule).path();
                 let path_str = path.display().to_string();
                 // Verify the stash actually exists before popping — if it
                 // doesn't, the stash creation silently failed (e.g. server
@@ -919,7 +936,7 @@ impl FuzzerState {
                 self.submodules_with_changes.insert(submodule.clone());
             }
             Op::ResetSoftInSubmodule { submodule } => {
-                let path = self.harness.submodule_path(submodule);
+                let path = self.harness.submodule(submodule).path();
                 let path_str = path.display().to_string();
                 testutil::git(&["-C", &path_str, "reset", "--soft", "HEAD~1"]);
                 let count = self.local_commit_count.get_mut(submodule).unwrap();
@@ -931,7 +948,7 @@ impl FuzzerState {
                 *self.history_epoch.entry(submodule.clone()).or_insert(0) += 1;
             }
             Op::ResetMixedInSubmodule { submodule } => {
-                let path = self.harness.submodule_path(submodule);
+                let path = self.harness.submodule(submodule).path();
                 let path_str = path.display().to_string();
                 testutil::git(&["-C", &path_str, "reset", "HEAD~1"]);
                 let count = self.local_commit_count.get_mut(submodule).unwrap();
@@ -948,19 +965,19 @@ impl FuzzerState {
                 for sub in self.submodule_names() {
                     if self.stash_stack.contains_key(&sub) {
                         // Stash may have been silently lost; use may_fail
-                        self.harness
-                            .git_in_submodule_may_fail(&sub, &["stash", "drop"]);
+                        self.harness.submodule(&sub).try_git(&["stash", "drop"]);
                     }
                     self.harness
-                        .git_in_submodule(&sub, &["reset", "--hard", "HEAD"]);
-                    self.harness.git_in_submodule(&sub, &["clean", "-fd"]);
+                        .submodule(&sub)
+                        .run_git(&["reset", "--hard", "HEAD"]);
+                    self.harness.submodule(&sub).run_git(&["clean", "-fd"]);
                 }
                 if !self.staged_gitlinks.is_empty() {
-                    self.harness.git_in_root(&["reset", "HEAD"]);
+                    self.harness.root().run_git(&["reset", "HEAD"]);
                 }
 
                 let branch = if *to_feature { "feature" } else { "master" };
-                self.harness.git_in_root(&["checkout", branch]);
+                self.harness.root().run_git(&["checkout", branch]);
                 self.on_feature_branch = *to_feature;
                 self.needs_submodule_update = true;
                 // Clear all per-submodule state — will be rebuilt after SubmoduleUpdate
@@ -978,14 +995,15 @@ impl FuzzerState {
                 self.history_epoch.clear();
             }
             Op::SubmoduleUpdate => {
-                self.harness.git_in_root(&["submodule", "update"]);
+                self.harness.root().run_git(&["submodule", "update"]);
                 // Create a fresh branch at the detached HEAD so subsequent commits
                 // update refs/heads/ (which the server uses for commit detection)
                 for sub in self.submodule_names() {
                     self.file_counter += 1;
                     let branch = format!("fuzz_br_{}", self.file_counter);
                     self.harness
-                        .git_in_submodule(&sub, &["checkout", "-b", &branch]);
+                        .submodule(&sub)
+                        .run_git(&["checkout", "-b", &branch]);
                 }
                 self.needs_submodule_update = false;
             }
@@ -999,7 +1017,7 @@ impl FuzzerState {
 
     /// Compute ground truth status for all submodules using git2.
     fn ground_truth(&self) -> Vec<(String, StatusSummary)> {
-        let repo = Repository::open(self.harness.root_path())
+        let repo = Repository::open(self.harness.root().path())
             .expect("Failed to open root repo for ground truth");
         let submodules = repo.submodules().expect("Failed to list submodules");
 
@@ -1065,7 +1083,7 @@ impl FuzzerState {
     /// Run `git status --porcelain` and `git submodule status` for
     /// cross-checking on failure.
     fn cli_cross_check(&self) -> String {
-        let root = self.harness.root_path().display().to_string();
+        let root = self.harness.root().path().display().to_string();
         let porcelain = testutil::git_may_fail(&["-C", &root, "status", "--porcelain"]);
         let submod = testutil::git_may_fail(&["-C", &root, "submodule", "status"]);
         format!(
@@ -1221,13 +1239,13 @@ fn dump_failure(state: &FuzzerState, seed: u64, submodules: usize, failed_step: 
     eprintln!();
     eprintln!(
         "Repo path: {} (preserved for inspection)",
-        state.harness.root_path().display()
+        state.harness.root().path().display()
     );
     eprintln!(
         "Reproduce: cargo xtask --seed {seed} --steps {failed_step} --submodules {submodules}"
     );
     eprintln!();
-    match request_debug(state.harness.root_path()) {
+    match request_debug(state.harness.root().path()) {
         Ok(debug_state) => eprintln!("Server debug state:\n{debug_state}"),
         Err(e) => eprintln!("Failed to fetch server debug state: {e}"),
     }

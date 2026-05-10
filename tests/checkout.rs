@@ -12,17 +12,24 @@ fn checkout_branch_with_different_submodule_commits(_run: u32) {
 
     // On master, sub_a is at its initial commit. Create a feature branch
     // where sub_a points to a newer commit.
-    harness.git_in_root(&["checkout", "-b", "feature"]);
+    harness.root().run_git(&["checkout", "-b", "feature"]);
 
-    harness.write_file("sub_a", "feature.txt", "feature work\n");
-    harness.commit_in_submodule("sub_a", "feature commit in sub_a");
-    harness.stage_submodule("sub_a");
-    harness.git_in_root(&["commit", "-m", "update sub_a on feature"]);
+    harness
+        .submodule("sub_a")
+        .write("feature.txt", "feature work\n");
+    harness
+        .submodule("sub_a")
+        .add_all()
+        .commit("feature commit in sub_a");
+    harness.root().add("sub_a");
+    harness
+        .root()
+        .run_git(&["commit", "-m", "update sub_a on feature"]);
 
     // Switch back to master and update the submodule workdir to match
     // master's gitlink (initial commit).
-    harness.git_in_root(&["checkout", "master"]);
-    harness.git_in_root(&["submodule", "update"]);
+    harness.root().run_git(&["checkout", "master"]);
+    harness.root().run_git(&["submodule", "update"]);
 
     // Start the server on master so everything is clean.
     harness.start_server();
@@ -39,7 +46,7 @@ fn checkout_branch_with_different_submodule_commits(_run: u32) {
     // rename before HEAD is updated, reads status against the stale HEAD,
     // and produces STAGED | NEW_COMMITS. If .git/HEAD changes are not
     // detected, the stale status sticks.
-    harness.git_in_root(&["checkout", "feature"]);
+    harness.root().run_git(&["checkout", "feature"]);
     harness.assert_submodule_status("sub_a", StatusSummary::NEW_COMMITS);
 }
 
@@ -51,25 +58,32 @@ fn submodule_update_after_checkout(_run: u32) {
         .build();
 
     // Create a feature branch where sub_a has a new commit
-    harness.git_in_root(&["checkout", "-b", "feature"]);
-    harness.write_file("sub_a", "feature.txt", "feature work\n");
-    harness.commit_in_submodule("sub_a", "feature commit in sub_a");
-    harness.stage_submodule("sub_a");
-    harness.git_in_root(&["commit", "-m", "update sub_a on feature"]);
+    harness.root().run_git(&["checkout", "-b", "feature"]);
+    harness
+        .submodule("sub_a")
+        .write("feature.txt", "feature work\n");
+    harness
+        .submodule("sub_a")
+        .add_all()
+        .commit("feature commit in sub_a");
+    harness.root().add("sub_a");
+    harness
+        .root()
+        .run_git(&["commit", "-m", "update sub_a on feature"]);
 
     // Back to master, sync submodule workdir
-    harness.git_in_root(&["checkout", "master"]);
-    harness.git_in_root(&["submodule", "update"]);
+    harness.root().run_git(&["checkout", "master"]);
+    harness.root().run_git(&["submodule", "update"]);
 
     harness.start_server();
     harness.assert_all_clean();
 
     // Checkout feature without --recurse-submodules so workdir lags behind
-    harness.git_in_root(&["checkout", "feature"]);
+    harness.root().run_git(&["checkout", "feature"]);
     harness.assert_submodule_status("sub_a", StatusSummary::NEW_COMMITS);
 
     // `git submodule update` syncs the workdir to match the gitlink
-    harness.git_in_root(&["submodule", "update"]);
+    harness.root().run_git(&["submodule", "update"]);
     harness.assert_all_clean();
 }
 
@@ -81,22 +95,31 @@ fn checkout_with_recurse_submodules(_run: u32) {
         .build();
 
     // Create a feature branch where sub_a has a new commit
-    harness.git_in_root(&["checkout", "-b", "feature"]);
-    harness.write_file("sub_a", "feature.txt", "feature work\n");
-    harness.commit_in_submodule("sub_a", "feature commit in sub_a");
-    harness.stage_submodule("sub_a");
-    harness.git_in_root(&["commit", "-m", "update sub_a on feature"]);
+    harness.root().run_git(&["checkout", "-b", "feature"]);
+    harness
+        .submodule("sub_a")
+        .write("feature.txt", "feature work\n");
+    harness
+        .submodule("sub_a")
+        .add_all()
+        .commit("feature commit in sub_a");
+    harness.root().add("sub_a");
+    harness
+        .root()
+        .run_git(&["commit", "-m", "update sub_a on feature"]);
 
     // Back to master, sync submodule workdir
-    harness.git_in_root(&["checkout", "master"]);
-    harness.git_in_root(&["submodule", "update"]);
+    harness.root().run_git(&["checkout", "master"]);
+    harness.root().run_git(&["submodule", "update"]);
 
     harness.start_server();
     harness.assert_all_clean();
 
     // Checkout feature with --recurse-submodules so git updates the submodule
     // workdir automatically, so status should stay clean
-    harness.git_in_root(&["checkout", "--recurse-submodules", "feature"]);
+    harness
+        .root()
+        .run_git(&["checkout", "--recurse-submodules", "feature"]);
     harness.assert_all_clean();
 }
 
@@ -112,24 +135,28 @@ fn checkout_branch_many_submodules(_run: u32) {
         .build();
 
     // Create a feature branch where every submodule has a new commit.
-    harness.git_in_root(&["checkout", "-b", "feature"]);
+    harness.root().run_git(&["checkout", "-b", "feature"]);
     for i in 0..N {
         let name = format!("sub_{i}");
-        harness.write_file(&name, "feature.txt", "feature work\n");
-        harness.commit_in_submodule(&name, "feature commit");
-        harness.stage_submodule(&name);
+        harness
+            .submodule(&name)
+            .write("feature.txt", "feature work\n");
+        harness.submodule(&name).add_all().commit("feature commit");
+        harness.root().add(&name);
     }
-    harness.git_in_root(&["commit", "-m", "update all submodules on feature"]);
+    harness
+        .root()
+        .run_git(&["commit", "-m", "update all submodules on feature"]);
 
     // Back to master, update all submodule workdirs to match master's gitlinks.
-    harness.git_in_root(&["checkout", "master"]);
-    harness.git_in_root(&["submodule", "update"]);
+    harness.root().run_git(&["checkout", "master"]);
+    harness.root().run_git(&["submodule", "update"]);
 
     harness.start_server();
     harness.assert_all_clean();
 
     // Checkout feature-> all submodule workdirs lag behind the new gitlinks.
-    harness.git_in_root(&["checkout", "feature"]);
+    harness.root().run_git(&["checkout", "feature"]);
 
     // Every submodule should show NEW_COMMITS, not STAGED | NEW_COMMITS.
     for i in 0..N {

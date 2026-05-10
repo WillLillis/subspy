@@ -9,7 +9,7 @@ fn add_submodule_detected_by_server(_run: u32) {
     harness.assert_all_clean();
 
     // Dirty sub_a so we can verify it's unaffected by the add operation
-    harness.write_file("sub_a", "untracked.txt", "hello\n");
+    harness.submodule("sub_a").write("untracked.txt", "hello\n");
     harness.assert_submodule_status("sub_a", StatusSummary::UNTRACKED_CONTENT);
 
     // Stage sub_b without committing, gitlink is in index but not in HEAD
@@ -17,11 +17,13 @@ fn add_submodule_detected_by_server(_run: u32) {
     harness.assert_submodule_status("sub_b", StatusSummary::STAGED_NEW);
 
     // Commit the addition, so it's no longer "new"
-    harness.git_in_root(&["commit", "-m", "Add submodule sub_b"]);
+    harness
+        .root()
+        .run_git(&["commit", "-m", "Add submodule sub_b"]);
     harness.assert_submodule_status("sub_b", StatusSummary::clean());
 
     // Dirty sub_b and verify the server picked it up
-    harness.write_file("sub_b", "new_file.txt", "world\n");
+    harness.submodule("sub_b").write("new_file.txt", "world\n");
     harness.assert_submodule_status("sub_b", StatusSummary::UNTRACKED_CONTENT);
 
     // sub_a should still have its untracked content
@@ -40,7 +42,7 @@ fn add_submodule_without_commit_detected_by_server(_run: u32) {
 
     // Dirty sub_b and verify the server picked it up via the debounce reindex.
     // STAGED_NEW persists because the submodule hasn't been committed yet.
-    harness.write_file("sub_b", "new_file.txt", "hello\n");
+    harness.submodule("sub_b").write("new_file.txt", "hello\n");
     harness.assert_submodule_status(
         "sub_b",
         StatusSummary::UNTRACKED_CONTENT | StatusSummary::STAGED_NEW,
@@ -60,7 +62,7 @@ fn remove_submodule_without_commit_detected_by_server(_run: u32) {
 
     // Remove sub_b without committing -- no follow-up git command produces a
     // root event. The debounce fallback must fire to trigger the reindex.
-    harness.git_in_root(&["rm", "-f", "sub_b"]);
+    harness.root().run_git(&["rm", "-f", "sub_b"]);
 
     // sub_b should no longer appear in the status after the debounce reindex
     harness.assert_status_eventually("sub_b removed from status", |statuses| {
@@ -87,8 +89,8 @@ fn remove_submodule_without_commit_shows_deleted_path(_run: u32) {
     harness.assert_deleted_submodule_paths(&[]);
 
     // Stage removal of two submodules
-    harness.git_in_root(&["rm", "-f", "sub_b"]);
-    harness.git_in_root(&["rm", "-f", "sub_c"]);
+    harness.root().run_git(&["rm", "-f", "sub_b"]);
+    harness.root().run_git(&["rm", "-f", "sub_c"]);
 
     harness.assert_deleted_submodule_paths(&["sub_b", "sub_c"]);
 
@@ -107,7 +109,7 @@ fn rm_rf_submodule_workdir_reported_as_deleted(_run: u32) {
     // Wipe sub_b's workdir without staging anything. The gitlink stays in HEAD
     // and the index, so this mirrors `git status` showing
     // `deleted: sub_b` in the unstaged section.
-    std::fs::remove_dir_all(harness.submodule_path("sub_b")).unwrap();
+    std::fs::remove_dir_all(harness.submodule("sub_b").path()).unwrap();
 
     harness.assert_submodule_status("sub_b", StatusSummary::DELETED_WORKDIR);
 
@@ -128,10 +130,10 @@ fn remove_submodule_detected_by_server(_run: u32) {
     harness.assert_all_clean();
 
     // Dirty both submodules
-    harness.write_file("sub_a", "untracked.txt", "hello\n");
+    harness.submodule("sub_a").write("untracked.txt", "hello\n");
     harness.assert_submodule_status("sub_a", StatusSummary::UNTRACKED_CONTENT);
 
-    harness.write_file("sub_b", "untracked.txt", "world\n");
+    harness.submodule("sub_b").write("untracked.txt", "world\n");
     harness.assert_submodule_status("sub_b", StatusSummary::UNTRACKED_CONTENT);
 
     // Remove sub_b, which  triggers .gitmodules change-> deferred reindex

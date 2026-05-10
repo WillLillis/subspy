@@ -12,23 +12,23 @@ fn root_rebase_without_conflict(_run: u32) {
 
     // Create divergent history: commit on `feature`, commit on `master`,
     // then checkout `feature` so we can rebase onto `master`.
-    harness.git_in_root(&["checkout", "-b", "feature"]);
-    harness.write_root_file("feature.txt", "feature work\n");
-    harness.git_in_root(&["add", "feature.txt"]);
-    harness.git_in_root(&["commit", "-m", "feature commit"]);
+    harness.root().run_git(&["checkout", "-b", "feature"]);
+    harness.root().write("feature.txt", "feature work\n");
+    harness.root().run_git(&["add", "feature.txt"]);
+    harness.root().run_git(&["commit", "-m", "feature commit"]);
 
-    harness.git_in_root(&["checkout", "master"]);
-    harness.write_root_file("master.txt", "master work\n");
-    harness.git_in_root(&["add", "master.txt"]);
-    harness.git_in_root(&["commit", "-m", "master commit"]);
+    harness.root().run_git(&["checkout", "master"]);
+    harness.root().write("master.txt", "master work\n");
+    harness.root().run_git(&["add", "master.txt"]);
+    harness.root().run_git(&["commit", "-m", "master commit"]);
 
-    harness.git_in_root(&["checkout", "feature"]);
+    harness.root().run_git(&["checkout", "feature"]);
 
     harness.start_server();
     harness.assert_all_clean();
 
     // Rebase feature onto master, no conflict, should complete cleanly
-    harness.git_in_root(&["rebase", "master"]);
+    harness.root().run_git(&["rebase", "master"]);
 
     // Server detects rebase start/end, reindexes, everything stays clean
     harness.assert_all_clean();
@@ -42,32 +42,32 @@ fn root_rebase_with_conflict(_run: u32) {
         .build();
 
     // Create conflicting history: same file modified on both branches
-    harness.git_in_root(&["checkout", "-b", "feature"]);
-    harness.write_root_file("conflict.txt", "feature version\n");
-    harness.git_in_root(&["add", "conflict.txt"]);
-    harness.git_in_root(&["commit", "-m", "feature commit"]);
+    harness.root().run_git(&["checkout", "-b", "feature"]);
+    harness.root().write("conflict.txt", "feature version\n");
+    harness.root().run_git(&["add", "conflict.txt"]);
+    harness.root().run_git(&["commit", "-m", "feature commit"]);
 
-    harness.git_in_root(&["checkout", "master"]);
-    harness.write_root_file("conflict.txt", "master version\n");
-    harness.git_in_root(&["add", "conflict.txt"]);
-    harness.git_in_root(&["commit", "-m", "master commit"]);
+    harness.root().run_git(&["checkout", "master"]);
+    harness.root().write("conflict.txt", "master version\n");
+    harness.root().run_git(&["add", "conflict.txt"]);
+    harness.root().run_git(&["commit", "-m", "master commit"]);
 
-    harness.git_in_root(&["checkout", "feature"]);
+    harness.root().run_git(&["checkout", "feature"]);
 
     harness.start_server();
     harness.assert_all_clean();
 
     // Rebase-> this will hit a conflict
-    let output = harness.git_in_root_may_fail(&["rebase", "master"]);
+    let output = harness.root().try_git(&["rebase", "master"]);
     assert!(
         !output.status.success(),
         "Expected rebase to fail with conflict"
     );
 
     // Resolve the conflict by overwriting the file and continuing
-    harness.write_root_file("conflict.txt", "resolved\n");
-    harness.git_in_root(&["add", "conflict.txt"]);
-    harness.git_in_root(&["rebase", "--continue"]);
+    harness.root().write("conflict.txt", "resolved\n");
+    harness.root().run_git(&["add", "conflict.txt"]);
+    harness.root().run_git(&["rebase", "--continue"]);
 
     harness.assert_all_clean();
 }
@@ -89,19 +89,25 @@ fn submodule_rebase_without_conflict(_run: u32) {
     );
 
     // 2. Make a local commit in the submodule workdir
-    harness.write_file("sub_a", "local.txt", "local work\n");
-    harness.git_in_submodule("sub_a", &["add", "-A"]);
-    harness.git_in_submodule("sub_a", &["commit", "-m", "local commit"]);
+    harness
+        .submodule("sub_a")
+        .write("local.txt", "local work\n");
+    harness.submodule("sub_a").run_git(&["add", "-A"]);
+    harness
+        .submodule("sub_a")
+        .run_git(&["commit", "-m", "local commit"]);
 
     // 3. Fetch from the source repo so we have the upstream commit locally
-    harness.git_in_submodule("sub_a", &["fetch", "origin"]);
+    harness.submodule("sub_a").run_git(&["fetch", "origin"]);
 
     harness.start_server();
     // Submodule HEAD differs from parent index (local commit)
     harness.assert_submodule_status("sub_a", StatusSummary::NEW_COMMITS);
 
     // Rebase local work onto origin/master, no conflict
-    harness.git_in_submodule("sub_a", &["rebase", "origin/master"]);
+    harness
+        .submodule("sub_a")
+        .run_git(&["rebase", "origin/master"]);
 
     // Still NEW_COMMITS: submodule HEAD is ahead of the gitlink in parent index
     harness.assert_submodule_status("sub_a", StatusSummary::NEW_COMMITS);
@@ -122,26 +128,36 @@ fn submodule_rebase_with_conflict(_run: u32) {
         "upstream commit",
     );
 
-    harness.write_file("sub_a", "conflict.txt", "local version\n");
-    harness.git_in_submodule("sub_a", &["add", "-A"]);
-    harness.git_in_submodule("sub_a", &["commit", "-m", "local commit"]);
+    harness
+        .submodule("sub_a")
+        .write("conflict.txt", "local version\n");
+    harness.submodule("sub_a").run_git(&["add", "-A"]);
+    harness
+        .submodule("sub_a")
+        .run_git(&["commit", "-m", "local commit"]);
 
-    harness.git_in_submodule("sub_a", &["fetch", "origin"]);
+    harness.submodule("sub_a").run_git(&["fetch", "origin"]);
 
     harness.start_server();
     harness.assert_submodule_status("sub_a", StatusSummary::NEW_COMMITS);
 
     // Rebase-> conflict expected
-    let output = harness.git_in_submodule_may_fail("sub_a", &["rebase", "origin/master"]);
+    let output = harness
+        .submodule("sub_a")
+        .try_git(&["rebase", "origin/master"]);
     assert!(
         !output.status.success(),
         "Expected rebase to fail with conflict"
     );
 
     // Resolve and continue
-    harness.write_file("sub_a", "conflict.txt", "resolved\n");
-    harness.git_in_submodule("sub_a", &["add", "conflict.txt"]);
-    harness.git_in_submodule("sub_a", &["rebase", "--continue"]);
+    harness
+        .submodule("sub_a")
+        .write("conflict.txt", "resolved\n");
+    harness.submodule("sub_a").run_git(&["add", "conflict.txt"]);
+    harness
+        .submodule("sub_a")
+        .run_git(&["rebase", "--continue"]);
 
     // Still NEW_COMMITS because submodule HEAD diverged from parent index
     harness.assert_submodule_status("sub_a", StatusSummary::NEW_COMMITS);
@@ -174,17 +190,23 @@ fn reindex_during_submodule_rebase_clears_skip_set(_run: u32) {
         "upstream commit",
     );
 
-    harness.write_file("sub_a", "conflict.txt", "local version\n");
-    harness.git_in_submodule("sub_a", &["add", "-A"]);
-    harness.git_in_submodule("sub_a", &["commit", "-m", "local commit"]);
-    harness.git_in_submodule("sub_a", &["fetch", "origin"]);
+    harness
+        .submodule("sub_a")
+        .write("conflict.txt", "local version\n");
+    harness.submodule("sub_a").run_git(&["add", "-A"]);
+    harness
+        .submodule("sub_a")
+        .run_git(&["commit", "-m", "local commit"]);
+    harness.submodule("sub_a").run_git(&["fetch", "origin"]);
 
     harness.start_server();
     harness.assert_submodule_status("sub_a", StatusSummary::NEW_COMMITS);
 
     // Start a rebase that will conflict, pausing mid-rebase.
     // The server adds sub_a to skip_set.
-    let output = harness.git_in_submodule_may_fail("sub_a", &["rebase", "origin/master"]);
+    let output = harness
+        .submodule("sub_a")
+        .try_git(&["rebase", "origin/master"]);
     assert!(
         !output.status.success(),
         "Expected rebase to fail with conflict"
@@ -197,14 +219,18 @@ fn reindex_during_submodule_rebase_clears_skip_set(_run: u32) {
 
     // Resolve the conflict and finish the rebase. The server must detect
     // the rebase-end event and remove sub_a from skip_set.
-    harness.write_file("sub_a", "conflict.txt", "resolved\n");
-    harness.git_in_submodule("sub_a", &["add", "conflict.txt"]);
-    harness.git_in_submodule("sub_a", &["rebase", "--continue"]);
+    harness
+        .submodule("sub_a")
+        .write("conflict.txt", "resolved\n");
+    harness.submodule("sub_a").run_git(&["add", "conflict.txt"]);
+    harness
+        .submodule("sub_a")
+        .run_git(&["rebase", "--continue"]);
 
     // sub_a status should update (not stuck in skip_set)
     harness.assert_submodule_status("sub_a", StatusSummary::NEW_COMMITS);
 
     // sub_b should still be independently trackable
-    harness.write_file("sub_b", "new.txt", "hello\n");
+    harness.submodule("sub_b").write("new.txt", "hello\n");
     harness.assert_submodule_status("sub_b", StatusSummary::UNTRACKED_CONTENT);
 }

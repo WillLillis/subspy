@@ -14,140 +14,128 @@ use git2::Repository;
 use std::path::Path;
 use std::process::Command;
 use tempfile::TempDir;
+use testutil::Repo;
 
 use super::{
     IgnoreSubmodules, OutputOpts, PorcelainVersion, UntrackedFiles, deleted_submodule_paths,
     porcelain_v1::display_porcelain_v1, porcelain_v2::display_porcelain_v2,
 };
 
-/// Runs `git` with consistent author config; panics on non-zero exit.
-fn git(args: &[&str]) {
-    let output = Command::new("git")
-        .args(["-c", "user.name=Test", "-c", "user.email=test@test.com"])
-        .args(args)
-        .output()
-        .expect("failed to run git");
-    assert!(
-        output.status.success(),
-        "git {} failed: {}",
-        args.join(" "),
-        String::from_utf8_lossy(&output.stderr)
-    );
+fn setup_empty_repo(root: &Path) {
+    Repo::init(root);
+}
+
+fn setup_empty_repo_with_untracked(root: &Path) {
+    Repo::init(root).write("untracked.txt", "x\n");
 }
 
 /// Initializes a repo with one committed file. Most setups build on this.
 fn setup_clean(root: &Path) {
-    let r = root.display().to_string();
-    git(&["-C", &r, "init", "-q", "--initial-branch=master"]);
-    std::fs::write(root.join("file.txt"), "initial\n").unwrap();
-    git(&["-C", &r, "add", "-A"]);
-    git(&["-C", &r, "commit", "-qm", "initial"]);
+    Repo::init(root)
+        .write("file.txt", "initial\n")
+        .add_all()
+        .commit("initial");
 }
 
 fn setup_modified_workdir(root: &Path) {
     setup_clean(root);
-    std::fs::write(root.join("file.txt"), "modified\n").unwrap();
+    Repo::new(root).write("file.txt", "modified\n");
 }
 
 fn setup_untracked(root: &Path) {
     setup_clean(root);
-    std::fs::write(root.join("untracked.txt"), "x\n").unwrap();
+    Repo::new(root).write("untracked.txt", "x\n");
 }
 
 fn setup_staged_modified(root: &Path) {
     setup_clean(root);
-    std::fs::write(root.join("file.txt"), "staged change\n").unwrap();
-    git(&["-C", &root.display().to_string(), "add", "file.txt"]);
+    Repo::new(root)
+        .write("file.txt", "staged change\n")
+        .add("file.txt");
 }
 
 fn setup_staged_new(root: &Path) {
     setup_clean(root);
-    std::fs::write(root.join("new.txt"), "x\n").unwrap();
-    git(&["-C", &root.display().to_string(), "add", "new.txt"]);
+    Repo::new(root).write("new.txt", "x\n").add("new.txt");
 }
 
 fn setup_staged_plus_workdir(root: &Path) {
     // Same file modified, staged, then modified again -> XY = "MM"
     setup_clean(root);
-    let r = root.display().to_string();
-    std::fs::write(root.join("file.txt"), "staged\n").unwrap();
-    git(&["-C", &r, "add", "file.txt"]);
-    std::fs::write(root.join("file.txt"), "modified again\n").unwrap();
+    Repo::new(root)
+        .write("file.txt", "staged\n")
+        .add("file.txt")
+        .write("file.txt", "modified again\n");
 }
 
 fn setup_deleted_staged(root: &Path) {
     setup_clean(root);
-    git(&["-C", &root.display().to_string(), "rm", "-q", "file.txt"]);
+    Repo::new(root).rm_tracked("file.txt");
 }
 
 fn setup_deleted_workdir(root: &Path) {
     setup_clean(root);
-    std::fs::remove_file(root.join("file.txt")).unwrap();
+    Repo::new(root).rm_file("file.txt");
 }
 
 fn setup_renamed_staged(root: &Path) {
     // Regression test for the rename-detection + path-extraction bugs.
-    setup_clean(root);
     // The file needs nontrivial content for libgit2's rename detector to
     // confidently match (matches git's diff.renames default behavior).
-    std::fs::write(
-        root.join("file.txt"),
-        "line one\nline two\nline three\nline four\n",
-    )
-    .unwrap();
-    let r = root.display().to_string();
-    git(&["-C", &r, "add", "-A"]);
-    git(&["-C", &r, "commit", "-qm", "longer content"]);
-    git(&["-C", &r, "mv", "file.txt", "renamed.txt"]);
+    setup_clean(root);
+    Repo::new(root)
+        .write("file.txt", "line one\nline two\nline three\nline four\n")
+        .add_all()
+        .commit("longer content")
+        .mv("file.txt", "renamed.txt");
 }
 
 fn setup_untracked_in_dir(root: &Path) {
     // Differentiates `--untracked-files=normal` (collapses to `subdir/`)
     // from `--untracked-files=all` (expands to individual files).
     setup_clean(root);
-    std::fs::create_dir(root.join("subdir")).unwrap();
-    std::fs::write(root.join("subdir/a.txt"), "a\n").unwrap();
-    std::fs::write(root.join("subdir/b.txt"), "b\n").unwrap();
+    Repo::new(root)
+        .mkdir("subdir")
+        .write("subdir/a.txt", "a\n")
+        .write("subdir/b.txt", "b\n");
 }
 
 fn setup_ignored_files(root: &Path) {
     // Only visible with --ignored; clean otherwise.
     setup_clean(root);
-    let r = root.display().to_string();
-    std::fs::write(root.join(".gitignore"), "*.log\n").unwrap();
-    git(&["-C", &r, "add", ".gitignore"]);
-    git(&["-C", &r, "commit", "-qm", "ignore"]);
-    std::fs::write(root.join("debug.log"), "x\n").unwrap();
+    Repo::new(root)
+        .write(".gitignore", "*.log\n")
+        .add(".gitignore")
+        .commit("ignore")
+        .write("debug.log", "x\n");
 }
 
 fn setup_path_with_space(root: &Path) {
     setup_clean(root);
-    std::fs::write(root.join("has space.txt"), "x\n").unwrap();
+    Repo::new(root).write("has space.txt", "x\n");
 }
 
 fn setup_mixed(root: &Path) {
     // Exercises the tracked -> untracked -> ignored ordering pass.
     setup_clean(root);
-    let r = root.display().to_string();
-    std::fs::write(root.join(".gitignore"), "*.log\n").unwrap();
-    git(&["-C", &r, "add", ".gitignore"]);
-    git(&["-C", &r, "commit", "-qm", "ignore rules"]);
-
-    std::fs::write(root.join("staged_new.txt"), "x\n").unwrap();
-    git(&["-C", &r, "add", "staged_new.txt"]);
-    std::fs::write(root.join("file.txt"), "modified\n").unwrap();
-    std::fs::write(root.join("untracked.txt"), "u\n").unwrap();
-    std::fs::write(root.join("hidden.log"), "ignored\n").unwrap();
+    Repo::new(root)
+        .write(".gitignore", "*.log\n")
+        .add(".gitignore")
+        .commit("ignore rules")
+        .write("staged_new.txt", "x\n")
+        .add("staged_new.txt")
+        .write("file.txt", "modified\n")
+        .write("untracked.txt", "u\n")
+        .write("hidden.log", "ignored\n");
 }
 
 fn setup_detached_head(root: &Path) {
     setup_clean(root);
-    let r = root.display().to_string();
-    // Add a second commit so HEAD~1 exists.
-    std::fs::write(root.join("file.txt"), "v2\n").unwrap();
-    git(&["-C", &r, "add", "-A"]);
-    git(&["-C", &r, "commit", "-qm", "v2"]);
-    git(&["-C", &r, "checkout", "-q", "HEAD~1"]);
+    Repo::new(root)
+        .write("file.txt", "v2\n")
+        .add_all()
+        .commit("v2")
+        .checkout("HEAD~1");
 }
 
 /// A test scenario: a setup function that builds the repo state, plus the
@@ -161,6 +149,14 @@ struct Case {
 /// branch, untracked-mode, ignored) matrix, so each entry here exercises
 /// many test runs.
 const CASES: &[Case] = &[
+    Case {
+        name: "empty repo",
+        setup: setup_empty_repo,
+    },
+    Case {
+        name: "empty repo with untracked",
+        setup: setup_empty_repo_with_untracked,
+    },
     Case {
         name: "clean",
         setup: setup_clean,

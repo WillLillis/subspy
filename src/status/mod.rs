@@ -43,6 +43,21 @@ const fn line_terminator(null_terminate: bool) -> &'static str {
     if null_terminate { "\0" } else { "\n" }
 }
 
+/// Returns the branch name HEAD points at when HEAD is on an unborn branch
+/// (empty repo, no commits). For non-unborn cases this returns whatever
+/// HEAD's symbolic target stripped of `refs/heads/` is, so callers should
+/// only invoke it after confirming `repo.head()` returned `Err`.
+fn unborn_branch_name(repo: &Repository) -> Option<String> {
+    let head = repo.find_reference("HEAD").ok()?;
+    let target = head.symbolic_target()?;
+    Some(
+        target
+            .strip_prefix("refs/heads/")
+            .unwrap_or(target)
+            .to_string(),
+    )
+}
+
 pub type StatusResult<T> = Result<T, StatusError>;
 
 #[derive(Error, Debug)]

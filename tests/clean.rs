@@ -9,10 +9,10 @@ fn submodule_git_clean(_run: u32) {
     harness.assert_all_clean();
 
     // Write an untracked file inside the submodule
-    harness.write_file("sub_a", "junk.txt", "temporary\n");
+    harness.submodule("sub_a").write("junk.txt", "temporary\n");
     harness.assert_submodule_status("sub_a", StatusSummary::UNTRACKED_CONTENT);
 
     // `git clean -fd` removes untracked files and directories
-    harness.git_in_submodule("sub_a", &["clean", "-fd"]);
+    harness.submodule("sub_a").run_git(&["clean", "-fd"]);
     harness.assert_all_clean();
 }

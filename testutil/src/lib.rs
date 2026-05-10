@@ -86,10 +86,15 @@ impl HarnessBuilder {
             None
         };
 
+        let submodules = submodule_paths
+            .into_iter()
+            .map(|(name, path)| (name, Repo::new(&path)))
+            .collect();
+
         let harness = TestHarness {
-            root_path,
+            root: Repo::new(&root_path),
             server_thread,
-            submodule_paths,
+            submodules,
             _temp_dir: temp_dir,
         };
 
@@ -103,98 +108,43 @@ impl HarnessBuilder {
 
 /// An integration test harness that manages a real git repository with
 /// submodules and an in-process watch server.
+///
+/// File and git operations are exposed compositionally via [`Repo`]: use
+/// `harness.root()` for the top-level repo and `harness.submodule(name)`
+/// for a submodule's working tree.
 pub struct TestHarness {
-    /// Path to the root repository.
-    root_path: PathBuf,
+    /// The root repository.
+    root: Repo,
     /// Background thread running `watch()`. `None` after shutdown.
     server_thread: Option<JoinHandle<()>>,
-    /// Submodule relative name -> absolute workdir path.
-    submodule_paths: HashMap<String, PathBuf>,
+    /// Submodule relative name -> the submodule's working tree as a `Repo`.
+    submodules: HashMap<String, Repo>,
     /// Temp directory holding the entire test fixture. Must be the last field
     /// so it outlives the server thread during automatic field drops.
     _temp_dir: TempDir,
 }
 
 impl TestHarness {
-    /// Returns the root repository path.
-    pub fn root_path(&self) -> &Path {
-        &self.root_path
+    /// Returns the root repository as a [`Repo`] for compositional ops.
+    pub fn root(&self) -> &Repo {
+        &self.root
     }
 
-    /// Returns the working directory path for a submodule by relative name.
-    pub fn submodule_path(&self, name: &str) -> &Path {
-        self.submodule_paths
+    /// Returns a submodule's working tree as a [`Repo`] for compositional ops.
+    pub fn submodule(&self, name: &str) -> &Repo {
+        self.submodules
             .get(name)
             .unwrap_or_else(|| panic!("No submodule named '{name}'"))
     }
 
     /// Returns the names of all registered submodules.
     pub fn submodule_names(&self) -> impl Iterator<Item = &str> {
-        self.submodule_paths.keys().map(String::as_str)
-    }
-
-    /// Create or overwrite a file inside a submodule.
-    pub fn write_file(&self, submodule: &str, relative_path: &str, contents: &str) {
-        let full = self.submodule_path(submodule).join(relative_path);
-        if let Some(parent) = full.parent() {
-            std::fs::create_dir_all(parent).unwrap();
-        }
-        std::fs::write(&full, contents).unwrap();
-    }
-
-    /// Create or overwrite a file in the root repo (not in a submodule).
-    pub fn write_root_file(&self, relative_path: &str, contents: &str) {
-        let full = self.root_path.join(relative_path);
-        if let Some(parent) = full.parent() {
-            std::fs::create_dir_all(parent).unwrap();
-        }
-        std::fs::write(&full, contents).unwrap();
-    }
-
-    /// Delete a file inside a submodule.
-    pub fn remove_file(&self, submodule: &str, relative_path: &str) {
-        let full = self.submodule_path(submodule).join(relative_path);
-        std::fs::remove_file(&full).unwrap();
-    }
-
-    /// Stage and commit all changes in a submodule via `git add -A && git commit`.
-    pub fn commit_in_submodule(&self, submodule: &str, message: &str) {
-        let path = self.submodule_path(submodule);
-        git(&["-C", &path.display().to_string(), "add", "-A"]);
-        git(&["-C", &path.display().to_string(), "commit", "-m", message]);
-    }
-
-    /// Stage the submodule's gitlink in the parent repo's index.
-    pub fn stage_submodule(&self, submodule: &str) {
-        git(&[
-            "-C",
-            &self.root_path.display().to_string(),
-            "add",
-            submodule,
-        ]);
-    }
-
-    /// Stage a specific file in a submodule's index.
-    pub fn stage_file(&self, submodule: &str, relative_path: &str) {
-        let path = self.submodule_path(submodule);
-        git(&["-C", &path.display().to_string(), "add", relative_path]);
-    }
-
-    /// Unstage a file in a submodule's index (`git restore --staged`).
-    pub fn unstage_file(&self, submodule: &str, relative_path: &str) {
-        let path = self.submodule_path(submodule);
-        git(&[
-            "-C",
-            &path.display().to_string(),
-            "restore",
-            "--staged",
-            relative_path,
-        ]);
+        self.submodules.keys().map(String::as_str)
     }
 
     /// Request the current status from the watch server.
     pub fn status(&self) -> Vec<(String, StatusSummary)> {
-        let mut conn = send_status_request(&self.root_path).expect("send_status_request failed");
+        let mut conn = send_status_request(self.root.path()).expect("send_status_request failed");
         recv_status_response(&mut conn, false)
             .expect("recv_status_response failed")
             .0
@@ -256,49 +206,11 @@ impl TestHarness {
 
     /// Assert that `deleted_submodule_paths` returns exactly the given paths.
     pub fn assert_deleted_submodule_paths(&self, expected: &[&str]) {
-        let repo = Repository::open(&self.root_path).expect("Failed to open root repo");
+        let repo = Repository::open(self.root.path()).expect("Failed to open root repo");
         let actual =
             subspy::status::deleted_submodule_paths(&repo).expect("deleted_submodule_paths failed");
         let expected: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
         assert_eq!(actual, expected, "deleted_submodule_paths mismatch");
-    }
-
-    /// Run a git command in the root repo directory.
-    pub fn git_in_root(&self, args: &[&str]) {
-        let root = self.root_path.display().to_string();
-        let mut full_args = vec!["-C", &root];
-        full_args.extend_from_slice(args);
-        git(&full_args);
-    }
-
-    /// Run a git command in a submodule directory.
-    pub fn git_in_submodule(&self, submodule: &str, args: &[&str]) {
-        let path = self.submodule_path(submodule).display().to_string();
-        let mut full_args = vec!["-C", &path];
-        full_args.extend_from_slice(args);
-        git(&full_args);
-    }
-
-    /// Run a git command in the root repo directory, returning the `Output`
-    /// instead of panicking on non-zero exit.
-    pub fn git_in_root_may_fail(&self, args: &[&str]) -> std::process::Output {
-        let root = self.root_path.display().to_string();
-        let mut full_args = vec!["-C", &root];
-        full_args.extend_from_slice(args);
-        git_may_fail(&full_args)
-    }
-
-    /// Run a git command in a submodule directory, returning the `Output`
-    /// instead of panicking on non-zero exit.
-    pub fn git_in_submodule_may_fail(
-        &self,
-        submodule: &str,
-        args: &[&str],
-    ) -> std::process::Output {
-        let path = self.submodule_path(submodule).display().to_string();
-        let mut full_args = vec!["-C", &path];
-        full_args.extend_from_slice(args);
-        git_may_fail(&full_args)
     }
 
     /// Commit a change in the source (upstream) repo for a submodule.
@@ -310,15 +222,8 @@ impl TestHarness {
         contents: &str,
         message: &str,
     ) {
-        let source = self.source_repos_path().join(submodule);
-        let file_path = source.join(file);
-        if let Some(parent) = file_path.parent() {
-            std::fs::create_dir_all(parent).unwrap();
-        }
-        std::fs::write(&file_path, contents).unwrap();
-        let source_str = source.display().to_string();
-        git(&["-C", &source_str, "add", "-A"]);
-        git(&["-C", &source_str, "commit", "-m", message]);
+        let source = Repo::new(&self.source_repos_path().join(submodule));
+        source.write(file, contents).add_all().commit(message);
     }
 
     /// Stage a new submodule in the root repo without committing.
@@ -330,41 +235,34 @@ impl TestHarness {
         create_source_repo(&source_path);
 
         let source = source_path.display().to_string();
-        let root = self.root_path.display().to_string();
-        git(&["-C", &root, "submodule", "add", &source, name]);
+        self.root.run_git(&["submodule", "add", &source, name]);
 
-        self.submodule_paths
-            .insert(name.to_string(), self.root_path.join(name));
+        self.submodules
+            .insert(name.to_string(), Repo::new(&self.root.path().join(name)));
     }
 
     /// Add a new submodule to the root repo at runtime.
     /// Creates the source repo, runs `git submodule add`, and commits.
     pub fn add_submodule(&mut self, name: &str) {
         self.add_submodule_no_commit(name);
-        self.git_in_root(&["commit", "-m", &format!("Add submodule {name}")]);
+        self.root.commit(&format!("Add submodule {name}"));
     }
 
     /// Remove a submodule from the root repo at runtime.
     /// Runs `git rm` and commits, then removes from tracked paths.
     pub fn remove_submodule(&mut self, name: &str) {
-        let root = self.root_path.display().to_string();
-        git(&["-C", &root, "rm", "-f", name]);
-        git(&[
-            "-C",
-            &root,
-            "commit",
-            "-m",
-            &format!("Remove submodule {name}"),
-        ]);
-        self.submodule_paths.remove(name);
+        self.root.run_git(&["rm", "-f", name]);
+        self.root.commit(&format!("Remove submodule {name}"));
+        self.submodules.remove(name);
     }
 
     /// Path to the `source_repos/` directory in the temp dir.
     pub fn source_repos_path(&self) -> PathBuf {
-        // root_path is <temp_dir>/root_repo, so parent is <temp_dir>
-        self.root_path
+        // root is <temp_dir>/root_repo, so parent is <temp_dir>
+        self.root
+            .path()
             .parent()
-            .expect("root_path must have a parent")
+            .expect("root path must have a parent")
             .join("source_repos")
     }
 
@@ -375,19 +273,19 @@ impl TestHarness {
             self.server_thread.is_none(),
             "Server already running; cannot start again"
         );
-        self.server_thread = Some(start_watch_server(&self.root_path));
+        self.server_thread = Some(start_watch_server(self.root.path()));
         self.wait_for_server_ready();
     }
 
     /// Request a reindex from the watch server.
     pub fn request_reindex(&self, replace_watchers: bool) {
-        request_reindex(&self.root_path, replace_watchers, false).expect("Reindex request failed");
+        request_reindex(self.root.path(), replace_watchers, false).expect("Reindex request failed");
     }
 
     /// Shut down the watch server and wait for the thread to exit.
     pub fn shutdown(&mut self) {
         if self.server_thread.is_some() {
-            request_shutdown(&self.root_path).expect("Shutdown request failed");
+            request_shutdown(self.root.path()).expect("Shutdown request failed");
             if let Some(handle) = self.server_thread.take() {
                 handle.join().expect("Watch server thread panicked");
             }
@@ -401,12 +299,12 @@ impl TestHarness {
         // First, poll with raw ipc_connect to detect when the server is
         // listening. This avoids triggering connect_to_server's auto-start
         // behavior (which would spawn a second daemon process).
-        let sock_path = ipc_socket_path(&self.root_path);
+        let sock_path = ipc_socket_path(self.root.path());
         loop {
             if ipc_connect(&sock_path).is_ok() {
                 // Server is listening. Do a full status request to
                 // wait for initial indexing to complete.
-                let mut conn = send_status_request(&self.root_path).unwrap();
+                let mut conn = send_status_request(self.root.path()).unwrap();
                 let _ = recv_status_response(&mut conn, false);
                 return;
             }
@@ -424,7 +322,7 @@ impl Drop for TestHarness {
         // Best-effort shutdown. Ignore errors (test may have already shut
         // it down, or the server may have panicked).
         if self.server_thread.is_some() {
-            let _ = request_shutdown(&self.root_path);
+            let _ = request_shutdown(self.root.path());
             if let Some(handle) = self.server_thread.take() {
                 let _ = handle.join();
             }
@@ -510,6 +408,123 @@ fn init_repo_with_submodules(
     }
 
     submod_paths
+}
+
+/// Builder for a fixture git repo, used to set up specific repo states
+/// declaratively for tests. Wraps `git -C <root> ...` and filesystem
+/// mutations so test setups read top-down without scattered boilerplate.
+///
+/// All methods take `&self` and return `&Self` so calls can chain freely
+/// off a single `Repo::init` call.
+pub struct Repo {
+    root: PathBuf,
+}
+
+impl Repo {
+    /// `git init` an empty repo at `root` with `master` as the initial branch.
+    pub fn init(root: &Path) -> Self {
+        let r = Self::new(root);
+        r.run_git(&["init", "-q", "--initial-branch=master"]);
+        r
+    }
+
+    /// Construct a `Repo` handle for an existing repository at `root` without
+    /// running any git commands. Useful when the repo was created by other
+    /// means (e.g. via libgit2).
+    pub fn new(root: &Path) -> Self {
+        Self {
+            root: root.to_path_buf(),
+        }
+    }
+
+    /// Returns the repository root path.
+    pub fn path(&self) -> &Path {
+        &self.root
+    }
+
+    /// Unstage a file in this repo's index (`git restore --staged`).
+    pub fn restore_staged(&self, path: &str) -> &Self {
+        self.run_git(&["restore", "--staged", path]);
+        self
+    }
+
+    /// Write `content` to `path` (relative to the repo root). Creates any
+    /// missing parent directories.
+    pub fn write(&self, path: &str, content: &str) -> &Self {
+        let full = self.root.join(path);
+        if let Some(parent) = full.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(&full, content).unwrap();
+        self
+    }
+
+    /// `mkdir -p` the directory at `path` (relative to the repo root).
+    pub fn mkdir(&self, path: &str) -> &Self {
+        std::fs::create_dir_all(self.root.join(path)).unwrap();
+        self
+    }
+
+    /// Remove a file from the working tree (no `git rm`).
+    pub fn rm_file(&self, path: &str) -> &Self {
+        std::fs::remove_file(self.root.join(path)).unwrap();
+        self
+    }
+
+    pub fn add(&self, path: &str) -> &Self {
+        self.run_git(&["add", path]);
+        self
+    }
+
+    pub fn add_all(&self) -> &Self {
+        self.run_git(&["add", "-A"]);
+        self
+    }
+
+    pub fn commit(&self, msg: &str) -> &Self {
+        self.run_git(&["commit", "-qm", msg]);
+        self
+    }
+
+    /// `git checkout -b <name>`: create and switch to a new branch.
+    pub fn branch(&self, name: &str) -> &Self {
+        self.run_git(&["checkout", "-qb", name]);
+        self
+    }
+
+    /// `git checkout <refname>`: switch to an existing ref (branch or commit).
+    pub fn checkout(&self, refname: &str) -> &Self {
+        self.run_git(&["checkout", "-q", refname]);
+        self
+    }
+
+    pub fn mv(&self, from: &str, to: &str) -> &Self {
+        self.run_git(&["mv", from, to]);
+        self
+    }
+
+    pub fn rm_tracked(&self, path: &str) -> &Self {
+        self.run_git(&["rm", "-q", path]);
+        self
+    }
+
+    /// Run a git command relative to this repo's root via [`git`], asserting success.
+    pub fn run_git(&self, args: &[&str]) {
+        let r = self.root.display().to_string();
+        let mut full: Vec<&str> = vec!["-C", &r];
+        full.extend(args);
+        git(&full);
+    }
+
+    /// Run a git command relative to this repo's root via [`git_may_fail`],
+    /// returning the raw `Output` without asserting. Use for commands that
+    /// are expected to fail (e.g. a merge that conflicts).
+    pub fn try_git(&self, args: &[&str]) -> std::process::Output {
+        let r = self.root.display().to_string();
+        let mut full: Vec<&str> = vec!["-C", &r];
+        full.extend(args);
+        git_may_fail(&full)
+    }
 }
 
 /// Runs a `git` command with the given arguments, panicking on failure.
