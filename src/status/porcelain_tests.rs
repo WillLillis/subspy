@@ -14,11 +14,14 @@ use git2::Repository;
 use std::path::Path;
 use std::process::Command;
 use tempfile::TempDir;
-use testutil::Repo;
+use testutil::{HarnessBuilder, Repo, TestHarness};
+
+use crate::RepoKind;
 
 use super::{
-    IgnoreSubmodules, OutputOpts, PorcelainVersion, UntrackedFiles, deleted_submodule_paths,
-    porcelain_v1::display_porcelain_v1, porcelain_v2::display_porcelain_v2,
+    IgnoreSubmodules, OutputOpts, PorcelainVersion, UntrackedFiles, compute_local_statuses,
+    deleted_submodule_paths, porcelain_v1::display_porcelain_v1,
+    porcelain_v2::display_porcelain_v2, submodule::apply_ignore_submodules,
 };
 
 fn setup_empty_repo(root: &Path) {
@@ -138,6 +141,35 @@ fn setup_detached_head(root: &Path) {
         .checkout("HEAD~1");
 }
 
+fn setup_path_with_non_ascii(root: &Path) {
+    // Triggers high-byte octal escaping (`\303\251` etc.) in non-z mode.
+    setup_clean(root);
+    Repo::new(root).write("café.txt", "x\n");
+}
+
+fn setup_path_with_backslash(root: &Path) {
+    setup_clean(root);
+    Repo::new(root).write("with\\back.txt", "x\n");
+}
+
+fn setup_multiple_renames(root: &Path) {
+    // Two independent renames in the same commit; rename detector must
+    // pair them up correctly.
+    let r = Repo::init(root);
+    r.write("alpha.txt", "alpha line 1\nalpha line 2\nalpha line 3\n")
+        .write("beta.txt", "beta line 1\nbeta line 2\nbeta line 3\n")
+        .add_all()
+        .commit("init")
+        .mv("alpha.txt", "alpha_renamed.txt")
+        .mv("beta.txt", "beta_renamed.txt");
+}
+
+fn setup_dotfile(root: &Path) {
+    // Untracked dotfile - git doesn't treat them specially in porcelain.
+    setup_clean(root);
+    Repo::new(root).write(".hidden", "x\n");
+}
+
 /// Merge with several conflict shapes: UU (both modified), AA (both added),
 /// UD (deleted by them), DU (deleted by us). Exercises the conflict XY codes
 /// in v1 and the `u`-line in v2.
@@ -172,86 +204,103 @@ fn setup_merge_conflict(root: &Path) {
     );
 }
 
-/// A test scenario: a setup function that builds the repo state, plus the
-/// options we want both git and subspy to see.
+/// A test scenario.
 struct Case {
     name: &'static str,
-    setup: fn(&Path),
+    setup: CaseSetup,
+}
+
+/// How a case prepares its fixture repo. Plain cases take a fresh empty
+/// directory; submodule cases get a `TestHarness` with the requested
+/// submodules already added (via libgit2, no watch server).
+enum CaseSetup {
+    Plain(fn(&Path)),
+    WithSubmodules {
+        names: &'static [&'static str],
+        setup: fn(&TestHarness),
+    },
 }
 
 /// Cases are parameterized at test time over the (version, `null_terminate`,
 /// branch, untracked-mode, ignored) matrix, so each entry here exercises
 /// many test runs.
 const CASES: &[Case] = &[
-    Case {
-        name: "empty repo",
-        setup: setup_empty_repo,
-    },
-    Case {
-        name: "empty repo with untracked",
-        setup: setup_empty_repo_with_untracked,
-    },
-    Case {
-        name: "clean",
-        setup: setup_clean,
-    },
-    Case {
-        name: "modified workdir",
-        setup: setup_modified_workdir,
-    },
-    Case {
-        name: "staged modified",
-        setup: setup_staged_modified,
-    },
-    Case {
-        name: "staged new file",
-        setup: setup_staged_new,
-    },
-    Case {
-        name: "MM (staged + workdir)",
-        setup: setup_staged_plus_workdir,
-    },
-    Case {
-        name: "deleted (staged)",
-        setup: setup_deleted_staged,
-    },
-    Case {
-        name: "deleted (workdir)",
-        setup: setup_deleted_workdir,
-    },
-    Case {
-        name: "renamed (staged)",
-        setup: setup_renamed_staged,
-    },
-    Case {
-        name: "untracked",
-        setup: setup_untracked,
-    },
-    Case {
-        name: "untracked in dir",
-        setup: setup_untracked_in_dir,
-    },
-    Case {
-        name: "path with space",
-        setup: setup_path_with_space,
-    },
-    Case {
-        name: "mixed (tracked + untracked + ignored)",
-        setup: setup_mixed,
-    },
-    Case {
-        name: "detached HEAD",
-        setup: setup_detached_head,
-    },
-    Case {
-        name: "ignored files",
-        setup: setup_ignored_files,
-    },
-    Case {
-        name: "merge conflict (UU/AA/UD/DU)",
-        setup: setup_merge_conflict,
-    },
+    plain("empty repo", setup_empty_repo),
+    plain("empty repo with untracked", setup_empty_repo_with_untracked),
+    plain("clean", setup_clean),
+    plain("modified workdir", setup_modified_workdir),
+    plain("staged modified", setup_staged_modified),
+    plain("staged new file", setup_staged_new),
+    plain("MM (staged + workdir)", setup_staged_plus_workdir),
+    plain("deleted (staged)", setup_deleted_staged),
+    plain("deleted (workdir)", setup_deleted_workdir),
+    plain("renamed (staged)", setup_renamed_staged),
+    plain("untracked", setup_untracked),
+    plain("untracked in dir", setup_untracked_in_dir),
+    plain("path with space", setup_path_with_space),
+    plain("mixed (tracked + untracked + ignored)", setup_mixed),
+    plain("detached HEAD", setup_detached_head),
+    plain("ignored files", setup_ignored_files),
+    plain("merge conflict (UU/AA/UD/DU)", setup_merge_conflict),
+    plain("path with non-ASCII", setup_path_with_non_ascii),
+    plain("path with backslash", setup_path_with_backslash),
+    plain("multiple renames", setup_multiple_renames),
+    plain("dotfile (untracked)", setup_dotfile),
+    submodule_case("submodule clean", &["sub_a"], setup_submod_clean),
+    submodule_case(
+        "submodule dirty workdir",
+        &["sub_a"],
+        setup_submod_dirty_workdir,
+    ),
+    submodule_case(
+        "submodule new commits",
+        &["sub_a"],
+        setup_submod_new_commits,
+    ),
+    submodule_case("submodule deleted", &["sub_a"], setup_submod_deleted),
 ];
+
+const fn plain(name: &'static str, setup: fn(&Path)) -> Case {
+    Case {
+        name,
+        setup: CaseSetup::Plain(setup),
+    }
+}
+
+const fn submodule_case(
+    name: &'static str,
+    names: &'static [&'static str],
+    setup: fn(&TestHarness),
+) -> Case {
+    Case {
+        name,
+        setup: CaseSetup::WithSubmodules { names, setup },
+    }
+}
+
+fn setup_submod_clean(_h: &TestHarness) {
+    // Harness already builds a clean repo with one submodule; nothing to do.
+}
+
+fn setup_submod_dirty_workdir(h: &TestHarness) {
+    // Untracked file inside the submodule -> parent shows ` M sub_a`.
+    h.submodule("sub_a").write("dirty.txt", "x\n");
+}
+
+fn setup_submod_new_commits(h: &TestHarness) {
+    // Add a new commit inside the submodule that isn't reflected in the
+    // parent's gitlink -> parent shows ` M sub_a`.
+    h.submodule("sub_a")
+        .write("README.md", "updated\n")
+        .add_all()
+        .commit("submodule update");
+}
+
+fn setup_submod_deleted(h: &TestHarness) {
+    // `git rm` the submodule from the parent index -> parent shows the
+    // gitlink as deleted (handled via deleted_submodule_paths).
+    h.root().run_git(&["rm", "-q", "sub_a"]);
+}
 
 /// Translates `OutputOpts` to the equivalent `git status` argv. Mirrors
 /// subspy's defaults so the two sides agree without explicit redundant flags.
@@ -287,7 +336,7 @@ fn git_status_args(opts: OutputOpts) -> Vec<String> {
 
 /// Mirrors `status::status`'s `StatusOptions` setup. Kept in sync by
 /// constructing from the same `OutputOpts` shape.
-fn build_status_options(opts: OutputOpts) -> git2::StatusOptions {
+fn build_status_options(opts: OutputOpts, repo_kind: RepoKind) -> git2::StatusOptions {
     let mut so = git2::StatusOptions::new();
     match opts.untracked_files {
         UntrackedFiles::Normal => {
@@ -304,16 +353,43 @@ fn build_status_options(opts: OutputOpts) -> git2::StatusOptions {
     so.renames_head_to_index(true)
         .renames_index_to_workdir(true)
         .renames_from_rewrites(true);
+    if repo_kind == RepoKind::WithSubmodules {
+        so.exclude_submodules(true);
+    }
     so
 }
 
 /// Runs `case` with `opts` against both real git and subspy, asserts equal.
 fn run_case(case: &Case, opts: OutputOpts) {
-    let tmp = TempDir::new().unwrap();
-    (case.setup)(tmp.path());
+    match &case.setup {
+        CaseSetup::Plain(setup) => {
+            let tmp = TempDir::new().unwrap();
+            setup(tmp.path());
+            assert_outputs_match(tmp.path(), case.name, opts, RepoKind::Normal);
+        }
+        CaseSetup::WithSubmodules { names, setup } => {
+            let mut builder = HarnessBuilder::new().no_server();
+            for n in *names {
+                builder = builder.submodule(n);
+            }
+            let harness = builder.build();
+            setup(&harness);
+            assert_outputs_match(
+                harness.root().path(),
+                case.name,
+                opts,
+                RepoKind::WithSubmodules,
+            );
+        }
+    }
+}
 
+/// Runs real git and subspy against the prepared `repo_root` with `opts`,
+/// asserting byte-equal output. `repo_kind` controls whether the subspy
+/// path also computes per-submodule statuses (mirrors `status::status`).
+fn assert_outputs_match(repo_root: &Path, case_name: &str, opts: OutputOpts, repo_kind: RepoKind) {
     // Capture real git's output.
-    let cwd = tmp.path().display().to_string();
+    let cwd = repo_root.display().to_string();
     let args = git_status_args(opts);
     let mut all = vec!["-C".to_string(), cwd];
     all.extend(args.iter().cloned());
@@ -322,17 +398,26 @@ fn run_case(case: &Case, opts: OutputOpts) {
         go.status.success(),
         "git {} failed for case '{}': {}",
         args.join(" "),
-        case.name,
+        case_name,
         String::from_utf8_lossy(&go.stderr)
     );
     let expected = go.stdout;
 
     // Capture subspy's output into a Vec<u8>.
-    let repo = Repository::open(tmp.path()).unwrap();
-    let mut so = build_status_options(opts);
+    let repo = Repository::open(repo_root).unwrap();
+    let mut so = build_status_options(opts, repo_kind);
     let non_submod = repo.statuses(Some(&mut so)).unwrap();
-    let deleted = deleted_submodule_paths(&repo).unwrap();
-    let submodules = Vec::new();
+    let deleted = if opts.ignore_submodules == IgnoreSubmodules::All {
+        Vec::new()
+    } else {
+        deleted_submodule_paths(&repo).unwrap()
+    };
+    let submodules = if repo_kind == RepoKind::WithSubmodules {
+        compute_local_statuses(repo_root, &repo).unwrap()
+    } else {
+        Vec::new()
+    };
+    let submodules = apply_ignore_submodules(submodules, opts.ignore_submodules);
 
     let mut got: Vec<u8> = Vec::new();
     match opts.porcelain {
@@ -363,7 +448,7 @@ fn run_case(case: &Case, opts: OutputOpts) {
         got,
         expected,
         "case '{}' (porcelain={:?}, z={}, branch={})\n--- git ---\n{}\n--- subspy ---\n{}",
-        case.name,
+        case_name,
         opts.porcelain,
         opts.null_terminate,
         opts.branch,
