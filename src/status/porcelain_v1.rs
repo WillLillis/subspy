@@ -15,7 +15,13 @@ use crate::StatusSummary;
 use super::{
     StatusResult,
     conflict::{ConflictEntry, build_conflict_map},
+    line_terminator,
+    quote::{QuoteMode, maybe_quote},
 };
+
+/// Porcelain v1 uses `QuoteSpace` mode to match `git status --porcelain`,
+/// which sets `QUOTE_PATH_QUOTE_SP` so paths containing spaces get quoted.
+const QUOTE_MODE: QuoteMode = QuoteMode::QuoteSpace;
 
 /// Maps a `git2::Status` to the XY index/worktree characters used in porcelain v1.
 /// Differs from porcelain v2 by emitting a literal space for the unmodified state
@@ -116,26 +122,30 @@ fn write_branch_header(repo: &Repository, out: &mut impl Write) -> StatusResult<
     Ok(())
 }
 
-fn write_simple(out: &mut impl Write, xy: &str, path: &str, term: u8) -> Result<(), io::Error> {
-    write!(out, "{xy} {path}")?;
-    out.write_all(&[term])
+fn write_simple(
+    out: &mut impl Write,
+    xy: &str,
+    path: &str,
+    null_terminate: bool,
+) -> Result<(), io::Error> {
+    let path = maybe_quote(path, null_terminate, QUOTE_MODE);
+    write!(out, "{xy} {path}{}", line_terminator(null_terminate))
 }
 
 fn write_ordinary(
     entry: &git2::StatusEntry<'_>,
     out: &mut impl Write,
-    term: u8,
+    null_terminate: bool,
 ) -> Result<(), io::Error> {
     let (x, y) = regular_xy(entry.status());
-    let path = entry.path().unwrap_or("");
-    write!(out, "{x}{y} {path}")?;
-    out.write_all(&[term])
+    let path = maybe_quote(entry.path().unwrap_or(""), null_terminate, QUOTE_MODE);
+    write!(out, "{x}{y} {path}{}", line_terminator(null_terminate))
 }
 
 fn write_renamed(
     entry: &git2::StatusEntry<'_>,
     out: &mut impl Write,
-    term: u8,
+    null_terminate: bool,
 ) -> Result<(), io::Error> {
     let st = entry.status();
     let (x, y) = regular_xy(st);
@@ -146,18 +156,18 @@ fn write_renamed(
     } else {
         entry.index_to_workdir()
     };
-    let path_str = |p: Option<&std::path::Path>| {
-        p.map(|p| p.display().to_string()).unwrap_or_default()
-    };
+    let path_str =
+        |p: Option<&std::path::Path>| p.map(|p| p.display().to_string()).unwrap_or_default();
     let old_path = path_str(delta.as_ref().and_then(|d| d.old_file().path()));
     let new_path = path_str(delta.as_ref().and_then(|d| d.new_file().path()));
-    if term == b'\0' {
-        // -z form: `XY PATH\0ORIG\0` (path first, no arrow)
-        write!(out, "{x}{y} {new_path}")?;
-        out.write_all(b"\0")?;
-        write!(out, "{old_path}")?;
-        out.write_all(b"\0")
+    if null_terminate {
+        // -z form: `XY PATH\0ORIG\0` (path first, no arrow). No quoting
+        // applies under -z.
+        write!(out, "{x}{y} {new_path}\0{old_path}\0")
     } else {
+        // Each path is quoted independently.
+        let old_path = maybe_quote(&old_path, false, QUOTE_MODE);
+        let new_path = maybe_quote(&new_path, false, QUOTE_MODE);
         writeln!(out, "{x}{y} {old_path} -> {new_path}")
     }
 }
@@ -166,7 +176,7 @@ fn write_conflict(
     entry: &git2::StatusEntry<'_>,
     conflicts: &FxHashMap<String, ConflictEntry>,
     out: &mut impl Write,
-    term: u8,
+    null_terminate: bool,
 ) -> Result<(), io::Error> {
     let path = entry.path().unwrap_or("");
     let xy = conflicts.get(path).map_or("UU", |c| {
@@ -178,22 +188,23 @@ fn write_conflict(
             _ => "UU",
         }
     });
-    write!(out, "{xy} {path}")?;
-    out.write_all(&[term])
+    let path = maybe_quote(path, null_terminate, QUOTE_MODE);
+    write!(out, "{xy} {path}{}", line_terminator(null_terminate))
 }
 
 fn write_submodule(
     path: &str,
     st: StatusSummary,
     out: &mut impl Write,
-    term: u8,
+    null_terminate: bool,
 ) -> Result<(), io::Error> {
     let (x, y) = submodule_xy(st);
-    write!(out, "{x}{y} {path}")?;
-    out.write_all(&[term])
+    let path = maybe_quote(path, null_terminate, QUOTE_MODE);
+    write!(out, "{x}{y} {path}{}", line_terminator(null_terminate))
 }
 
-pub(super) fn display_porcelain_v1(
+pub fn display_porcelain_v1(
+    out: &mut impl Write,
     repo: &Repository,
     non_submod: &Statuses<'_>,
     submodule_statuses: &[(String, StatusSummary)],
@@ -201,11 +212,8 @@ pub(super) fn display_porcelain_v1(
     null_terminate: bool,
     branch: bool,
 ) -> StatusResult<()> {
-    let term = if null_terminate { b'\0' } else { b'\n' };
-    let mut out = io::BufWriter::with_capacity(64 * 1024, io::stdout().lock());
-
     if branch {
-        write_branch_header(repo, &mut out)?;
+        write_branch_header(repo, out)?;
     }
 
     let index = repo.index()?;
@@ -222,34 +230,34 @@ pub(super) fn display_porcelain_v1(
             continue;
         }
         if st.contains(git2::Status::CONFLICTED) {
-            write_conflict(&entry, &conflicts, &mut out, term)?;
+            write_conflict(&entry, &conflicts, out, null_terminate)?;
         } else if st.intersects(git2::Status::INDEX_RENAMED | git2::Status::WT_RENAMED) {
-            write_renamed(&entry, &mut out, term)?;
+            write_renamed(&entry, out, null_terminate)?;
         } else {
-            write_ordinary(&entry, &mut out, term)?;
+            write_ordinary(&entry, out, null_terminate)?;
         }
     }
 
     for (path, st) in submodule_statuses {
-        write_submodule(path, *st, &mut out, term)?;
+        write_submodule(path, *st, out, null_terminate)?;
     }
 
     for path in deleted_submodule_paths {
-        write_simple(&mut out, "D ", path, term)?;
+        write_simple(out, "D ", path, null_terminate)?;
     }
 
     for entry in non_submod
         .iter()
         .filter(|e| e.status() == git2::Status::WT_NEW)
     {
-        write_simple(&mut out, "??", entry.path().unwrap_or(""), term)?;
+        write_simple(out, "??", entry.path().unwrap_or(""), null_terminate)?;
     }
 
     for entry in non_submod
         .iter()
         .filter(|e| e.status().contains(git2::Status::IGNORED))
     {
-        write_simple(&mut out, "!!", entry.path().unwrap_or(""), term)?;
+        write_simple(out, "!!", entry.path().unwrap_or(""), null_terminate)?;
     }
 
     Ok(())

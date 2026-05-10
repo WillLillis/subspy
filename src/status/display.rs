@@ -347,24 +347,24 @@ fn print_lock_file_errors(
 /// Formats and prints the full `git status`-style output: header, staged changes,
 /// unmerged paths, unstaged changes, untracked files, and lock file errors.
 // Basic logic originally adapted from https://github.com/rust-lang/git2-rs/blob/master/examples/status.rs
-pub(super) fn display_status(
+pub fn display_status(
+    out: &mut impl Write,
     repo: &Repository,
     non_submodule_statuses: &Statuses<'_>,
     submodule_statuses: &[(String, StatusSummary)],
     deleted_submodule_paths: &[String],
 ) -> StatusResult<()> {
-    let mut stdout = io::BufWriter::with_capacity(64 * 1024, io::stdout().lock());
     // Fast path: nothing dirty
     if non_submodule_statuses.is_empty()
         && submodule_statuses.is_empty()
         && deleted_submodule_paths.is_empty()
     {
-        print_header(repo, &mut stdout)?;
-        writeln!(&mut stdout, "nothing to commit, working tree clean")?;
+        print_header(repo, out)?;
+        writeln!(out, "nothing to commit, working tree clean")?;
         return Ok(());
     }
 
-    print_header(repo, &mut stdout)?;
+    print_header(repo, out)?;
 
     let rm_in_workdir = non_submodule_statuses
         .iter()
@@ -377,25 +377,25 @@ pub(super) fn display_status(
         non_submodule_statuses,
         submodule_statuses,
         deleted_submodule_paths,
-        &mut stdout,
+        out,
     )?;
-    let has_conflicts = print_unmerged_paths(repo, &mut stdout)?;
+    let has_conflicts = print_unmerged_paths(repo, out)?;
     let changed_in_workdir = print_unstaged_changes(
         non_submodule_statuses,
         submodule_statuses,
         rm_in_workdir,
-        &mut stdout,
+        out,
     )?;
-    let has_untracked = print_untracked_files(non_submodule_statuses, &mut stdout)?;
+    let has_untracked = print_untracked_files(non_submodule_statuses, out)?;
 
     print_summary(
         changes_in_index,
         changed_in_workdir || has_conflicts,
         has_untracked,
-        &mut stdout,
+        out,
     )?;
 
-    print_lock_file_errors(submodule_statuses, &mut stdout)?;
+    print_lock_file_errors(submodule_statuses, out)?;
 
     Ok(())
 }

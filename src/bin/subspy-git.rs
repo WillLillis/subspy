@@ -21,8 +21,6 @@ use subspy::{
     status::{IgnoreSubmodules, PorcelainVersion, UntrackedFiles},
 };
 
-const REAL_GIT: &str = "git";
-
 fn main() -> ExitCode {
     let argv: Vec<OsString> = env::args_os().skip(1).collect();
     #[expect(
@@ -75,11 +73,10 @@ impl Intercept {
 ///
 /// Returns `Some(intercept)` if every global option is one we know is safe
 /// to honor or ignore AND the subcommand is `status` AND every status flag
-/// is one subspy supports. Returns `None` for anything else - the caller
+/// is one subspy supports. Returns `None` for anything else. The caller
 /// should forward the original argv to real git.
 fn dispatch(argv: &[OsString]) -> Option<Intercept> {
-    // Require UTF-8 throughout. Non-UTF-8 args (rare on modern systems) are
-    // safer to forward than to misinterpret.
+    // Require UTF-8 throughout.
     let argv: Vec<&str> = argv
         .iter()
         .map(|s| s.to_str())
@@ -100,24 +97,15 @@ fn dispatch(argv: &[OsString]) -> Option<Intercept> {
             return Some(intercept);
         }
 
-        match consume_global(arg, argv.get(i + 1).copied(), &mut intercept)? {
-            Consumed::One => i += 1,
-            Consumed::Two => i += 2,
-        }
+        i += consume_global(arg, argv.get(i + 1).copied(), &mut intercept)?;
     }
 
     // Reached end of args with no subcommand (e.g. bare `git`, or `git -p`).
     None
 }
 
-#[derive(Debug, Clone, Copy)]
-enum Consumed {
-    One,
-    Two,
-}
-
 /// Try to consume a single global option. Returns `None` to forward to real git.
-fn consume_global(arg: &str, next: Option<&str>, intercept: &mut Intercept) -> Option<Consumed> {
+fn consume_global(arg: &str, next: Option<&str>, intercept: &mut Intercept) -> Option<usize> {
     // -C handling: -C path | -Cpath | -C=path
     if let Some(rest) = arg.strip_prefix("-C") {
         if rest.is_empty() {
@@ -128,14 +116,14 @@ fn consume_global(arg: &str, next: Option<&str>, intercept: &mut Intercept) -> O
             }
             let path = next?;
             intercept.chdir = Some(PathBuf::from(path));
-            return Some(Consumed::Two);
+            return Some(2);
         }
         if intercept.chdir.is_some() {
             return None;
         }
         let path = rest.strip_prefix('=').unwrap_or(rest);
         intercept.chdir = Some(PathBuf::from(path));
-        return Some(Consumed::One);
+        return Some(1);
     }
 
     // -c handling: -c key=val | -ckey=val. We don't read git config from the
@@ -143,9 +131,9 @@ fn consume_global(arg: &str, next: Option<&str>, intercept: &mut Intercept) -> O
     if let Some(rest) = arg.strip_prefix("-c") {
         if rest.is_empty() {
             next?;
-            return Some(Consumed::Two);
+            return Some(2);
         }
-        return Some(Consumed::One);
+        return Some(1);
     }
 
     // Long options. Split off any `=value` so we can match on the bare name.
@@ -159,12 +147,12 @@ fn consume_global(arg: &str, next: Option<&str>, intercept: &mut Intercept) -> O
 
     // Short flags without value.
     match arg {
-        "-p" | "-P" => Some(Consumed::One),
+        "-p" | "-P" => Some(1),
         _ => None, // unknown short option: forward
     }
 }
 
-fn classify_long_global(name: &str, has_attached: bool, next: Option<&str>) -> Option<Consumed> {
+fn classify_long_global(name: &str, has_attached: bool, next: Option<&str>) -> Option<usize> {
     // Safe boolean globals - ignore.
     if matches!(
         name,
@@ -177,16 +165,16 @@ fn classify_long_global(name: &str, has_attached: bool, next: Option<&str>) -> O
     ) {
         // These don't take values; if the caller wrote `--paginate=foo`, that's
         // malformed for git - forward and let git produce the error.
-        return if has_attached { None } else { Some(Consumed::One) };
+        return if has_attached { None } else { Some(1) };
     }
 
     // --config-env=name=envvar | --config-env name=envvar -- ignore.
     if name == "config-env" {
         return if has_attached {
-            Some(Consumed::One)
+            Some(1)
         } else {
             next?;
-            Some(Consumed::Two)
+            Some(2)
         };
     }
 
@@ -332,20 +320,20 @@ fn run_intercept(intercept: Intercept) -> ExitCode {
 
 #[cfg(unix)]
 fn forward(argv: &[OsString]) -> ExitCode {
-    let err = Command::new(REAL_GIT).args(argv).exec();
-    eprintln!("subspy-git: failed to exec `{REAL_GIT}`: {err}");
+    let err = Command::new("git").args(argv).exec();
+    eprintln!("subspy-git: failed to exec `git`: {err}");
     ExitCode::FAILURE
 }
 
 #[cfg(not(unix))]
 fn forward(argv: &[OsString]) -> ExitCode {
-    match Command::new(REAL_GIT).args(argv).status() {
+    match Command::new("git").args(argv).status() {
         Ok(status) => status
             .code()
             .and_then(|c| u8::try_from(c).ok())
             .map_or(ExitCode::FAILURE, ExitCode::from),
         Err(err) => {
-            eprintln!("subspy-git: failed to spawn `{REAL_GIT}`: {err}");
+            eprintln!("subspy-git: failed to spawn `git`: {err}");
             ExitCode::FAILURE
         }
     }

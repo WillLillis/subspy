@@ -19,7 +19,15 @@ use crate::StatusSummary;
 use super::{
     StatusResult,
     conflict::{ConflictEntry, build_conflict_map},
+    line_terminator,
+    quote::{QuoteMode, maybe_quote},
 };
+
+/// Porcelain v2 uses `Standard` mode (matches `git status --porcelain=2`,
+/// which uses `quote_c_style` without `QUOTE_PATH_QUOTE_SP`). Spaces are
+/// preserved verbatim; only escapes/control/high-bytes/`"`/`\` trigger
+/// quoting.
+const QUOTE_MODE: QuoteMode = QuoteMode::Standard;
 
 /// Writes the `# branch.*` header lines for porcelain v2 output.
 fn write_branch_headers(repo: &Repository, out: &mut impl Write) -> StatusResult<()> {
@@ -46,20 +54,18 @@ fn write_branch_headers(repo: &Repository, out: &mut impl Write) -> StatusResult
         branch_name.as_deref().unwrap_or("(detached)")
     )?;
 
-    if let Some(name) = branch_name {
-        if let Ok(local) = repo.find_branch(&name, git2::BranchType::Local) {
-            if let Ok(upstream) = local.upstream() {
-                if let Some(upstream_name) = upstream.get().shorthand() {
-                    writeln!(out, "# branch.upstream {upstream_name}")?;
-                    let local_oid = local.get().peel_to_commit().map(|c| c.id());
-                    let up_oid = upstream.get().peel_to_commit().map(|c| c.id());
-                    if let (Ok(l), Ok(u)) = (local_oid, up_oid) {
-                        if let Ok((ahead, behind)) = repo.graph_ahead_behind(l, u) {
-                            writeln!(out, "# branch.ab +{ahead} -{behind}")?;
-                        }
-                    }
-                }
-            }
+    if let Some(name) = branch_name
+        && let Ok(local) = repo.find_branch(&name, git2::BranchType::Local)
+        && let Ok(upstream) = local.upstream()
+        && let Some(upstream_name) = upstream.get().shorthand()
+    {
+        writeln!(out, "# branch.upstream {upstream_name}")?;
+        let local_oid = local.get().peel_to_commit().map(|c| c.id());
+        let up_oid = upstream.get().peel_to_commit().map(|c| c.id());
+        if let (Ok(l), Ok(u)) = (local_oid, up_oid)
+            && let Ok((ahead, behind)) = repo.graph_ahead_behind(l, u)
+        {
+            writeln!(out, "# branch.ab +{ahead} -{behind}")?;
         }
     }
 
@@ -118,33 +124,31 @@ fn submodule_xy(st: StatusSummary) -> (char, char) {
 
 /// Returns the 4-char submodule sub-field (`S<c><m><u>`) for a porcelain v2 entry.
 fn submodule_sub(st: StatusSummary) -> String {
-    format!(
-        "S{}{}{}",
-        if st.contains(StatusSummary::NEW_COMMITS) {
-            'C'
-        } else {
-            '.'
-        },
-        if st.contains(StatusSummary::MODIFIED_CONTENT) {
-            'M'
-        } else {
-            '.'
-        },
-        if st.contains(StatusSummary::UNTRACKED_CONTENT) {
-            'U'
-        } else {
-            '.'
-        },
-    )
+    let c = if st.contains(StatusSummary::NEW_COMMITS) {
+        'C'
+    } else {
+        '.'
+    };
+    let m = if st.contains(StatusSummary::MODIFIED_CONTENT) {
+        'M'
+    } else {
+        '.'
+    };
+    let u = if st.contains(StatusSummary::UNTRACKED_CONTENT) {
+        'U'
+    } else {
+        '.'
+    };
+    format!("S{c}{m}{u}")
 }
 
 fn write_ordinary_entry(
     entry: &git2::StatusEntry<'_>,
     out: &mut impl Write,
-    term: u8,
+    null_terminate: bool,
 ) -> Result<(), io::Error> {
     let (x, y) = regular_xy(entry.status());
-    let path = entry.path().unwrap_or("");
+    let path = maybe_quote(entry.path().unwrap_or(""), null_terminate, QUOTE_MODE);
     // Compute index state first; HEAD falls back to index when file is not staged
     // (HEAD and index are the same for workdir-only changes).
     let m_idx = entry
@@ -168,17 +172,17 @@ fn write_ordinary_entry(
         .or_else(|| entry.index_to_workdir().map(|d| d.old_file().id()))
         .unwrap_or_else(git2::Oid::zero);
     let h_head = entry.head_to_index().map_or(h_idx, |d| d.old_file().id());
+    let term = line_terminator(null_terminate);
     write!(
         out,
-        "1 {x}{y} N... {m_head:06o} {m_idx:06o} {m_work:06o} {h_head} {h_idx} {path}",
-    )?;
-    out.write_all(&[term])
+        "1 {x}{y} N... {m_head:06o} {m_idx:06o} {m_work:06o} {h_head} {h_idx} {path}{term}",
+    )
 }
 
 fn write_renamed_entry(
     entry: &git2::StatusEntry<'_>,
     out: &mut impl Write,
-    term: u8,
+    null_terminate: bool,
 ) -> Result<(), io::Error> {
     let st = entry.status();
     let (x, y) = regular_xy(st);
@@ -189,11 +193,20 @@ fn write_renamed_entry(
     } else {
         entry.index_to_workdir()
     };
-    let path_str = |p: Option<&std::path::Path>| {
-        p.map(|p| p.display().to_string()).unwrap_or_default()
-    };
-    let old_path = path_str(delta.as_ref().and_then(|d| d.old_file().path()));
-    let new_path = path_str(delta.as_ref().and_then(|d| d.new_file().path()));
+    let path_str =
+        |p: Option<&std::path::Path>| p.map(|p| p.display().to_string()).unwrap_or_default();
+    let old_path = maybe_quote(
+        &path_str(delta.as_ref().and_then(|d| d.old_file().path())),
+        null_terminate,
+        QUOTE_MODE,
+    )
+    .into_owned();
+    let new_path = maybe_quote(
+        &path_str(delta.as_ref().and_then(|d| d.new_file().path())),
+        null_terminate,
+        QUOTE_MODE,
+    )
+    .into_owned();
     let m_idx = entry
         .head_to_index()
         .map(|d| u32::from(d.new_file().mode()))
@@ -215,27 +228,26 @@ fn write_renamed_entry(
         .or_else(|| entry.index_to_workdir().map(|d| d.old_file().id()))
         .unwrap_or_else(git2::Oid::zero);
     let h_head = entry.head_to_index().map_or(h_idx, |d| d.old_file().id());
-    // Path separator: NUL with -z, TAB without
-    let path_sep = if term == b'\0' { b'\0' } else { b'\t' };
+    // Path separator: NUL with -z, TAB without.
+    let path_sep = if null_terminate { '\0' } else { '\t' };
+    let term = line_terminator(null_terminate);
     write!(
         out,
-        "2 {x}{y} N... {m_head:06o} {m_idx:06o} {m_work:06o} {h_head} {h_idx} R100 {new_path}",
-    )?;
-    out.write_all(&[path_sep])?;
-    write!(out, "{old_path}")?;
-    out.write_all(&[term])
+        "2 {x}{y} N... {m_head:06o} {m_idx:06o} {m_work:06o} {h_head} {h_idx} R100 {new_path}{path_sep}{old_path}{term}",
+    )
 }
 
 fn write_conflict_entry(
     entry: &git2::StatusEntry<'_>,
     conflicts: &FxHashMap<String, ConflictEntry>,
     out: &mut impl Write,
-    term: u8,
+    null_terminate: bool,
 ) -> Result<(), io::Error> {
     let path = entry.path().unwrap_or("");
     let m_work = entry
         .index_to_workdir()
         .map_or(0u32, |d| u32::from(d.new_file().mode()));
+    let path_for_emit = maybe_quote(path, null_terminate, QUOTE_MODE);
     let (xy, m1, m2, m3, h1, h2, h3) = conflicts.get(path).map_or_else(
         || {
             (
@@ -265,11 +277,11 @@ fn write_conflict_entry(
             (xy, m1, m2, m3, h1, h2, h3)
         },
     );
+    let term = line_terminator(null_terminate);
     write!(
         out,
-        "u {xy} N... {m1:06o} {m2:06o} {m3:06o} {m_work:06o} {h1} {h2} {h3} {path}",
-    )?;
-    out.write_all(&[term])
+        "u {xy} N... {m1:06o} {m2:06o} {m3:06o} {m_work:06o} {h1} {h2} {h3} {path_for_emit}{term}",
+    )
 }
 
 fn write_submodule_entry(
@@ -278,7 +290,7 @@ fn write_submodule_entry(
     h_head: git2::Oid,
     h_index: git2::Oid,
     out: &mut impl Write,
-    term: u8,
+    null_terminate: bool,
 ) -> Result<(), io::Error> {
     let (x, y) = submodule_xy(st);
     let sub = submodule_sub(st);
@@ -287,32 +299,35 @@ fn write_submodule_entry(
     } else {
         0o160_000_u32
     };
+    let path = maybe_quote(path, null_terminate, QUOTE_MODE);
+    let term = line_terminator(null_terminate);
     write!(
         out,
-        "1 {x}{y} {sub} {:06o} {:06o} {:06o} {h_head} {h_index} {path}",
+        "1 {x}{y} {sub} {:06o} {:06o} {:06o} {h_head} {h_index} {path}{term}",
         m_head, 0o160_000_u32, 0o160_000_u32
-    )?;
-    out.write_all(&[term])
+    )
 }
 
 fn write_deleted_submodule_entry(
     path: &str,
     h_head: git2::Oid,
     out: &mut impl Write,
-    term: u8,
+    null_terminate: bool,
 ) -> Result<(), io::Error> {
+    let path = maybe_quote(path, null_terminate, QUOTE_MODE);
+    let term = line_terminator(null_terminate);
     write!(
         out,
-        "1 D. S... {:06o} {:06o} {:06o} {h_head} {} {path}",
+        "1 D. S... {:06o} {:06o} {:06o} {h_head} {} {path}{term}",
         0o160_000_u32,
         0u32,
         0u32,
         git2::Oid::zero()
-    )?;
-    out.write_all(&[term])
+    )
 }
 
-pub(super) fn display_porcelain_v2(
+pub fn display_porcelain_v2(
+    out: &mut impl Write,
     repo: &Repository,
     non_submod: &Statuses<'_>,
     submodule_statuses: &[(String, StatusSummary)],
@@ -320,11 +335,8 @@ pub(super) fn display_porcelain_v2(
     null_terminate: bool,
     branch: bool,
 ) -> StatusResult<()> {
-    let term = if null_terminate { b'\0' } else { b'\n' };
-    let mut out = io::BufWriter::with_capacity(64 * 1024, io::stdout().lock());
-
     if branch {
-        write_branch_headers(repo, &mut out)?;
+        write_branch_headers(repo, out)?;
     }
 
     let index = repo.index()?;
@@ -342,11 +354,11 @@ pub(super) fn display_porcelain_v2(
             continue;
         }
         if st.contains(git2::Status::CONFLICTED) {
-            write_conflict_entry(&entry, &conflicts, &mut out, term)?;
+            write_conflict_entry(&entry, &conflicts, out, null_terminate)?;
         } else if st.intersects(git2::Status::INDEX_RENAMED | git2::Status::WT_RENAMED) {
-            write_renamed_entry(&entry, &mut out, term)?;
+            write_renamed_entry(&entry, out, null_terminate)?;
         } else {
-            write_ordinary_entry(&entry, &mut out, term)?;
+            write_ordinary_entry(&entry, out, null_terminate)?;
         }
     }
 
@@ -358,7 +370,7 @@ pub(super) fn display_porcelain_v2(
         let h_index = index
             .get_path(Path::new(path), 0)
             .map_or_else(git2::Oid::zero, |e| e.id);
-        write_submodule_entry(path, *st, h_head, h_index, &mut out, term)?;
+        write_submodule_entry(path, *st, h_head, h_index, out, null_terminate)?;
     }
 
     for path in deleted_submodule_paths {
@@ -366,23 +378,24 @@ pub(super) fn display_porcelain_v2(
             .as_ref()
             .and_then(|t| t.get_path(Path::new(path)).ok())
             .map_or_else(git2::Oid::zero, |e| e.id());
-        write_deleted_submodule_entry(path, h_head, &mut out, term)?;
+        write_deleted_submodule_entry(path, h_head, out, null_terminate)?;
     }
 
+    let term = line_terminator(null_terminate);
     for entry in non_submod
         .iter()
         .filter(|e| e.status() == git2::Status::WT_NEW)
     {
-        write!(out, "? {}", entry.path().unwrap_or(""))?;
-        out.write_all(&[term])?;
+        let path = maybe_quote(entry.path().unwrap_or(""), null_terminate, QUOTE_MODE);
+        write!(out, "? {path}{term}")?;
     }
 
     for entry in non_submod
         .iter()
         .filter(|e| e.status().contains(git2::Status::IGNORED))
     {
-        write!(out, "! {}", entry.path().unwrap_or(""))?;
-        out.write_all(&[term])?;
+        let path = maybe_quote(entry.path().unwrap_or(""), null_terminate, QUOTE_MODE);
+        write!(out, "! {path}{term}")?;
     }
 
     Ok(())

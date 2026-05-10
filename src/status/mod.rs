@@ -15,13 +15,17 @@ mod display;
 mod header;
 mod porcelain_v1;
 mod porcelain_v2;
+mod quote;
 mod submodule;
+
+#[cfg(test)]
+mod porcelain_tests;
 
 use clap::ValueEnum;
 use git2::Repository;
+use thiserror::Error;
 
 use std::{io, path::Path};
-use thiserror::Error;
 
 use crate::{
     RepoKind,
@@ -33,6 +37,11 @@ use crate::{
 };
 
 pub use submodule::{compute_local_statuses, deleted_submodule_paths};
+
+/// Line terminator for porcelain output: NUL with `-z`, LF without.
+const fn line_terminator(null_terminate: bool) -> &'static str {
+    if null_terminate { "\0" } else { "\n" }
+}
 
 pub type StatusResult<T> = Result<T, StatusError>;
 
@@ -160,10 +169,13 @@ pub fn status(
         None if repo_kind == RepoKind::WithSubmodules => compute_local_statuses(root_path, &repo)?,
         None => Vec::new(),
     };
-    let submodule_statuses = submodule::apply_ignore_submodules(submodule_statuses, ignore_submodules);
+    let submodule_statuses =
+        submodule::apply_ignore_submodules(submodule_statuses, ignore_submodules);
 
+    let mut out = io::BufWriter::with_capacity(64 * 1024, io::stdout().lock());
     match porcelain {
         Some(PorcelainVersion::V1) => porcelain_v1::display_porcelain_v1(
+            &mut out,
             &repo,
             &non_submodule_statuses,
             &submodule_statuses,
@@ -172,6 +184,7 @@ pub fn status(
             branch,
         )?,
         Some(PorcelainVersion::V2) => porcelain_v2::display_porcelain_v2(
+            &mut out,
             &repo,
             &non_submodule_statuses,
             &submodule_statuses,
@@ -182,6 +195,7 @@ pub fn status(
         // `branch` only governs porcelain output; non-porcelain mode always
         // shows branch info as part of the human-readable header, matching git.
         None => display::display_status(
+            &mut out,
             &repo,
             &non_submodule_statuses,
             &submodule_statuses,

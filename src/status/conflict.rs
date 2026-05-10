@@ -8,15 +8,13 @@ use rustc_hash::FxHashMap;
 
 use super::StatusResult;
 
-pub(super) struct ConflictEntry {
+pub struct ConflictEntry {
     pub ancestor: Option<(u32, git2::Oid)>,
     pub ours: Option<(u32, git2::Oid)>,
     pub theirs: Option<(u32, git2::Oid)>,
 }
 
-pub(super) fn build_conflict_map(
-    index: &git2::Index,
-) -> StatusResult<FxHashMap<String, ConflictEntry>> {
+pub fn build_conflict_map(index: &git2::Index) -> StatusResult<FxHashMap<String, ConflictEntry>> {
     let mut map = FxHashMap::default();
     if !index.has_conflicts() {
         return Ok(map);

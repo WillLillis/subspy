@@ -4,11 +4,7 @@ use git2::Repository;
 
 use std::path::Path;
 
-use crate::{
-    StatusSummary,
-    git::parse_gitmodules,
-    watch::LockFileGuard,
-};
+use crate::{StatusSummary, git::parse_gitmodules, watch::LockFileGuard};
 
 use super::{IgnoreSubmodules, StatusResult};
 
@@ -50,7 +46,7 @@ pub fn deleted_submodule_paths(repo: &Repository) -> StatusResult<Vec<String>> {
 }
 
 /// Masks submodule statuses according to `--ignore-submodules` mode.
-pub(super) fn apply_ignore_submodules(
+pub fn apply_ignore_submodules(
     statuses: Vec<(String, StatusSummary)>,
     mode: IgnoreSubmodules,
 ) -> Vec<(String, StatusSummary)> {

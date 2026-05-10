@@ -212,10 +212,7 @@ fn print_rebase_header(info: &RebaseInfo, stdout: &mut impl Write) -> Result<(),
 
 /// Prints the "Unmerged paths:" section for any conflicts in the index.
 /// Returns `true` if there were conflicts.
-pub(super) fn print_unmerged_paths(
-    repo: &Repository,
-    stdout: &mut impl Write,
-) -> StatusResult<bool> {
+pub fn print_unmerged_paths(repo: &Repository, stdout: &mut impl Write) -> StatusResult<bool> {
     let index = repo.index()?;
     if !index.has_conflicts() {
         return Ok(false);
@@ -356,7 +353,7 @@ fn get_header_state(repo: &Repository) -> StatusResult<HeaderState> {
 
 /// Prints the status header: branch name, upstream tracking info, and any
 /// in-progress operation (rebase, merge, cherry-pick, etc.).
-pub(super) fn print_header(repo: &Repository, stdout: &mut impl Write) -> StatusResult<()> {
+pub fn print_header(repo: &Repository, stdout: &mut impl Write) -> StatusResult<()> {
     let state = get_header_state(repo)?;
     print_header_state(&state, stdout)?;
     Ok(())
