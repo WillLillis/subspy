@@ -64,7 +64,9 @@ fn submodule_xy(st: StatusSummary) -> (char, char) {
     } else {
         ' '
     };
-    let y = if st.intersects(
+    let y = if st.contains(StatusSummary::DELETED_WORKDIR) {
+        'D'
+    } else if st.intersects(
         StatusSummary::NEW_COMMITS
             | StatusSummary::MODIFIED_CONTENT
             | StatusSummary::UNTRACKED_CONTENT,

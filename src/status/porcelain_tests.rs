@@ -258,6 +258,11 @@ const CASES: &[Case] = &[
         setup_submod_new_commits,
     ),
     submodule_case("submodule deleted", &["sub_a"], setup_submod_deleted),
+    submodule_case(
+        "submodule workdir rm -rf",
+        &["sub_a"],
+        setup_submod_rm_rf_workdir,
+    ),
 ];
 
 const fn plain(name: &'static str, setup: fn(&Path)) -> Case {
@@ -300,6 +305,12 @@ fn setup_submod_deleted(h: &TestHarness) {
     // `git rm` the submodule from the parent index -> parent shows the
     // gitlink as deleted (handled via deleted_submodule_paths).
     h.root().run_git(&["rm", "-q", "sub_a"]);
+}
+
+fn setup_submod_rm_rf_workdir(h: &TestHarness) {
+    // Wipe the submodule's workdir but leave the gitlink in HEAD and the
+    // index -> parent shows ` D sub_a` in v1 / `.D` with m_work=0 in v2.
+    std::fs::remove_dir_all(h.submodule("sub_a").path()).unwrap();
 }
 
 /// Translates `OutputOpts` to the equivalent `git status` argv. Mirrors

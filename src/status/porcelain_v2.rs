@@ -112,7 +112,9 @@ fn submodule_xy(st: StatusSummary) -> (char, char) {
     } else {
         '.'
     };
-    let y = if st.intersects(
+    let y = if st.contains(StatusSummary::DELETED_WORKDIR) {
+        'D'
+    } else if st.intersects(
         StatusSummary::NEW_COMMITS
             | StatusSummary::MODIFIED_CONTENT
             | StatusSummary::UNTRACKED_CONTENT,
@@ -315,12 +317,17 @@ fn write_submodule(
     } else {
         0o160_000_u32
     };
+    let m_work = if st.contains(StatusSummary::DELETED_WORKDIR) {
+        0u32
+    } else {
+        0o160_000_u32
+    };
     let path = maybe_quote(path, null_terminate, QUOTE_MODE);
     let term = line_terminator(null_terminate);
     write!(
         out,
         "1 {x}{y} {sub} {:06o} {:06o} {:06o} {h_head} {h_index} {path}{term}",
-        m_head, 0o160_000_u32, 0o160_000_u32
+        m_head, 0o160_000_u32, m_work
     )
 }
 
