@@ -94,6 +94,15 @@ fn is_unstaged(st: StatusSummary) -> bool {
         && !st.contains(StatusSummary::LOCK_FAILURE)
 }
 
+/// Returns the display label for an unstaged submodule entry.
+const fn unstaged_label(st: StatusSummary) -> &'static str {
+    if st.contains(StatusSummary::DELETED_WORKDIR) {
+        "deleted:    "
+    } else {
+        "modified:   "
+    }
+}
+
 /// Returns `true` if `st` has untracked or modified content within the
 /// submodule's working tree. Controls whether the
 /// "(commit or discard the untracked or modified content in submodules)"
@@ -289,7 +298,7 @@ fn print_rebase_header(info: &RebaseInfo, stdout: &mut impl Write) -> Result<(),
             "  (use \"git rebase --abort\" to check out the original branch)"
         )?;
     }
-    writeln!(stdout,)?;
+    writeln!(stdout)?;
 
     Ok(())
 }
@@ -724,14 +733,12 @@ fn print_unstaged_changes(
             )?;
             header = true;
         }
+        let label = unstaged_label(*submod_status);
         let istatus = submod_status.to_string();
         write!(
             stdout,
             "{}",
-            paint(
-                Some(AnsiColor::Red),
-                &format!("\tmodified:   {submod_path}")
-            )
+            paint(Some(AnsiColor::Red), &format!("\t{label}{submod_path}"))
         )?;
         if istatus.is_empty() {
             writeln!(stdout)?;
@@ -932,7 +939,10 @@ fn display_status(
 
     let rm_in_workdir = non_submodule_statuses
         .iter()
-        .any(|e| e.status().contains(git2::Status::WT_DELETED));
+        .any(|e| e.status().contains(git2::Status::WT_DELETED))
+        || submodule_statuses
+            .iter()
+            .any(|(_, st)| st.contains(StatusSummary::DELETED_WORKDIR));
 
     let changes_in_index = print_staged_changes(
         non_submodule_statuses,

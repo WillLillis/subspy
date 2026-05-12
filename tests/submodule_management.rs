@@ -97,6 +97,29 @@ fn remove_submodule_without_commit_shows_deleted_path(_run: u32) {
 }
 
 #[apply(common::repeat)]
+fn rm_rf_submodule_workdir_reported_as_deleted(_run: u32) {
+    let harness = common::HarnessBuilder::new()
+        .submodule("sub_a")
+        .submodule("sub_b")
+        .build();
+    harness.assert_all_clean();
+
+    // Wipe sub_b's workdir without staging anything. The gitlink stays in HEAD
+    // and the index, so this mirrors `git status` showing
+    // `deleted: sub_b` in the unstaged section.
+    std::fs::remove_dir_all(harness.submodule_path("sub_b")).unwrap();
+
+    harness.assert_submodule_status("sub_b", StatusSummary::DELETED_WORKDIR);
+
+    // The deletion is unstaged, so `deleted_submodule_paths` (which captures
+    // gitlinks staged for removal) must remain empty.
+    harness.assert_deleted_submodule_paths(&[]);
+
+    // sub_a should be unaffected.
+    harness.assert_submodule_status("sub_a", StatusSummary::clean());
+}
+
+#[apply(common::repeat)]
 fn remove_submodule_detected_by_server(_run: u32) {
     let mut harness = common::HarnessBuilder::new()
         .submodule("sub_a")

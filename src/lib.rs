@@ -65,6 +65,7 @@ bitflags! {
         const NEW_COMMITS       = 0b0000_0100;
         const STAGED            = 0b0000_1000;
         const STAGED_NEW        = 0b0001_0000;
+        const DELETED_WORKDIR   = 0b0010_0000;
         const LOCK_FAILURE      = 0b1000_0000;
     }
 }
@@ -134,6 +135,9 @@ impl From<git2::SubmoduleStatus> for StatusSummary {
         }
         if value.contains(git2::SubmoduleStatus::WD_UNTRACKED) {
             submod_status |= Self::UNTRACKED_CONTENT;
+        }
+        if value.contains(git2::SubmoduleStatus::WD_DELETED) {
+            submod_status |= Self::DELETED_WORKDIR;
         }
 
         if value.contains(git2::SubmoduleStatus::INDEX_ADDED) {
@@ -252,6 +256,19 @@ mod tests {
     fn from_submodule_status_staged_new() {
         let s = StatusSummary::from(git2::SubmoduleStatus::INDEX_ADDED);
         assert!(s.contains(StatusSummary::STAGED_NEW));
+        assert!(!s.contains(StatusSummary::STAGED));
+    }
+
+    #[test]
+    fn from_submodule_status_wd_deleted() {
+        let s = StatusSummary::from(
+            git2::SubmoduleStatus::IN_HEAD
+                | git2::SubmoduleStatus::IN_INDEX
+                | git2::SubmoduleStatus::WD_DELETED,
+        );
+        assert!(s.contains(StatusSummary::DELETED_WORKDIR));
+        // IN_HEAD+IN_INDEX without INDEX_MODIFIED should not flag STAGED;
+        // the gitlink in HEAD and index is unchanged for an `rm -rf`.
         assert!(!s.contains(StatusSummary::STAGED));
     }
 
