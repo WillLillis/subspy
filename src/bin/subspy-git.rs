@@ -1,35 +1,42 @@
 //! Drop-in replacement for `git` that intercepts `git status` and routes it
-//! through subspy for repositories with many submodules. Every other git
-//! invocation is forwarded to real git unchanged.
+//! through subspy. Every other git invocation is forwarded to git unchanged.
 //!
 //! Designed to be configured as the "Path to git" in tools like
-//! `GitExtensions`: point that setting at the absolute path of this binary
-//! and the rest of the tool's git interactions are unaffected.
-
-#[cfg(unix)]
-use std::os::unix::process::CommandExt as _;
+//! `GitExtensions`, allowing subspy's accelerated status response while the
+//! rest of the tool's git interactions are unaffected.
 
 use std::{
     env,
-    ffi::OsString,
+    ffi::{OsStr, OsString},
+    iter::Peekable,
     path::PathBuf,
     process::{Command, ExitCode},
 };
 
 use subspy::{
     cli::Status,
+    entry::{INTERNAL_FLAG, subspy_entry},
     status::{IgnoreSubmodules, PorcelainVersion, UntrackedFiles},
 };
 
 fn main() -> ExitCode {
-    let argv: Vec<OsString> = env::args_os().skip(1).collect();
-    #[expect(
-        clippy::option_if_let_else,
-        reason = "match is clearer than the map_or_else closure form here"
-    )]
-    match dispatch(&argv) {
-        Some(intercept) => run_intercept(intercept),
-        None => forward(&argv),
+    let mut args = env::args_os();
+    let _ = args.next();
+    let mut rest = args.peekable();
+
+    // spawn_daemon prepends the sentinel so the shim hands off to subspy's
+    // CLI no matter which binary `current_exe()` resolved to.
+    if rest.peek().is_some_and(|arg| arg == INTERNAL_FLAG) {
+        return subspy_entry(env::args_os());
+    }
+
+    // If the command is a status request that subspy can service, intercept it.
+    #[expect(clippy::option_if_let_else, reason = "comment readability")]
+    if let Some(intercept) = dispatch(rest) {
+        shim_entry(intercept.into())
+    } else {
+        // Otherwise forward the command to git
+        forward_entry(env::args_os().skip(1))
     }
 }
 
@@ -53,106 +60,139 @@ struct StatusArgs {
     branch: bool,
 }
 
-impl Intercept {
-    fn into_status(self) -> Status {
-        Status {
-            dir: self.chdir,
+impl From<Intercept> for Status {
+    fn from(value: Intercept) -> Self {
+        Self {
+            dir: value.chdir,
             log_level: None,
             no_server: false,
-            porcelain: self.args.porcelain,
-            null_terminate: self.args.null_terminate,
-            ignore_submodules: self.args.ignore_submodules,
-            untracked_files: self.args.untracked_files,
-            ignored: self.args.show_ignored,
-            branch: self.args.branch,
+            porcelain: value.args.porcelain,
+            null_terminate: value.args.null_terminate,
+            ignore_submodules: value.args.ignore_submodules,
+            untracked_files: value.args.untracked_files,
+            ignored: value.args.show_ignored,
+            branch: value.args.branch,
         }
     }
 }
 
 /// Walk argv looking for an interceptable `status` invocation.
 ///
-/// Returns `Some(intercept)` if every global option is one we know is safe
-/// to honor or ignore AND the subcommand is `status` AND every status flag
-/// is one subspy supports. Returns `None` for anything else. The caller
-/// should forward the original argv to real git.
-fn dispatch(argv: &[OsString]) -> Option<Intercept> {
-    // Require UTF-8 throughout.
-    let argv: Vec<&str> = argv
-        .iter()
-        .map(|s| s.to_str())
-        .collect::<Option<Vec<_>>>()?;
-
+/// Returns `Some(intercept)` if every global option was one we know is
+/// safe to honor or ignore, the subcommand was `status`, and every status
+/// flag was one subspy supports. Returns `None` for anything else; the
+/// caller should re-fetch argv from `env::args_os()` and forward to real
+/// git (dispatch may have partially drained `rest` on its way to `None`).
+fn dispatch<I>(mut rest: Peekable<I>) -> Option<Intercept>
+where
+    I: Iterator<Item = OsString>,
+{
     let mut intercept = Intercept::default();
-    let mut i = 0;
 
-    while i < argv.len() {
-        let arg = argv[i];
-
-        // First positional argument is the subcommand.
-        if !arg.starts_with('-') {
-            if arg != "status" {
-                return None;
+    while let Some(os_arg) = rest.next() {
+        match classify_global(&os_arg, rest.peek(), &mut intercept) {
+            GlobalAction::Skip => {}
+            GlobalAction::SkipWithValue => {
+                rest.next()?;
             }
-            intercept.args = parse_status_args(&argv[i + 1..])?;
-            return Some(intercept);
+            GlobalAction::StatusFollows => {
+                intercept.args = parse_status_args(&mut rest)?;
+                return Some(intercept);
+            }
+            GlobalAction::Unknown => return None,
         }
-
-        i += consume_global(arg, argv.get(i + 1).copied(), &mut intercept)?;
     }
-
     // Reached end of args with no subcommand (e.g. bare `git`, or `git -p`).
     None
 }
 
-/// Try to consume a single global option. Returns `None` to forward to real git.
-fn consume_global(arg: &str, next: Option<&str>, intercept: &mut Intercept) -> Option<usize> {
+/// What dispatch should do after seeing a single arg in the global-option
+/// stream. `Skip` and `SkipWithValue` mean dispatch keeps walking; the
+/// latter signals that the next arg is the value (e.g. `-C <path>`).
+enum GlobalAction {
+    Skip,
+    SkipWithValue,
+    StatusFollows,
+    Unknown,
+}
+
+/// Classifies a single arg in the pre-subcommand stream. Peeks the next
+/// arg only via `&str` so the caller still owns the iterator and can
+/// decide whether to advance.
+fn classify_global(
+    os_arg: &OsStr,
+    next: Option<&OsString>,
+    intercept: &mut Intercept,
+) -> GlobalAction {
+    let Some(arg) = os_arg.to_str() else {
+        return GlobalAction::Unknown;
+    };
+    if !arg.starts_with('-') {
+        return if arg == "status" {
+            GlobalAction::StatusFollows
+        } else {
+            GlobalAction::Unknown
+        };
+    }
+    let next_str = next.and_then(|o| o.to_str());
+    consume_global(arg, next_str, intercept)
+}
+
+/// Try to consume a single global option. Returns `Unknown` to forward to
+/// real git, `Skip` if it was a self-contained recognized flag, or
+/// `SkipWithValue` if the next arg is its value.
+fn consume_global(arg: &str, next: Option<&str>, intercept: &mut Intercept) -> GlobalAction {
     // -C handling: -C path | -Cpath | -C=path
     if let Some(rest) = arg.strip_prefix("-C") {
         if rest.is_empty() {
             // Multiple -C is rare and composes oddly across relative paths;
             // just forward in that case rather than getting it subtly wrong.
             if intercept.chdir.is_some() {
-                return None;
+                return GlobalAction::Unknown;
             }
-            let path = next?;
+            let Some(path) = next else {
+                return GlobalAction::Unknown;
+            };
             intercept.chdir = Some(PathBuf::from(path));
-            return Some(2);
+            return GlobalAction::SkipWithValue;
         }
         if intercept.chdir.is_some() {
-            return None;
+            return GlobalAction::Unknown;
         }
         let path = rest.strip_prefix('=').unwrap_or(rest);
         intercept.chdir = Some(PathBuf::from(path));
-        return Some(1);
+        return GlobalAction::Skip;
     }
 
     // -c handling: -c key=val | -ckey=val. We don't read git config from the
     // shim, but the value still has to be consumed correctly.
     if let Some(rest) = arg.strip_prefix("-c") {
         if rest.is_empty() {
-            next?;
-            return Some(2);
+            return if next.is_some() {
+                GlobalAction::SkipWithValue
+            } else {
+                GlobalAction::Unknown
+            };
         }
-        return Some(1);
+        return GlobalAction::Skip;
     }
 
     // Long options. Split off any `=value` so we can match on the bare name.
     if let Some(body) = arg.strip_prefix("--") {
-        let (name, has_attached) = match body.split_once('=') {
-            Some((n, _)) => (n, true),
-            None => (body, false),
-        };
+        let (name, has_attached) = body
+            .split_once('=')
+            .map_or((body, false), |(n, _)| (n, true));
         return classify_long_global(name, has_attached, next);
     }
 
     // Short flags without value.
     match arg {
-        "-p" | "-P" => Some(1),
-        _ => None, // unknown short option: forward
+        "-p" | "-P" => GlobalAction::Skip,
+        _ => GlobalAction::Unknown, // unknown short option: forward
     }
 }
 
-fn classify_long_global(name: &str, has_attached: bool, next: Option<&str>) -> Option<usize> {
+fn classify_long_global(name: &str, has_attached: bool, next: Option<&str>) -> GlobalAction {
     // Safe boolean globals - ignore.
     if matches!(
         name,
@@ -163,18 +203,23 @@ fn classify_long_global(name: &str, has_attached: bool, next: Option<&str>) -> O
             | "no-advice"
             | "literal-pathspecs"
     ) {
-        // These don't take values; if the caller wrote `--paginate=foo`, that's
-        // malformed for git - forward and let git produce the error.
-        return if has_attached { None } else { Some(1) };
+        // If the caller wrote `--paginate=foo` (malformed), forward and let git
+        // produce the error.
+        return if has_attached {
+            GlobalAction::Unknown
+        } else {
+            GlobalAction::Skip
+        };
     }
 
     // --config-env=name=envvar | --config-env name=envvar -- ignore.
     if name == "config-env" {
         return if has_attached {
-            Some(1)
+            GlobalAction::Skip
+        } else if next.is_some() {
+            GlobalAction::SkipWithValue
         } else {
-            next?;
-            Some(2)
+            GlobalAction::Unknown
         };
     }
 
@@ -182,102 +227,114 @@ fn classify_long_global(name: &str, has_attached: bool, next: Option<&str>) -> O
     // (--git-dir, --work-tree, --namespace, --exec-path, --super-prefix,
     // --list-cmds, --attr-source, --bare, pathspec globbing flags) or is a
     // terminal action (--help, --version, --html-path, etc.).
-    None
+    GlobalAction::Unknown
 }
 
 /// Validate the args after `status`. Returns `None` if any flag is one
 /// subspy doesn't support, or if a positional pathspec follows.
-fn parse_status_args(args: &[&str]) -> Option<StatusArgs> {
+fn parse_status_args<I>(rest: &mut I) -> Option<StatusArgs>
+where
+    I: Iterator<Item = OsString>,
+{
     let mut out = StatusArgs::default();
-    let mut i = 0;
     let mut seen_double_dash = false;
 
-    while i < args.len() {
-        let arg = args[i];
-
-        if seen_double_dash {
-            // Anything after `--` is a pathspec. Subspy doesn't filter by path.
+    for os_arg in rest.by_ref() {
+        if !os_arg
+            .to_str()
+            .is_some_and(|arg| classify_status_arg(arg, &mut out, &mut seen_double_dash))
+        {
             return None;
         }
+    }
+    Some(out)
+}
 
-        if arg == "--" {
-            seen_double_dash = true;
-            i += 1;
-            continue;
-        }
-
-        // Bare positional after `status` -> pathspec, forward.
-        if !arg.starts_with('-') {
-            return None;
-        }
-
-        // --porcelain | --porcelain=N
-        if arg == "--porcelain" {
-            out.porcelain = Some(PorcelainVersion::V1);
-            i += 1;
-            continue;
-        }
-        if let Some(v) = arg.strip_prefix("--porcelain=") {
-            out.porcelain = Some(parse_porcelain(v)?);
-            i += 1;
-            continue;
-        }
-
-        if arg == "-z" {
-            out.null_terminate = true;
-            i += 1;
-            continue;
-        }
-
-        // --ignore-submodules[=WHEN]
-        if arg == "--ignore-submodules" {
-            out.ignore_submodules = IgnoreSubmodules::All;
-            i += 1;
-            continue;
-        }
-        if let Some(v) = arg.strip_prefix("--ignore-submodules=") {
-            out.ignore_submodules = parse_ignore_submodules(v)?;
-            i += 1;
-            continue;
-        }
-
-        // --untracked-files[=MODE] | -u | -uMODE
-        // Per git-status(1) the optional MODE defaults to `all`.
-        if arg == "--untracked-files" || arg == "-u" {
-            out.untracked_files = Some(UntrackedFiles::All);
-            i += 1;
-            continue;
-        }
-        if let Some(v) = arg.strip_prefix("--untracked-files=") {
-            out.untracked_files = Some(parse_untracked(v)?);
-            i += 1;
-            continue;
-        }
-        if let Some(v) = arg.strip_prefix("-u") {
-            out.untracked_files = Some(parse_untracked(v)?);
-            i += 1;
-            continue;
-        }
-
-        // --ignored (no =MODE form supported; subspy doesn't expose ignored modes)
-        if arg == "--ignored" {
-            out.show_ignored = true;
-            i += 1;
-            continue;
-        }
-
-        // --branch | -b: emit `# branch.*` headers in porcelain modes.
-        if arg == "--branch" || arg == "-b" {
-            out.branch = true;
-            i += 1;
-            continue;
-        }
-
-        // Anything else: forward to real git.
-        return None;
+/// Per-arg classifier for status flags. Returns `true` if the arg was
+/// recognized (and `out` / `seen_double_dash` updated). Returns `false`
+/// for anything that should make dispatch fall back to forwarding.
+fn classify_status_arg(arg: &str, out: &mut StatusArgs, seen_double_dash: &mut bool) -> bool {
+    // Anything after `--` is a pathspec. Subspy doesn't filter by path.
+    if *seen_double_dash {
+        return false;
+    }
+    if arg == "--" {
+        *seen_double_dash = true;
+        return true;
+    }
+    // Bare positional after `status` -> pathspec, forward.
+    if !arg.starts_with('-') {
+        return false;
     }
 
-    Some(out)
+    // --porcelain | --porcelain=N
+    if arg == "--porcelain" {
+        out.porcelain = Some(PorcelainVersion::V1);
+        return true;
+    }
+    if let Some(v) = arg.strip_prefix("--porcelain=") {
+        return match parse_porcelain(v) {
+            Some(p) => {
+                out.porcelain = Some(p);
+                true
+            }
+            None => false,
+        };
+    }
+
+    if arg == "-z" {
+        out.null_terminate = true;
+        return true;
+    }
+
+    // --ignore-submodules[=WHEN]
+    if arg == "--ignore-submodules" {
+        out.ignore_submodules = IgnoreSubmodules::All;
+        return true;
+    }
+    if let Some(v) = arg.strip_prefix("--ignore-submodules=") {
+        return match parse_ignore_submodules(v) {
+            Some(ignore) => {
+                out.ignore_submodules = ignore;
+                true
+            }
+            None => false,
+        };
+    }
+
+    // --untracked-files[=MODE] | -u | -uMODE
+    // Per git-status(1) the optional MODE defaults to `all`.
+    if arg == "--untracked-files" || arg == "-u" {
+        out.untracked_files = Some(UntrackedFiles::All);
+        return true;
+    }
+    if let Some(v) = arg
+        .strip_prefix("--untracked-files=")
+        .or_else(|| arg.strip_prefix("-u"))
+    {
+        return match parse_untracked(v) {
+            Some(u) => {
+                out.untracked_files = Some(u);
+                true
+            }
+            None => false,
+        };
+    }
+
+    // --ignored (no =MODE form supported; subspy doesn't expose ignored modes)
+    if arg == "--ignored" {
+        out.show_ignored = true;
+        return true;
+    }
+
+    // --branch | -b: emit `# branch.*` headers in porcelain modes.
+    if arg == "--branch" || arg == "-b" {
+        out.branch = true;
+        return true;
+    }
+
+    // Anything else: forward to real git.
+    false
 }
 
 fn parse_porcelain(s: &str) -> Option<PorcelainVersion> {
@@ -307,9 +364,8 @@ fn parse_untracked(s: &str) -> Option<UntrackedFiles> {
     }
 }
 
-fn run_intercept(intercept: Intercept) -> ExitCode {
-    let status = intercept.into_status();
-    match status.run() {
+fn shim_entry(status_args: Status) -> ExitCode {
+    match status_args.run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             eprintln!("subspy-git: {err}");
@@ -319,15 +375,27 @@ fn run_intercept(intercept: Intercept) -> ExitCode {
 }
 
 #[cfg(unix)]
-fn forward(argv: &[OsString]) -> ExitCode {
+fn forward_entry<I, S>(argv: I) -> ExitCode
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    use std::os::unix::process::CommandExt as _;
     let err = Command::new("git").args(argv).exec();
     eprintln!("subspy-git: failed to exec `git`: {err}");
     ExitCode::FAILURE
 }
 
-#[cfg(not(unix))]
-fn forward(argv: &[OsString]) -> ExitCode {
-    match Command::new("git").args(argv).status() {
+#[cfg(windows)]
+fn forward_entry<I, S>(argv: I) -> ExitCode
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    let mut cmd = Command::new("git");
+    cmd.args(argv);
+    subspy::proc::configure_hidden_console(&mut cmd);
+    match cmd.status() {
         Ok(status) => status
             .code()
             .and_then(|c| u8::try_from(c).ok())
@@ -341,7 +409,13 @@ fn forward(argv: &[OsString]) -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{dispatch as dispatch_iter, *};
+
+    /// Test-only adapter that materializes args into a peekable iterator
+    /// so existing tests can keep passing `&[OsString]`.
+    fn dispatch(argv: &[OsString]) -> Option<Intercept> {
+        dispatch_iter(argv.iter().cloned().peekable())
+    }
 
     fn os(args: &[&str]) -> Vec<OsString> {
         args.iter().map(|s| OsString::from(*s)).collect()
@@ -611,6 +685,14 @@ mod tests {
         assert!(got.args.null_terminate);
         assert_eq!(got.args.untracked_files, Some(UntrackedFiles::All));
         assert_eq!(got.args.ignore_submodules, IgnoreSubmodules::All);
+    }
+
+    /// The sentinel is routed by `main()` before `dispatch()` ever sees it.
+    /// If a refactor ever lets it through, the git-intercept layer should
+    /// still refuse to claim it instead of silently forwarding nonsense.
+    #[test]
+    fn internal_flag_is_not_intercepted_by_dispatch() {
+        assert!(dispatch(&os(&[INTERNAL_FLAG, "start", "/path", "--foreground"])).is_none());
     }
 
     /// `GitExtensions`'s no-locks variant of the commit dialog invocation.
