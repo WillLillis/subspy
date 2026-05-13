@@ -1,12 +1,14 @@
 //! Human-readable `git status` output, including the staged/unstaged/untracked
 //! sections, summary footer, and submodule lock-failure errors.
 
-use anstyle::AnsiColor;
 use git2::{Repository, Statuses};
 
 use std::io::{self, Write};
 
-use crate::{StatusSummary, paint};
+use crate::{
+    StatusSummary,
+    paint::{GREEN, Paint, RED},
+};
 
 use super::{
     StatusResult,
@@ -124,17 +126,17 @@ fn print_staged_changes(
             (Some(old), Some(new)) if old != new => writeln!(
                 stdout,
                 "{}",
-                paint(
-                    Some(AnsiColor::Green),
-                    &format!("\t{istatus}{} -> {}", old.display(), new.display()),
+                Paint(
+                    GREEN,
+                    format_args!("\t{istatus}{} -> {}", old.display(), new.display()),
                 )
             )?,
             (old, new) => writeln!(
                 stdout,
                 "{}",
-                paint(
-                    Some(AnsiColor::Green),
-                    &format!("\t{istatus}{}", old.or(new).unwrap().display()),
+                Paint(
+                    GREEN,
+                    format_args!("\t{istatus}{}", old.or(new).unwrap().display()),
                 )
             )?,
         }
@@ -145,11 +147,7 @@ fn print_staged_changes(
             writeln!(stdout, "{STAGED_HEADER}")?;
             header = true;
         }
-        writeln!(
-            stdout,
-            "{}",
-            paint(Some(AnsiColor::Green), &format!("\tdeleted:    {path}"))
-        )?;
+        writeln!(stdout, "{}", Paint(GREEN, format_args!("\tdeleted:    {path}")))?;
     }
 
     for (submod_path, st) in submodule_statuses.iter().filter(|(_, st)| is_staged(*st)) {
@@ -158,11 +156,7 @@ fn print_staged_changes(
             header = true;
         }
         let label = staged_label(*st);
-        writeln!(
-            stdout,
-            "{}",
-            paint(Some(AnsiColor::Green), &format!("\t{label}{submod_path}"))
-        )?;
+        writeln!(stdout, "{}", Paint(GREEN, format_args!("\t{label}{submod_path}")))?;
     }
 
     if header {
@@ -213,17 +207,17 @@ fn print_unstaged_changes(
             (Some(old), Some(new)) if old != new => writeln!(
                 stdout,
                 "{}",
-                paint(
-                    Some(AnsiColor::Red),
-                    &format!("\t{istatus}{} -> {}", old.display(), new.display()),
+                Paint(
+                    RED,
+                    format_args!("\t{istatus}{} -> {}", old.display(), new.display()),
                 )
             )?,
             (old, new) => writeln!(
                 stdout,
                 "{}",
-                paint(
-                    Some(AnsiColor::Red),
-                    &format!("\t{istatus}{}", old.or(new).unwrap().display()),
+                Paint(
+                    RED,
+                    format_args!("\t{istatus}{}", old.or(new).unwrap().display()),
                 )
             )?,
         }
@@ -241,11 +235,7 @@ fn print_unstaged_changes(
         }
         let label = unstaged_label(*submod_status);
         let istatus = submod_status.to_string();
-        write!(
-            stdout,
-            "{}",
-            paint(Some(AnsiColor::Red), &format!("\t{label}{submod_path}"))
-        )?;
+        write!(stdout, "{}", Paint(RED, format_args!("\t{label}{submod_path}")))?;
         if istatus.is_empty() {
             writeln!(stdout)?;
         } else {
@@ -279,11 +269,7 @@ fn print_untracked_files(
             writeln!(stdout, "{UNTRACKED_HEADER}")?;
             header = true;
         }
-        writeln!(
-            stdout,
-            "\t{}",
-            paint(Some(AnsiColor::Red), &format!("{}", file.display()))
-        )?;
+        writeln!(stdout, "\t{}", Paint(RED, format_args!("{}", file.display())))?;
     }
     if header {
         writeln!(stdout)?;

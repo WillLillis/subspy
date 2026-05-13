@@ -5,7 +5,6 @@
 
 use std::borrow::Cow;
 
-use anstyle::{Color, Style};
 use bincode::{BorrowDecode, Encode};
 use bitflags::bitflags;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -17,6 +16,7 @@ pub mod debug;
 pub mod entry;
 pub mod git;
 pub mod list;
+pub mod paint;
 pub mod proc;
 pub mod prompt;
 pub mod reindex;
@@ -154,11 +154,6 @@ impl From<git2::SubmoduleStatus> for StatusSummary {
 
         submod_status
     }
-}
-
-pub fn paint(color: Option<impl Into<Color>>, text: &str) -> String {
-    let style = Style::new().fg_color(color.map(Into::into));
-    format!("{style}{text}{style:#}")
 }
 
 /// Creates a new styled `indicatif::ProgressBar`

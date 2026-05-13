@@ -6,7 +6,6 @@
 //! git uses, plus the `On branch X` / `HEAD detached at Y` line and
 //! upstream tracking summary for the normal case.
 
-use anstyle::AnsiColor;
 use git2::Repository;
 
 use std::{
@@ -15,7 +14,7 @@ use std::{
     io::{self, Write},
 };
 
-use crate::paint;
+use crate::paint::{Paint, RED};
 
 use super::StatusResult;
 
@@ -125,7 +124,7 @@ fn print_rebase_header(info: &RebaseInfo, stdout: &mut impl Write) -> Result<(),
     writeln!(
         stdout,
         "{} {}",
-        paint(Some(AnsiColor::Red), &format!("{label} in progress?; onto")),
+        Paint(RED, format_args!("{label} in progress?; onto")),
         info.onto_short
     )?;
 
@@ -251,11 +250,7 @@ pub fn print_unmerged_paths(repo: &Repository, stdout: &mut impl Write) -> Statu
             (false, false, true) => "added by them:   ",
             (false, false, false) => "both modified:   ",
         };
-        writeln!(
-            stdout,
-            "{}",
-            paint(Some(AnsiColor::Red), &format!("\t{type_str}{path}"))
-        )?;
+        writeln!(stdout, "{}", Paint(RED, format_args!("\t{type_str}{path}")))?;
     }
     writeln!(stdout)?;
     Ok(true)
@@ -495,7 +490,7 @@ fn current_branch_display(head_ref: &git2::Reference<'_>) -> String {
     if !head_ref.is_branch() {
         return format!(
             "{} {}",
-            paint(Some(AnsiColor::Red), "HEAD detached at"),
+            Paint(RED, "HEAD detached at"),
             head_ref.target().map_or_else(
                 || "unknown".to_string(),
                 |oid| oid.to_string().chars().take(7).collect()

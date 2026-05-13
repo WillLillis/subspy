@@ -9,7 +9,6 @@
 
 use std::{ffi::OsString, process::ExitCode};
 
-use anstyle::AnsiColor;
 use clap::{Command, FromArgMatches as _, Subcommand as _};
 use etcetera::BaseStrategy as _;
 use flexi_logger::{FileSpec, Logger, WriteMode};
@@ -18,7 +17,7 @@ use log::{error, info};
 use crate::{
     cli::{Commands, LogLevel, RunResult},
     git::configure_git2,
-    paint,
+    paint::{Paint, RED},
 };
 
 /// Internal-only argv marker, prepended by `spawn_daemon` so the receiving
@@ -40,7 +39,7 @@ where
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             if !err.to_string().is_empty() {
-                eprintln!("{}: {err}", paint(Some(AnsiColor::Red), "Error"));
+                eprintln!("{}: {err}", Paint(RED, "Error"));
             }
             ExitCode::FAILURE
         }
