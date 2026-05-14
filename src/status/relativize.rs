@@ -51,18 +51,17 @@ impl<'a> Relativizer<'a> {
     }
 
     /// Streams the cwd-relative form of `path` (a repo-relative path)
-    /// into `out`. No quoting is applied - matches git's human display
-    /// (and porcelain `-z`) behavior of emitting paths verbatim.
+    /// into `out`, applying [`QuoteMode::Standard`] C-style quoting -
+    /// matching real git's human display under the default
+    /// `core.quotePath=true`. Paths containing control characters, high
+    /// bytes, `"`, or `\` get wrapped in `"..."` with escapes; ordinary
+    /// paths are emitted verbatim.
     ///
     /// # Errors
     ///
     /// Returns any `io::Error` raised by writing.
     pub fn write_to<W: io::Write>(&self, out: &mut W, path: &str) -> io::Result<()> {
-        let (ups, remaining) = self.split(path);
-        for _ in 0..ups {
-            out.write_all(b"../")?;
-        }
-        out.write_all(remaining.as_bytes())
+        self.write_quoted(out, path, false, QuoteMode::Standard)
     }
 
     /// Streams the cwd-relative form of `path` with porcelain quoting
@@ -204,5 +203,29 @@ mod tests {
         assert_eq!(Relativizer::new("a").cwd_components, 1);
         assert_eq!(Relativizer::new("a/b").cwd_components, 2);
         assert_eq!(Relativizer::new("a/b/c").cwd_components, 3);
+    }
+
+    #[test]
+    fn write_to_applies_standard_quoting_to_high_bytes() {
+        // High-byte (UTF-8 e-acute) triggers Standard quoting per git's
+        // default `core.quotePath=true`.
+        assert_eq!(formatted("", "caf\u{00e9}.txt"), r#""caf\303\251.txt""#);
+    }
+
+    #[test]
+    fn write_to_applies_standard_quoting_with_subdir_prefix() {
+        // `../` prefix from subdir relativization sits inside the quotes
+        // when the suffix needs escaping.
+        assert_eq!(
+            formatted("src", "caf\u{00e9}.txt"),
+            r#""../caf\303\251.txt""#
+        );
+    }
+
+    #[test]
+    fn write_to_does_not_quote_plain_ascii() {
+        // Regression: the quoting switch must not wrap unremarkable paths.
+        assert_eq!(formatted("", "main.rs"), "main.rs");
+        assert_eq!(formatted("src", "src/main.rs"), "main.rs");
     }
 }
