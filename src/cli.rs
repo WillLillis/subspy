@@ -307,11 +307,11 @@ impl DebugDump {
     ///
     /// Returns `Err` if the project path is invalid or the operation fails.
     pub fn run(self) -> RunResult<()> {
-        let (true_path, repo_kind) = get_project_path(self.dir)?;
-        if repo_kind != RepoKind::WithSubmodules {
-            return Err(RunError::server_path(true_path));
+        let project = get_project_path(self.dir)?;
+        if project.kind != RepoKind::WithSubmodules {
+            return Err(RunError::server_path(project.repo_root));
         }
-        Ok(debug(true_path.as_path())?)
+        Ok(debug(&project.repo_root)?)
     }
 }
 
@@ -322,13 +322,13 @@ impl Reindex {
     ///
     /// Returns `Err` if the project path is invalid or the operation fails.
     pub fn run(self) -> RunResult<()> {
-        let (true_path, repo_kind) = get_project_path(self.dir)?;
-        if repo_kind != RepoKind::WithSubmodules {
-            return Err(RunError::server_path(true_path));
+        let project = get_project_path(self.dir)?;
+        if project.kind != RepoKind::WithSubmodules {
+            return Err(RunError::server_path(project.repo_root));
         }
         let display_progress = std::io::stderr().is_terminal();
         Ok(reindex(
-            true_path.as_path(),
+            &project.repo_root,
             self.replace_watchers,
             display_progress,
         )?)
@@ -342,11 +342,11 @@ impl Stop {
     ///
     /// Returns `Err` if the project path is invalid or the operation fails.
     pub fn run(self) -> RunResult<()> {
-        let (true_path, repo_kind) = get_project_path(self.dir)?;
-        if repo_kind != RepoKind::WithSubmodules {
-            return Err(RunError::server_path(true_path));
+        let project = get_project_path(self.dir)?;
+        if project.kind != RepoKind::WithSubmodules {
+            return Err(RunError::server_path(project.repo_root));
         }
-        Ok(shutdown(true_path.as_path())?)
+        Ok(shutdown(&project.repo_root)?)
     }
 }
 
@@ -357,14 +357,17 @@ impl Status {
     ///
     /// Returns `Err` if the project path is invalid or the operation fails.
     pub fn run(self) -> RunResult<()> {
-        let (true_path, repo_kind) = get_project_path(self.dir)?;
+        // `effective_cwd` is the canonicalized --dir argument (or the
+        // process cwd if --dir was absent), reused as the baseline for
+        // path-formatting in status output. Mirrors `git -C <path>`'s
+        // semantics.
+        let project = get_project_path(self.dir)?;
         let display_progress = std::io::stderr().is_terminal();
         let use_server = !self.no_server
-            && repo_kind == RepoKind::WithSubmodules
+            && project.kind == RepoKind::WithSubmodules
             && self.ignore_submodules != IgnoreSubmodules::All;
         Ok(status(
-            true_path.as_path(),
-            repo_kind,
+            &project,
             display_progress,
             use_server,
             OutputOpts {
@@ -386,13 +389,13 @@ impl Prompt {
     ///
     /// Returns `Err` if the project path is invalid or the operation fails.
     pub fn run(self) -> RunResult<()> {
-        let (true_path, repo_kind) = get_project_path(self.dir)?;
-        if repo_kind != RepoKind::WithSubmodules {
+        let project = get_project_path(self.dir)?;
+        if project.kind != RepoKind::WithSubmodules {
             return Ok(());
         }
         let timeout = Duration::from_millis(self.timeout_ms);
         prompt(
-            true_path.as_path(),
+            &project.repo_root,
             !self.no_server,
             self.format.as_deref(),
             timeout,
@@ -408,10 +411,10 @@ impl List {
     ///
     /// Returns `Err` if the project path is invalid or the operation fails.
     pub fn run(self) -> RunResult<()> {
-        let (true_path, repo_kind) = get_project_path(self.dir)?;
-        let no_server = self.no_server || repo_kind != RepoKind::WithSubmodules;
+        let project = get_project_path(self.dir)?;
+        let no_server = self.no_server || project.kind != RepoKind::WithSubmodules;
         Ok(list(
-            true_path.as_path(),
+            &project.repo_root,
             self.format.as_deref(),
             !self.no_header,
             no_server,
@@ -426,32 +429,40 @@ impl Start {
     ///
     /// Returns `Err` if the project path is invalid or the operation fails.
     pub fn run(self) -> RunResult<()> {
-        let (true_path, repo_kind) = get_project_path(self.dir)?;
-        if repo_kind != RepoKind::WithSubmodules {
-            return Err(RunError::server_path(true_path));
+        let project = get_project_path(self.dir)?;
+        if project.kind != RepoKind::WithSubmodules {
+            return Err(RunError::server_path(project.repo_root));
         }
 
         if self.foreground {
-            Ok(watch(true_path.as_path(), std::io::stderr().is_terminal())?)
+            Ok(watch(&project.repo_root, std::io::stderr().is_terminal())?)
         } else {
             let level_str = self.log_level.map(|l| l.to_string());
-            spawn_daemon(&true_path, level_str.as_deref()).map_err(WatchError::from)?;
+            spawn_daemon(&project.repo_root, level_str.as_deref()).map_err(WatchError::from)?;
             Ok(())
         }
     }
 }
 
+/// Resolved project paths: the repo root, the canonical effective cwd
+/// (the argument the caller provided or `current_dir()` if none), and
+/// the kind of repository.
+#[derive(Debug)]
+pub struct ProjectPath {
+    pub repo_root: PathBuf,
+    pub effective_cwd: PathBuf,
+    pub kind: RepoKind,
+}
+
 /// Uses `path` if present or uses the current working directory. Ensures the resolved path
 /// is a git repository or a child of one.
-///
-/// If found, returns the path to the repository and the kind of repository.
 ///
 /// # Errors
 ///
 /// Returns `Err` if the current working directory cannot be resolved (when
 /// `path` is `None`), the path cannot be canonicalized, or no git repository
 /// is found in the path or any of its ancestors.
-pub fn get_project_path(path: Option<PathBuf>) -> RunResult<(PathBuf, RepoKind)> {
+pub fn get_project_path(path: Option<PathBuf>) -> RunResult<ProjectPath> {
     let path = match path {
         Some(p) => p,
         None => current_dir().map_err(|error| RunError::ProjectPath {
@@ -459,26 +470,27 @@ pub fn get_project_path(path: Option<PathBuf>) -> RunResult<(PathBuf, RepoKind)>
             error,
         })?,
     };
-    let true_path = dunce::canonicalize(&path).map_err(|error| RunError::ProjectPath {
+    let effective_cwd = dunce::canonicalize(&path).map_err(|error| RunError::ProjectPath {
         path: path.clone(),
         error,
     })?;
 
-    let mut current_path = true_path.as_path();
+    let mut current_path = effective_cwd.as_path();
     loop {
         let dot_git_path = current_path.join(DOT_GIT);
         if dot_git_path.exists() {
-            if dot_git_path.is_file() {
-                return Ok((current_path.to_path_buf(), RepoKind::Submodule));
-            }
-            let dot_gitmodules_path = current_path.join(DOT_GITMODULES);
-            let has_gitmodules = dot_gitmodules_path.is_file();
-            let repo_kind = if has_gitmodules {
+            let kind = if dot_git_path.is_file() {
+                RepoKind::Submodule
+            } else if current_path.join(DOT_GITMODULES).is_file() {
                 RepoKind::WithSubmodules
             } else {
                 RepoKind::Normal
             };
-            return Ok((current_path.to_path_buf(), repo_kind));
+            return Ok(ProjectPath {
+                repo_root: current_path.to_path_buf(),
+                effective_cwd,
+                kind,
+            });
         }
         current_path = match current_path.parent() {
             Some(p) => p,
@@ -517,9 +529,9 @@ mod tests {
         setup_git_dir(tmp.path());
         setup_gitmodules(tmp.path());
 
-        let (path, kind) = get_project_path(Some(tmp.path().to_path_buf())).unwrap();
-        assert_eq!(path, dunce::canonicalize(tmp.path()).unwrap());
-        assert_eq!(kind, RepoKind::WithSubmodules);
+        let project = get_project_path(Some(tmp.path().to_path_buf())).unwrap();
+        assert_eq!(project.repo_root, dunce::canonicalize(tmp.path()).unwrap());
+        assert_eq!(project.kind, RepoKind::WithSubmodules);
     }
 
     #[test]
@@ -527,9 +539,9 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         setup_git_dir(tmp.path());
 
-        let (path, kind) = get_project_path(Some(tmp.path().to_path_buf())).unwrap();
-        assert_eq!(path, dunce::canonicalize(tmp.path()).unwrap());
-        assert_eq!(kind, RepoKind::Normal);
+        let project = get_project_path(Some(tmp.path().to_path_buf())).unwrap();
+        assert_eq!(project.repo_root, dunce::canonicalize(tmp.path()).unwrap());
+        assert_eq!(project.kind, RepoKind::Normal);
     }
 
     #[test]
@@ -537,9 +549,9 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         setup_git_file(tmp.path());
 
-        let (path, kind) = get_project_path(Some(tmp.path().to_path_buf())).unwrap();
-        assert_eq!(path, dunce::canonicalize(tmp.path()).unwrap());
-        assert_eq!(kind, RepoKind::Submodule);
+        let project = get_project_path(Some(tmp.path().to_path_buf())).unwrap();
+        assert_eq!(project.repo_root, dunce::canonicalize(tmp.path()).unwrap());
+        assert_eq!(project.kind, RepoKind::Submodule);
     }
 
     #[test]
@@ -551,9 +563,10 @@ mod tests {
         let child = tmp.path().join("some").join("nested").join("dir");
         std::fs::create_dir_all(&child).unwrap();
 
-        let (path, kind) = get_project_path(Some(child)).unwrap();
-        assert_eq!(path, dunce::canonicalize(tmp.path()).unwrap());
-        assert_eq!(kind, RepoKind::WithSubmodules);
+        let project = get_project_path(Some(child.clone())).unwrap();
+        assert_eq!(project.repo_root, dunce::canonicalize(tmp.path()).unwrap());
+        assert_eq!(project.effective_cwd, dunce::canonicalize(&child).unwrap());
+        assert_eq!(project.kind, RepoKind::WithSubmodules);
     }
 
     #[test]
@@ -577,8 +590,8 @@ mod tests {
         setup_git_file(tmp.path());
         setup_gitmodules(tmp.path());
 
-        let (_, kind) = get_project_path(Some(tmp.path().to_path_buf())).unwrap();
-        assert_eq!(kind, RepoKind::Submodule);
+        let project = get_project_path(Some(tmp.path().to_path_buf())).unwrap();
+        assert_eq!(project.kind, RepoKind::Submodule);
     }
 
     #[test]
@@ -588,7 +601,7 @@ mod tests {
         // .gitmodules exists but is a directory, not a file
         std::fs::create_dir_all(tmp.path().join(".gitmodules")).unwrap();
 
-        let (_, kind) = get_project_path(Some(tmp.path().to_path_buf())).unwrap();
-        assert_eq!(kind, RepoKind::Normal);
+        let project = get_project_path(Some(tmp.path().to_path_buf())).unwrap();
+        assert_eq!(project.kind, RepoKind::Normal);
     }
 }

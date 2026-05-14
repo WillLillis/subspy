@@ -7,10 +7,9 @@
 //! octal `\NNN` for everything else that needs escaping.
 //!
 //! Under `-z`, paths are emitted verbatim with NUL terminators - the
-//! caller skips this module entirely in that case.
+//! caller skips quoting entirely in that case.
 
-use std::borrow::Cow;
-use std::fmt::Write as _;
+use std::io;
 
 /// Selects the trigger condition for quoting. Mirrors git's
 /// `QUOTE_PATH_QUOTE_SP` flag: porcelain v2 (`Standard`) uses git's default
@@ -29,43 +28,59 @@ pub fn needs_quoting(path: &str, mode: QuoteMode) -> bool {
         .any(|b| is_special_byte(b) || (mode == QuoteMode::QuoteSpace && b == b' '))
 }
 
-/// Wraps `path` in `"..."` with the appropriate C-style escapes. The caller
-/// is expected to have checked `needs_quoting` first; calling this on a
-/// path that doesn't need quoting still returns a valid (if redundant)
-/// double-quoted string.
-pub fn quote_path(path: &str) -> String {
-    let mut out = String::with_capacity(path.len() + 2);
-    out.push('"');
-    for &b in path.as_bytes() {
-        match b {
-            b'\\' => out.push_str(r"\\"),
-            b'"' => out.push_str("\\\""),
-            0x07 => out.push_str(r"\a"),
-            0x08 => out.push_str(r"\b"),
-            b'\t' => out.push_str(r"\t"),
-            b'\n' => out.push_str(r"\n"),
-            0x0b => out.push_str(r"\v"),
-            0x0c => out.push_str(r"\f"),
-            b'\r' => out.push_str(r"\r"),
-            b if b < 0x20 || b == 0x7f || b >= 0x80 => {
-                let _ = write!(out, "\\{b:03o}");
-            }
-            // Remaining bytes are printable ASCII (including space) - emit verbatim.
-            b => out.push(b as char),
-        }
+/// Streams `path` into `out` with porcelain quoting rules applied.
+///
+/// Under `-z` (`null_terminate=true`) paths are emitted verbatim - the
+/// NUL terminators are unambiguous, so the spec skips quoting. Otherwise
+/// the path is wrapped in `"..."` with C-style escapes iff
+/// [`needs_quoting`] under `mode`. Allocation-free in every case.
+///
+/// This handles cwd-agnostic emission (porcelain v1). For porcelain v2's
+/// cwd-relative output, see `Relativizer::write_quoted` which composes
+/// the same quoting around a `../` prefix.
+///
+/// # Errors
+///
+/// Returns any `io::Error` raised by writing.
+pub fn write_path<W: io::Write>(
+    out: &mut W,
+    path: &str,
+    null_terminate: bool,
+    mode: QuoteMode,
+) -> io::Result<()> {
+    if null_terminate || !needs_quoting(path, mode) {
+        return out.write_all(path.as_bytes());
     }
-    out.push('"');
-    out
+    out.write_all(b"\"")?;
+    write_escaped(out, path)?;
+    out.write_all(b"\"")
 }
 
-/// Quotes `path` if needed and we're in non-`-z` mode; otherwise returns the
-/// input borrowed unchanged. This is the orchestration callers usually want.
-pub fn maybe_quote(path: &str, null_terminate: bool, mode: QuoteMode) -> Cow<'_, str> {
-    if null_terminate || !needs_quoting(path, mode) {
-        Cow::Borrowed(path)
-    } else {
-        Cow::Owned(quote_path(path))
+/// Writes `path` to `out` with C-style escapes applied per byte. The
+/// caller is responsible for emitting the surrounding `"..."` and for
+/// having checked [`needs_quoting`] when appropriate.
+///
+/// # Errors
+///
+/// Returns any `io::Error` raised by writing.
+pub fn write_escaped<W: io::Write>(out: &mut W, path: &str) -> io::Result<()> {
+    for &b in path.as_bytes() {
+        match b {
+            b'\\' => out.write_all(br"\\")?,
+            b'"' => out.write_all(b"\\\"")?,
+            0x07 => out.write_all(br"\a")?,
+            0x08 => out.write_all(br"\b")?,
+            b'\t' => out.write_all(br"\t")?,
+            b'\n' => out.write_all(br"\n")?,
+            0x0b => out.write_all(br"\v")?,
+            0x0c => out.write_all(br"\f")?,
+            b'\r' => out.write_all(br"\r")?,
+            b if b < 0x20 || b == 0x7f || b >= 0x80 => write!(out, "\\{b:03o}")?,
+            // Remaining bytes are printable ASCII (including space) - emit verbatim.
+            b => out.write_all(&[b])?,
+        }
     }
+    Ok(())
 }
 
 const fn is_special_byte(b: u8) -> bool {
@@ -75,6 +90,17 @@ const fn is_special_byte(b: u8) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Convenience wrapper: write into a `Vec<u8>` so test assertions can
+    /// compare strings directly. The output is always ASCII so UTF-8
+    /// validation is infallible.
+    fn quoted(path: &str) -> String {
+        let mut out: Vec<u8> = Vec::with_capacity(path.len() + 2);
+        out.push(b'"');
+        write_escaped(&mut out, path).unwrap();
+        out.push(b'"');
+        String::from_utf8(out).unwrap()
+    }
 
     #[test]
     fn no_quoting_for_plain_path() {
@@ -87,75 +113,59 @@ mod tests {
     fn space_triggers_quoting_only_in_quote_space_mode() {
         assert!(!needs_quoting("with space.txt", QuoteMode::Standard));
         assert!(needs_quoting("with space.txt", QuoteMode::QuoteSpace));
-        assert_eq!(quote_path("with space.txt"), "\"with space.txt\"");
+        assert_eq!(quoted("with space.txt"), "\"with space.txt\"");
     }
 
     #[test]
     fn double_quote_triggers_quoting() {
         assert!(needs_quoting("a\"b.txt", QuoteMode::Standard));
-        assert_eq!(quote_path("a\"b.txt"), r#""a\"b.txt""#);
+        assert_eq!(quoted("a\"b.txt"), r#""a\"b.txt""#);
     }
 
     #[test]
     fn backslash_triggers_quoting() {
         assert!(needs_quoting("a\\b.txt", QuoteMode::Standard));
-        assert_eq!(quote_path("a\\b.txt"), r#""a\\b.txt""#);
+        assert_eq!(quoted("a\\b.txt"), r#""a\\b.txt""#);
     }
 
     #[test]
     fn named_control_chars() {
-        assert_eq!(quote_path("a\tb"), r#""a\tb""#);
-        assert_eq!(quote_path("a\nb"), r#""a\nb""#);
-        assert_eq!(quote_path("a\rb"), r#""a\rb""#);
-        assert_eq!(quote_path("a\x07b"), r#""a\ab""#);
-        assert_eq!(quote_path("a\x08b"), r#""a\bb""#);
-        assert_eq!(quote_path("a\x0bb"), r#""a\vb""#);
-        assert_eq!(quote_path("a\x0cb"), r#""a\fb""#);
+        assert_eq!(quoted("a\tb"), r#""a\tb""#);
+        assert_eq!(quoted("a\nb"), r#""a\nb""#);
+        assert_eq!(quoted("a\rb"), r#""a\rb""#);
+        assert_eq!(quoted("a\x07b"), r#""a\ab""#);
+        assert_eq!(quoted("a\x08b"), r#""a\bb""#);
+        assert_eq!(quoted("a\x0bb"), r#""a\vb""#);
+        assert_eq!(quoted("a\x0cb"), r#""a\fb""#);
     }
 
     #[test]
     fn other_control_chars_as_octal() {
-        assert_eq!(quote_path("a\x01b"), r#""a\001b""#);
-        assert_eq!(quote_path("a\x1fb"), r#""a\037b""#);
-        assert_eq!(quote_path("a\x7fb"), r#""a\177b""#);
+        assert_eq!(quoted("a\x01b"), r#""a\001b""#);
+        assert_eq!(quoted("a\x1fb"), r#""a\037b""#);
+        assert_eq!(quoted("a\x7fb"), r#""a\177b""#);
     }
 
     #[test]
     fn high_bytes_as_octal() {
         // UTF-8 for "é" is 0xc3 0xa9 -> \303\251
-        assert_eq!(quote_path("é"), r#""\303\251""#);
+        assert_eq!(quoted("é"), r#""\303\251""#);
         // UTF-8 for "µ" is 0xc2 0xb5 -> \302\265
-        assert_eq!(quote_path("µ"), r#""\302\265""#);
+        assert_eq!(quoted("µ"), r#""\302\265""#);
     }
 
     #[test]
-    fn maybe_quote_passes_through_under_z() {
-        assert_eq!(
-            maybe_quote("with space.txt", true, QuoteMode::QuoteSpace),
-            "with space.txt"
-        );
-        assert_eq!(
-            maybe_quote("normal.txt", true, QuoteMode::Standard),
-            "normal.txt"
-        );
+    fn standard_mode_triggers_on_high_bytes() {
+        // Standard mode (porcelain v2) doesn't quote on space alone, but a
+        // high byte (e.g. UTF-8 continuation) still trips needs_quoting.
+        assert!(needs_quoting("é.txt", QuoteMode::Standard));
+        assert_eq!(quoted("é.txt"), r#""\303\251.txt""#);
     }
 
     #[test]
-    fn maybe_quote_quotes_when_needed_without_z() {
-        // QuoteSpace (porcelain v1): space triggers quoting
-        assert_eq!(
-            maybe_quote("with space.txt", false, QuoteMode::QuoteSpace),
-            "\"with space.txt\""
-        );
-        // Standard (porcelain v2): space alone does not trigger
-        assert_eq!(
-            maybe_quote("with space.txt", false, QuoteMode::Standard),
-            "with space.txt"
-        );
-        // Standard with high byte: still quotes
-        assert_eq!(
-            maybe_quote("é.txt", false, QuoteMode::Standard),
-            r#""\303\251.txt""#
-        );
+    fn plain_path_streams_verbatim() {
+        let mut out: Vec<u8> = Vec::new();
+        write_escaped(&mut out, "src/bin/foo.rs").unwrap();
+        assert_eq!(out, b"src/bin/foo.rs");
     }
 }

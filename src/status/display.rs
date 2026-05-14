@@ -7,8 +7,10 @@ use std::io::{self, Write};
 
 use crate::{
     StatusSummary,
-    paint::{GREEN, Paint, RED},
+    paint::{GREEN, RED, paint_into},
 };
+
+use super::relativize::Relativizer;
 
 use super::{
     StatusResult,
@@ -97,6 +99,7 @@ fn print_staged_changes(
     non_submod: &Statuses<'_>,
     submodule_statuses: &[(String, StatusSummary)],
     deleted_submodule_paths: &[String],
+    rel: &Relativizer<'_>,
     stdout: &mut impl Write,
 ) -> Result<bool, io::Error> {
     let mut header = false;
@@ -123,22 +126,25 @@ fn print_staged_changes(
         let old_path = index.old_file().path();
         let new_path = index.new_file().path();
         match (old_path, new_path) {
-            (Some(old), Some(new)) if old != new => writeln!(
-                stdout,
-                "{}",
-                Paint(
-                    GREEN,
-                    format_args!("\t{istatus}{} -> {}", old.display(), new.display()),
-                )
-            )?,
-            (old, new) => writeln!(
-                stdout,
-                "{}",
-                Paint(
-                    GREEN,
-                    format_args!("\t{istatus}{}", old.or(new).unwrap().display()),
-                )
-            )?,
+            (Some(old), Some(new)) if old != new => {
+                let old_str = old.to_string_lossy();
+                let new_str = new.to_string_lossy();
+                paint_into(stdout, GREEN, |out| {
+                    write!(out, "\t{istatus}")?;
+                    rel.write_to(out, &old_str)?;
+                    out.write_all(b" -> ")?;
+                    rel.write_to(out, &new_str)
+                })?;
+                writeln!(stdout)?;
+            }
+            (old, new) => {
+                let path_str = old.or(new).unwrap().to_string_lossy();
+                paint_into(stdout, GREEN, |out| {
+                    write!(out, "\t{istatus}")?;
+                    rel.write_to(out, &path_str)
+                })?;
+                writeln!(stdout)?;
+            }
         }
     }
 
@@ -147,7 +153,11 @@ fn print_staged_changes(
             writeln!(stdout, "{STAGED_HEADER}")?;
             header = true;
         }
-        writeln!(stdout, "{}", Paint(GREEN, format_args!("\tdeleted:    {path}")))?;
+        paint_into(stdout, GREEN, |out| {
+            write!(out, "\tdeleted:    ")?;
+            rel.write_to(out, path)
+        })?;
+        writeln!(stdout)?;
     }
 
     for (submod_path, st) in submodule_statuses.iter().filter(|(_, st)| is_staged(*st)) {
@@ -156,7 +166,11 @@ fn print_staged_changes(
             header = true;
         }
         let label = staged_label(*st);
-        writeln!(stdout, "{}", Paint(GREEN, format_args!("\t{label}{submod_path}")))?;
+        paint_into(stdout, GREEN, |out| {
+            write!(out, "\t{label}")?;
+            rel.write_to(out, submod_path)
+        })?;
+        writeln!(stdout)?;
     }
 
     if header {
@@ -171,6 +185,7 @@ fn print_unstaged_changes(
     non_submod: &Statuses<'_>,
     submodule_statuses: &[(String, StatusSummary)],
     rm_in_workdir: bool,
+    rel: &Relativizer<'_>,
     stdout: &mut impl Write,
 ) -> Result<bool, io::Error> {
     let has_submod_changes = submodule_statuses
@@ -204,22 +219,25 @@ fn print_unstaged_changes(
         let old_path = workdir.old_file().path();
         let new_path = workdir.new_file().path();
         match (old_path, new_path) {
-            (Some(old), Some(new)) if old != new => writeln!(
-                stdout,
-                "{}",
-                Paint(
-                    RED,
-                    format_args!("\t{istatus}{} -> {}", old.display(), new.display()),
-                )
-            )?,
-            (old, new) => writeln!(
-                stdout,
-                "{}",
-                Paint(
-                    RED,
-                    format_args!("\t{istatus}{}", old.or(new).unwrap().display()),
-                )
-            )?,
+            (Some(old), Some(new)) if old != new => {
+                let old_str = old.to_string_lossy();
+                let new_str = new.to_string_lossy();
+                paint_into(stdout, RED, |out| {
+                    write!(out, "\t{istatus}")?;
+                    rel.write_to(out, &old_str)?;
+                    out.write_all(b" -> ")?;
+                    rel.write_to(out, &new_str)
+                })?;
+                writeln!(stdout)?;
+            }
+            (old, new) => {
+                let path_str = old.or(new).unwrap().to_string_lossy();
+                paint_into(stdout, RED, |out| {
+                    write!(out, "\t{istatus}")?;
+                    rel.write_to(out, &path_str)
+                })?;
+                writeln!(stdout)?;
+            }
         }
     }
 
@@ -235,7 +253,10 @@ fn print_unstaged_changes(
         }
         let label = unstaged_label(*submod_status);
         let istatus = submod_status.to_string();
-        write!(stdout, "{}", Paint(RED, format_args!("\t{label}{submod_path}")))?;
+        paint_into(stdout, RED, |out| {
+            write!(out, "\t{label}")?;
+            rel.write_to(out, submod_path)
+        })?;
         if istatus.is_empty() {
             writeln!(stdout)?;
         } else {
@@ -252,6 +273,7 @@ fn print_unstaged_changes(
 /// Prints the "Untracked files:" section. Returns `true` if any were printed.
 fn print_untracked_files(
     non_submod: &Statuses<'_>,
+    rel: &Relativizer<'_>,
     stdout: &mut impl Write,
 ) -> Result<bool, io::Error> {
     let mut header = false;
@@ -269,7 +291,10 @@ fn print_untracked_files(
             writeln!(stdout, "{UNTRACKED_HEADER}")?;
             header = true;
         }
-        writeln!(stdout, "\t{}", Paint(RED, format_args!("{}", file.display())))?;
+        let file_str = file.to_string_lossy();
+        stdout.write_all(b"\t")?;
+        paint_into(stdout, RED, |out| rel.write_to(out, &file_str))?;
+        writeln!(stdout)?;
     }
     if header {
         writeln!(stdout)?;
@@ -339,6 +364,7 @@ pub fn display_status(
     non_submodule_statuses: &Statuses<'_>,
     submodule_statuses: &[(String, StatusSummary)],
     deleted_submodule_paths: &[String],
+    rel: &Relativizer<'_>,
 ) -> StatusResult<()> {
     // Fast path: nothing dirty
     if non_submodule_statuses.is_empty()
@@ -363,6 +389,7 @@ pub fn display_status(
         non_submodule_statuses,
         submodule_statuses,
         deleted_submodule_paths,
+        rel,
         out,
     )?;
     let has_conflicts = print_unmerged_paths(repo, out)?;
@@ -370,9 +397,10 @@ pub fn display_status(
         non_submodule_statuses,
         submodule_statuses,
         rm_in_workdir,
+        rel,
         out,
     )?;
-    let has_untracked = print_untracked_files(non_submodule_statuses, out)?;
+    let has_untracked = print_untracked_files(non_submodule_statuses, rel, out)?;
 
     print_summary(
         changes_in_index,

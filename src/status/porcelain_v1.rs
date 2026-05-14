@@ -16,13 +16,78 @@ use super::{
     StatusResult,
     conflict::{ConflictEntry, build_conflict_map},
     line_terminator,
-    quote::{QuoteMode, maybe_quote},
+    quote::{QuoteMode, write_path},
     unborn_branch_name,
 };
 
 /// Porcelain v1 uses `QuoteSpace` mode to match `git status --porcelain`,
 /// which sets `QUOTE_PATH_QUOTE_SP` so paths containing spaces get quoted.
+/// v1 emits repo-root-relative paths regardless of cwd, so it never goes
+/// through `Relativizer`.
 const QUOTE_MODE: QuoteMode = QuoteMode::QuoteSpace;
+
+/// Renders the full porcelain v1 output to `out`: an optional
+/// `## branch...` header followed by one `XY PATH` line per entry,
+/// terminated by LF or NUL per `null_terminate`.
+pub fn display_porcelain_v1(
+    out: &mut impl Write,
+    repo: &Repository,
+    non_submod: &Statuses<'_>,
+    submodule_statuses: &[(String, StatusSummary)],
+    deleted_submodule_paths: &[String],
+    null_terminate: bool,
+    branch: bool,
+) -> StatusResult<()> {
+    if branch {
+        write_branch_header(repo, out)?;
+    }
+
+    let index = repo.index()?;
+    let conflicts = build_conflict_map(&index)?;
+
+    // Match git's three-pass ordering: tracked (modified/staged/conflicted/
+    // renamed) first, then untracked, then ignored.
+    for entry in non_submod.iter() {
+        let st = entry.status();
+        if st == git2::Status::CURRENT
+            || st == git2::Status::WT_NEW
+            || st.contains(git2::Status::IGNORED)
+        {
+            continue;
+        }
+        if st.contains(git2::Status::CONFLICTED) {
+            write_conflict(&entry, &conflicts, out, null_terminate)?;
+        } else if st.intersects(git2::Status::INDEX_RENAMED | git2::Status::WT_RENAMED) {
+            write_renamed(&entry, out, null_terminate)?;
+        } else {
+            write_ordinary(&entry, out, null_terminate)?;
+        }
+    }
+
+    for (path, st) in submodule_statuses {
+        write_submodule(path, *st, out, null_terminate)?;
+    }
+
+    for path in deleted_submodule_paths {
+        write_xy_path(out, "D ", path, null_terminate)?;
+    }
+
+    for entry in non_submod
+        .iter()
+        .filter(|e| e.status() == git2::Status::WT_NEW)
+    {
+        write_xy_path(out, "??", entry.path().unwrap_or(""), null_terminate)?;
+    }
+
+    for entry in non_submod
+        .iter()
+        .filter(|e| e.status().contains(git2::Status::IGNORED))
+    {
+        write_xy_path(out, "!!", entry.path().unwrap_or(""), null_terminate)?;
+    }
+
+    Ok(())
+}
 
 /// Maps a `git2::Status` to the XY index/worktree characters used in porcelain v1.
 /// Differs from porcelain v2 by emitting a literal space for the unmodified state
@@ -82,15 +147,18 @@ fn submodule_xy(st: StatusSummary) -> (char, char) {
 fn write_branch_header(repo: &Repository, out: &mut impl Write) -> StatusResult<()> {
     let Ok(head) = repo.head() else {
         // Unborn HEAD (empty repo, no commits yet).
-        let branch = unborn_branch_name(repo).unwrap_or_else(|| "(unknown)".to_string());
+        let head_ref = repo.find_reference("HEAD").ok();
+        let branch = head_ref
+            .as_ref()
+            .and_then(unborn_branch_name)
+            .unwrap_or("(unknown)");
         writeln!(out, "## No commits yet on {branch}")?;
         return Ok(());
     };
 
     let branch_name = Some(&head)
         .filter(|h| h.is_branch())
-        .and_then(|h| h.shorthand())
-        .map(str::to_string);
+        .and_then(|h| h.shorthand());
 
     let Some(name) = branch_name else {
         // Detached HEAD: `## HEAD (no branch)`
@@ -98,7 +166,7 @@ fn write_branch_header(repo: &Repository, out: &mut impl Write) -> StatusResult<
         return Ok(());
     };
 
-    let Ok(local) = repo.find_branch(&name, git2::BranchType::Local) else {
+    let Ok(local) = repo.find_branch(name, git2::BranchType::Local) else {
         writeln!(out, "## {name}")?;
         return Ok(());
     };
@@ -129,26 +197,38 @@ fn write_branch_header(repo: &Repository, out: &mut impl Write) -> StatusResult<
     Ok(())
 }
 
-fn write_simple(
+/// Writes a porcelain v1 line of the form `XY PATH<term>`, where `xy`
+/// is a pre-decided status code rather than something derived from a
+/// `StatusEntry`. Used for the three entry kinds whose code is fixed by
+/// the caller: `D ` for staged-deletion submodules, `??` for untracked,
+/// and `!!` for ignored.
+fn write_xy_path(
     out: &mut impl Write,
     xy: &str,
     path: &str,
     null_terminate: bool,
 ) -> Result<(), io::Error> {
-    let path = maybe_quote(path, null_terminate, QUOTE_MODE);
-    write!(out, "{xy} {path}{}", line_terminator(null_terminate))
+    write!(out, "{xy} ")?;
+    write_path(out, path, null_terminate, QUOTE_MODE)?;
+    out.write_all(line_terminator(null_terminate).as_bytes())
 }
 
+/// Writes a non-rename, non-conflict tracked entry as `XY PATH<term>`,
+/// with `XY` derived from the entry's index/worktree status bits.
 fn write_ordinary(
     entry: &git2::StatusEntry<'_>,
     out: &mut impl Write,
     null_terminate: bool,
 ) -> Result<(), io::Error> {
     let (x, y) = regular_xy(entry.status());
-    let path = maybe_quote(entry.path().unwrap_or(""), null_terminate, QUOTE_MODE);
-    write!(out, "{x}{y} {path}{}", line_terminator(null_terminate))
+    write!(out, "{x}{y} ")?;
+    write_path(out, entry.path().unwrap_or(""), null_terminate, QUOTE_MODE)?;
+    out.write_all(line_terminator(null_terminate).as_bytes())
 }
 
+/// Writes a rename entry. Without `-z`: `R<space> ORIG -> PATH\n`, with
+/// each path quoted independently. With `-z`: `R<space> PATH\0ORIG\0`,
+/// path first and no arrow (per `git-status(1)`'s `-z` rename form).
 fn write_renamed(
     entry: &git2::StatusEntry<'_>,
     out: &mut impl Write,
@@ -173,12 +253,18 @@ fn write_renamed(
         write!(out, "{x}{y} {new_path}\0{old_path}\0")
     } else {
         // Each path is quoted independently.
-        let old_path = maybe_quote(&old_path, false, QUOTE_MODE);
-        let new_path = maybe_quote(&new_path, false, QUOTE_MODE);
-        writeln!(out, "{x}{y} {old_path} -> {new_path}")
+        write!(out, "{x}{y} ")?;
+        write_path(out, &old_path, false, QUOTE_MODE)?;
+        out.write_all(b" -> ")?;
+        write_path(out, &new_path, false, QUOTE_MODE)?;
+        out.write_all(b"\n")
     }
 }
 
+/// Writes a conflicted entry as `XY PATH<term>`, with `XY` decoded from
+/// the index's ancestor/ours/theirs presence: `AA` (both added), `DD`
+/// (both deleted), `DU` (deleted by us), `UD` (deleted by them), `UU`
+/// (both modified / fallback).
 fn write_conflict(
     entry: &git2::StatusEntry<'_>,
     conflicts: &FxHashMap<String, ConflictEntry>,
@@ -195,10 +281,14 @@ fn write_conflict(
             _ => "UU",
         }
     });
-    let path = maybe_quote(path, null_terminate, QUOTE_MODE);
-    write!(out, "{xy} {path}{}", line_terminator(null_terminate))
+    write!(out, "{xy} ")?;
+    write_path(out, path, null_terminate, QUOTE_MODE)?;
+    out.write_all(line_terminator(null_terminate).as_bytes())
 }
 
+/// Writes a submodule entry as `XY PATH<term>`, with `XY` derived from
+/// the [`StatusSummary`] (staged-new / staged / dirty-content / deleted
+/// workdir flags) via [`submodule_xy`].
 fn write_submodule(
     path: &str,
     st: StatusSummary,
@@ -206,66 +296,7 @@ fn write_submodule(
     null_terminate: bool,
 ) -> Result<(), io::Error> {
     let (x, y) = submodule_xy(st);
-    let path = maybe_quote(path, null_terminate, QUOTE_MODE);
-    write!(out, "{x}{y} {path}{}", line_terminator(null_terminate))
-}
-
-pub fn display_porcelain_v1(
-    out: &mut impl Write,
-    repo: &Repository,
-    non_submod: &Statuses<'_>,
-    submodule_statuses: &[(String, StatusSummary)],
-    deleted_submodule_paths: &[String],
-    null_terminate: bool,
-    branch: bool,
-) -> StatusResult<()> {
-    if branch {
-        write_branch_header(repo, out)?;
-    }
-
-    let index = repo.index()?;
-    let conflicts = build_conflict_map(&index)?;
-
-    // Match git's three-pass ordering: tracked (modified/staged/conflicted/
-    // renamed) first, then untracked, then ignored.
-    for entry in non_submod.iter() {
-        let st = entry.status();
-        if st == git2::Status::CURRENT
-            || st == git2::Status::WT_NEW
-            || st.contains(git2::Status::IGNORED)
-        {
-            continue;
-        }
-        if st.contains(git2::Status::CONFLICTED) {
-            write_conflict(&entry, &conflicts, out, null_terminate)?;
-        } else if st.intersects(git2::Status::INDEX_RENAMED | git2::Status::WT_RENAMED) {
-            write_renamed(&entry, out, null_terminate)?;
-        } else {
-            write_ordinary(&entry, out, null_terminate)?;
-        }
-    }
-
-    for (path, st) in submodule_statuses {
-        write_submodule(path, *st, out, null_terminate)?;
-    }
-
-    for path in deleted_submodule_paths {
-        write_simple(out, "D ", path, null_terminate)?;
-    }
-
-    for entry in non_submod
-        .iter()
-        .filter(|e| e.status() == git2::Status::WT_NEW)
-    {
-        write_simple(out, "??", entry.path().unwrap_or(""), null_terminate)?;
-    }
-
-    for entry in non_submod
-        .iter()
-        .filter(|e| e.status().contains(git2::Status::IGNORED))
-    {
-        write_simple(out, "!!", entry.path().unwrap_or(""), null_terminate)?;
-    }
-
-    Ok(())
+    write!(out, "{x}{y} ")?;
+    write_path(out, path, null_terminate, QUOTE_MODE)?;
+    out.write_all(line_terminator(null_terminate).as_bytes())
 }

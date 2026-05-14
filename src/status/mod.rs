@@ -16,6 +16,7 @@ mod header;
 mod porcelain_v1;
 mod porcelain_v2;
 mod quote;
+mod relativize;
 mod submodule;
 
 #[cfg(test)]
@@ -25,10 +26,11 @@ use clap::ValueEnum;
 use git2::Repository;
 use thiserror::Error;
 
-use std::{io, path::Path};
+use std::{borrow::Cow, io, path::Path};
 
 use crate::{
     RepoKind,
+    cli::ProjectPath,
     connection::{
         IpcError,
         client::{recv_status_response, send_status_request},
@@ -37,26 +39,6 @@ use crate::{
 };
 
 pub use submodule::{compute_local_statuses, deleted_submodule_paths};
-
-/// Line terminator for porcelain output: NUL with `-z`, LF without.
-const fn line_terminator(null_terminate: bool) -> &'static str {
-    if null_terminate { "\0" } else { "\n" }
-}
-
-/// Returns the branch name HEAD points at when HEAD is on an unborn branch
-/// (empty repo, no commits). For non-unborn cases this returns whatever
-/// HEAD's symbolic target stripped of `refs/heads/` is, so callers should
-/// only invoke it after confirming `repo.head()` returned `Err`.
-fn unborn_branch_name(repo: &Repository) -> Option<String> {
-    let head = repo.find_reference("HEAD").ok()?;
-    let target = head.symbolic_target()?;
-    Some(
-        target
-            .strip_prefix("refs/heads/")
-            .unwrap_or(target)
-            .to_string(),
-    )
-}
 
 pub type StatusResult<T> = Result<T, StatusError>;
 
@@ -115,14 +97,15 @@ pub struct OutputOpts {
     pub branch: bool,
 }
 
-/// Retrieves and displays the statuses for the repository at `path`.
+/// Retrieves and displays the statuses for the repository described by
+/// `project`. Paths in the output are reported relative to
+/// [`ProjectPath::effective_cwd`], matching `git -C <path> status`.
 ///
 /// # Errors
 ///
 /// Returns `Err` if statuses cannot be retrieved from the repository or watch server
 pub fn status(
-    root_path: &Path,
-    repo_kind: RepoKind,
+    project: &ProjectPath,
     display_progress: bool,
     use_server: bool,
     opts: OutputOpts,
@@ -137,12 +120,12 @@ pub fn status(
     } = opts;
     // Send IPC request early so the server starts processing while we do local work.
     let mut conn = if use_server {
-        Some(send_status_request(root_path)?)
+        Some(send_status_request(&project.repo_root)?)
     } else {
         None
     };
 
-    let repo = Repository::open(root_path)?;
+    let repo = Repository::open(&project.repo_root)?;
 
     let mut opts = git2::StatusOptions::new();
     match untracked_files {
@@ -168,7 +151,7 @@ pub fn status(
 
     // Ignore submodules _only_ if we are the top level, in which case submodule statuses
     // are provided by the watch server or computed locally below.
-    if repo_kind == RepoKind::WithSubmodules {
+    if project.kind == RepoKind::WithSubmodules {
         opts.exclude_submodules(true);
     }
 
@@ -181,11 +164,21 @@ pub fn status(
 
     let submodule_statuses = match conn {
         Some(ref mut c) => recv_status_response(c, display_progress)?.0,
-        None if repo_kind == RepoKind::WithSubmodules => compute_local_statuses(root_path, &repo)?,
+        None if project.kind == RepoKind::WithSubmodules => {
+            compute_local_statuses(&project.repo_root, &repo)?
+        }
         None => Vec::new(),
     };
     let submodule_statuses =
         submodule::apply_ignore_submodules(submodule_statuses, ignore_submodules);
+
+    // Path-formatting policy by output mode:
+    // - Porcelain v1: repo-root-relative regardless of cwd.
+    // - Porcelain v2: cwd-relative without `-z`, repo-root-relative
+    //   with `-z` (where paths are stable identifiers).
+    // - Regular display: cwd-relative.
+    let cwd_rel = cwd_relative_to_repo(&project.repo_root, &project.effective_cwd);
+    let rel = relativize::Relativizer::new(&cwd_rel);
 
     let mut out = io::BufWriter::with_capacity(64 * 1024, io::stdout().lock());
     match porcelain {
@@ -204,19 +197,52 @@ pub fn status(
             &non_submodule_statuses,
             &submodule_statuses,
             &deleted_submodule_paths,
+            &rel,
             null_terminate,
             branch,
         )?,
-        // `branch` only governs porcelain output; non-porcelain mode always
-        // shows branch info as part of the human-readable header, matching git.
         None => display::display_status(
             &mut out,
             &repo,
             &non_submodule_statuses,
             &submodule_statuses,
             &deleted_submodule_paths,
+            &rel,
         )?,
     }
 
     Ok(())
+}
+
+/// Returns `effective_cwd` expressed relative to `repo_root`, as a
+/// forward-slash separated str suitable for [`relativize::Relativizer::new`].
+///
+/// Returns `Cow::Borrowed("")` when `effective_cwd == repo_root` or
+/// when the prefix relationship can't be computed - both cases produce a
+/// no-op `Relativizer`.
+fn cwd_relative_to_repo<'a>(repo_root: &Path, effective_cwd: &'a Path) -> Cow<'a, str> {
+    effective_cwd
+        .strip_prefix(repo_root)
+        .ok()
+        .and_then(|p| p.to_str())
+        .map_or(Cow::Borrowed(""), |s| {
+            if cfg!(windows) && s.contains('\\') {
+                Cow::Owned(s.replace('\\', "/"))
+            } else {
+                Cow::Borrowed(s)
+            }
+        })
+}
+
+/// Line terminator for porcelain output: NUL with `-z`, LF without.
+const fn line_terminator(null_terminate: bool) -> &'static str {
+    if null_terminate { "\0" } else { "\n" }
+}
+
+/// Returns the branch name HEAD points at, intended for the unborn-branch
+/// case (empty repo, no commits) where `repo.head()` returned `Err` but
+/// `HEAD` still points at some `refs/heads/<branch>`.
+fn unborn_branch_name<'a>(head: &'a git2::Reference<'_>) -> Option<&'a str> {
+    head.symbolic_target()
+        .map(|t| t.strip_prefix("refs/heads/").unwrap_or(t))
 }

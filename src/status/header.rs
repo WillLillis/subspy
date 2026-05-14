@@ -18,6 +18,10 @@ use crate::paint::{Paint, RED};
 
 use super::StatusResult;
 
+/// Length of the short-OID prefix git uses in `status` output (matches
+/// `core.abbrev`'s default of 7 hex chars).
+const SHORT_OID_LEN: usize = 7;
+
 #[derive(Debug, PartialEq, Eq)]
 struct RebaseInfo {
     onto_short: String,
@@ -31,7 +35,8 @@ struct RebaseInfo {
 }
 
 /// Parses lines from a rebase todo/done file, skipping blanks and comments, and shortening
-/// any 40-char hex hash in the second field to 7 chars (matching git's status display format).
+/// any 40-char hex hash in the second field to [`SHORT_OID_LEN`] chars
+/// (matching git's status display format).
 fn parse_rebase_lines(content: &str) -> Vec<String> {
     content
         .lines()
@@ -45,7 +50,7 @@ fn parse_rebase_lines(content: &str) -> Vec<String> {
                 return line.to_string();
             };
             if hash_or_arg.len() >= 40 && hash_or_arg.chars().all(|c| c.is_ascii_hexdigit()) {
-                let short = &hash_or_arg[..7];
+                let short = &hash_or_arg[..SHORT_OID_LEN];
                 parts.next().map_or_else(
                     || format!("{cmd} {short}"),
                     |rest| format!("{cmd} {short} {rest}"),
@@ -74,7 +79,7 @@ fn get_rebase_info(repo: &Repository) -> StatusResult<Option<RebaseInfo>> {
     }
 
     let onto_raw = fs::read_to_string(rebase_merge.join("onto")).unwrap_or_default();
-    let onto_short: String = onto_raw.trim().chars().take(7).collect();
+    let onto_short: String = onto_raw.trim().chars().take(SHORT_OID_LEN).collect();
     if onto_short.is_empty() {
         return Ok(None);
     }
@@ -287,12 +292,13 @@ enum HeaderState {
 }
 
 /// Reads a `*_HEAD` file (e.g. `CHERRY_PICK_HEAD`, `REVERT_HEAD`) and returns
-/// the first 7 characters of the OID, or the full content if shorter.
+/// the first [`SHORT_OID_LEN`] characters of the OID, or the full content if
+/// shorter.
 fn read_short_oid(repo: &Repository, filename: &str) -> String {
     let path = repo.path().join(filename);
     let oid = fs::read_to_string(path).unwrap_or_default();
     let trimmed = oid.trim();
-    trimmed.get(..7).unwrap_or(trimmed).to_string()
+    trimmed.get(..SHORT_OID_LEN).unwrap_or(trimmed).to_string()
 }
 
 /// Determines the repository's current operation state (rebase, merge, cherry-pick,
@@ -493,7 +499,14 @@ fn current_branch_display(head_ref: &git2::Reference<'_>) -> String {
             Paint(RED, "HEAD detached at"),
             head_ref.target().map_or_else(
                 || "unknown".to_string(),
-                |oid| oid.to_string().chars().take(7).collect()
+                |oid| {
+                    // git2's `Oid::Display` writes 40 hex chars and does
+                    // not honor format precision, so we materialize then
+                    // truncate. One alloc instead of two.
+                    let mut s = oid.to_string();
+                    s.truncate(SHORT_OID_LEN);
+                    s
+                }
             ),
         );
     }
@@ -642,7 +655,7 @@ mod tests {
             "expected CherryPick with conflicts, got {state:?}"
         );
         if let HeaderState::CherryPick { short_oid, .. } = &state {
-            assert_eq!(short_oid.len(), 7);
+            assert_eq!(short_oid.len(), SHORT_OID_LEN);
         }
     }
 
@@ -713,7 +726,7 @@ mod tests {
             "expected Revert with conflicts, got {state:?}"
         );
         if let HeaderState::Revert { short_oid, .. } = &state {
-            assert_eq!(short_oid.len(), 7);
+            assert_eq!(short_oid.len(), SHORT_OID_LEN);
         }
     }
 

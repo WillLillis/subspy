@@ -11,12 +11,12 @@
 //! `--branch` matrix.
 
 use git2::Repository;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use tempfile::TempDir;
 use testutil::{HarnessBuilder, Repo, TestHarness};
 
-use crate::RepoKind;
+use crate::{RepoKind, cli::ProjectPath};
 
 use super::{
     IgnoreSubmodules, OutputOpts, PorcelainVersion, UntrackedFiles, compute_local_statuses,
@@ -376,7 +376,12 @@ fn run_case(case: &Case, opts: OutputOpts) {
         CaseSetup::Plain(setup) => {
             let tmp = TempDir::new().unwrap();
             setup(tmp.path());
-            assert_outputs_match(tmp.path(), case.name, opts, RepoKind::Normal);
+            let project = ProjectPath {
+                repo_root: tmp.path().to_path_buf(),
+                effective_cwd: tmp.path().to_path_buf(),
+                kind: RepoKind::Normal,
+            };
+            assert_outputs_match(&project, case.name, opts);
         }
         CaseSetup::WithSubmodules { names, setup } => {
             let mut builder = HarnessBuilder::new().no_server();
@@ -385,22 +390,24 @@ fn run_case(case: &Case, opts: OutputOpts) {
             }
             let harness = builder.build();
             setup(&harness);
-            assert_outputs_match(
-                harness.root().path(),
-                case.name,
-                opts,
-                RepoKind::WithSubmodules,
-            );
+            let project = ProjectPath {
+                repo_root: harness.root().path().to_path_buf(),
+                effective_cwd: harness.root().path().to_path_buf(),
+                kind: RepoKind::WithSubmodules,
+            };
+            assert_outputs_match(&project, case.name, opts);
         }
     }
 }
 
-/// Runs real git and subspy against the prepared `repo_root` with `opts`,
-/// asserting byte-equal output. `repo_kind` controls whether the subspy
-/// path also computes per-submodule statuses (mirrors `status::status`).
-fn assert_outputs_match(repo_root: &Path, case_name: &str, opts: OutputOpts, repo_kind: RepoKind) {
+/// Runs real git and subspy against the prepared repo with `opts`,
+/// asserting byte-equal output. Mirrors the data passed to
+/// `status::status`: `project.effective_cwd` is both the dir we pass to
+/// git via `-C` and the input to subspy's `Relativizer`; `project.kind`
+/// drives whether per-submodule statuses are computed.
+fn assert_outputs_match(project: &ProjectPath, case_name: &str, opts: OutputOpts) {
     // Capture real git's output.
-    let cwd = repo_root.display().to_string();
+    let cwd = project.effective_cwd.display().to_string();
     let args = git_status_args(opts);
     let mut all = vec!["-C".to_string(), cwd];
     all.extend(args.iter().cloned());
@@ -415,20 +422,25 @@ fn assert_outputs_match(repo_root: &Path, case_name: &str, opts: OutputOpts, rep
     let expected = go.stdout;
 
     // Capture subspy's output into a Vec<u8>.
-    let repo = Repository::open(repo_root).unwrap();
-    let mut so = build_status_options(opts, repo_kind);
+    let repo = Repository::open(&project.repo_root).unwrap();
+    let mut so = build_status_options(opts, project.kind);
     let non_submod = repo.statuses(Some(&mut so)).unwrap();
     let deleted = if opts.ignore_submodules == IgnoreSubmodules::All {
         Vec::new()
     } else {
         deleted_submodule_paths(&repo).unwrap()
     };
-    let submodules = if repo_kind == RepoKind::WithSubmodules {
-        compute_local_statuses(repo_root, &repo).unwrap()
+    let submodules = if project.kind == RepoKind::WithSubmodules {
+        compute_local_statuses(&project.repo_root, &repo).unwrap()
     } else {
         Vec::new()
     };
     let submodules = apply_ignore_submodules(submodules, opts.ignore_submodules);
+
+    // Same Relativizer plumbing as production: v2 uses it (cwd-relative
+    // output); v1 doesn't take one (always repo-root-relative).
+    let cwd_rel = super::cwd_relative_to_repo(&project.repo_root, &project.effective_cwd);
+    let rel = super::relativize::Relativizer::new(&cwd_rel);
 
     let mut got: Vec<u8> = Vec::new();
     match opts.porcelain {
@@ -448,6 +460,7 @@ fn assert_outputs_match(repo_root: &Path, case_name: &str, opts: OutputOpts, rep
             &non_submod,
             &submodules,
             &deleted,
+            &rel,
             opts.null_terminate,
             opts.branch,
         )
@@ -623,4 +636,111 @@ fn v2_ignored() {
     for c in CASES {
         run_case(c, opts);
     }
+}
+
+// -- subdirectory invocation --
+//
+// Validates that subspy emits cwd-relative paths matching `git -C <dir>
+// status --porcelain[=2]`. Files are seeded in three positions relative
+// to the invocation cwd: above (`root.txt`), at (`src/main.rs`), and
+// sibling (`tests/foo.rs`), plus a path with a space to exercise
+// quoting interaction with the `../` prefix.
+
+fn setup_subdir_fixture(root: &Path) -> PathBuf {
+    let root_str = root.display().to_string();
+    git(&["-C", &root_str, "init", "-q"]);
+    git(&["-C", &root_str, "config", "user.email", "t@t"]);
+    git(&["-C", &root_str, "config", "user.name", "T"]);
+    std::fs::write(root.join("root.txt"), "orig\n").unwrap();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/main.rs"), "orig\n").unwrap();
+    std::fs::create_dir_all(root.join("tests")).unwrap();
+    std::fs::write(root.join("tests/foo.rs"), "orig\n").unwrap();
+    std::fs::write(root.join("with space.txt"), "orig\n").unwrap();
+    git(&["-C", &root_str, "add", "-A"]);
+    git(&["-C", &root_str, "commit", "-q", "-m", "init"]);
+    // Modify each so they show up in status.
+    std::fs::write(root.join("root.txt"), "changed\n").unwrap();
+    std::fs::write(root.join("src/main.rs"), "changed\n").unwrap();
+    std::fs::write(root.join("tests/foo.rs"), "changed\n").unwrap();
+    std::fs::write(root.join("with space.txt"), "changed\n").unwrap();
+    root.join("src")
+}
+
+fn git(args: &[&str]) {
+    let out = Command::new("git").args(args).output().expect("git failed");
+    assert!(
+        out.status.success(),
+        "git {:?} failed: {}",
+        args,
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+fn subdir_project(repo_root: PathBuf, effective_cwd: PathBuf) -> ProjectPath {
+    ProjectPath {
+        repo_root,
+        effective_cwd,
+        kind: RepoKind::Normal,
+    }
+}
+
+#[test]
+fn v1_from_subdir() {
+    let tmp = TempDir::new().unwrap();
+    let subdir = setup_subdir_fixture(tmp.path());
+    let project = subdir_project(tmp.path().to_path_buf(), subdir);
+    let opts = opts_with(
+        PorcelainVersion::V1,
+        false,
+        false,
+        UntrackedFiles::Normal,
+        false,
+    );
+    assert_outputs_match(&project, "v1 from subdir", opts);
+}
+
+#[test]
+fn v1_z_from_subdir() {
+    let tmp = TempDir::new().unwrap();
+    let subdir = setup_subdir_fixture(tmp.path());
+    let project = subdir_project(tmp.path().to_path_buf(), subdir);
+    let opts = opts_with(
+        PorcelainVersion::V1,
+        true,
+        false,
+        UntrackedFiles::Normal,
+        false,
+    );
+    assert_outputs_match(&project, "v1 -z from subdir", opts);
+}
+
+#[test]
+fn v2_from_subdir() {
+    let tmp = TempDir::new().unwrap();
+    let subdir = setup_subdir_fixture(tmp.path());
+    let project = subdir_project(tmp.path().to_path_buf(), subdir);
+    let opts = opts_with(
+        PorcelainVersion::V2,
+        false,
+        false,
+        UntrackedFiles::Normal,
+        false,
+    );
+    assert_outputs_match(&project, "v2 from subdir", opts);
+}
+
+#[test]
+fn v2_z_from_subdir() {
+    let tmp = TempDir::new().unwrap();
+    let subdir = setup_subdir_fixture(tmp.path());
+    let project = subdir_project(tmp.path().to_path_buf(), subdir);
+    let opts = opts_with(
+        PorcelainVersion::V2,
+        true,
+        false,
+        UntrackedFiles::Normal,
+        false,
+    );
+    assert_outputs_match(&project, "v2 -z from subdir", opts);
 }
