@@ -1,0 +1,11 @@
+On branch master
+You are currently cherry-picking commit 7775b63.
+  (fix conflicts and run "git cherry-pick --continue")
+  (use "git cherry-pick --skip" to skip this patch)
+  (use "git cherry-pick --abort" to cancel the cherry-pick operation)
+
+Unmerged paths:
+  (use "git add <file>..." to mark resolution)
+	both modified:   file.txt
+
+no changes added to commit (use "git add" and/or "git commit -a")

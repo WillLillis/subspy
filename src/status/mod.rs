@@ -20,6 +20,8 @@ mod relativize;
 mod submodule;
 
 #[cfg(test)]
+mod human_tests;
+#[cfg(test)]
 mod porcelain_tests;
 
 use clap::ValueEnum;

@@ -8,7 +8,7 @@ use std::{
 
 use subspy::git::configure_git2;
 
-use git2::{Repository, Signature};
+use git2::{Repository, Signature, Time};
 use subspy::{
     StatusSummary,
     connection::watch_server::watch,
@@ -33,6 +33,16 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Polling interval between status checks.
 pub const POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+// Fixture identity / time pins. Every commit made through the test
+// harness uses these so commit SHAs are byte-stable across runs and
+// across CI environments. Required by the human-display snapshot tests,
+// which compare subspy output (including short-OIDs in operation-state
+// headers) against committed `.snapshot` files. The Unix timestamp is
+// arbitrary - any past, fixed value works.
+pub const FIXTURE_NAME: &str = "Test";
+pub const FIXTURE_EMAIL: &str = "test@test.com";
+pub const FIXTURE_TIME: i64 = 1_700_000_000;
 
 /// Builder for constructing a [`TestHarness`] with a specific repository layout.
 pub struct HarnessBuilder {
@@ -347,9 +357,16 @@ pub fn create_source_repo(path: &Path) {
     let tree_oid = index.write_tree().unwrap();
     let tree = repo.find_tree(tree_oid).unwrap();
 
-    let sig = Signature::now("Test", "test@test.com").unwrap();
+    let sig = fixture_signature();
     repo.commit(Some("HEAD"), &sig, &sig, "Initial commit", &tree, &[])
         .unwrap();
+}
+
+/// Returns a `Signature` pinned to the fixture identity and timestamp so
+/// libgit2-driven commits produce deterministic SHAs (matching the env-
+/// pinned commits made through [`git_may_fail`]).
+fn fixture_signature() -> Signature<'static> {
+    Signature::new(FIXTURE_NAME, FIXTURE_EMAIL, &Time::new(FIXTURE_TIME, 0)).unwrap()
 }
 
 /// Initializes the root repository at `root_path`, creates source repos for
@@ -361,7 +378,7 @@ fn init_repo_with_submodules(
     submodule_names: &[String],
 ) -> HashMap<String, PathBuf> {
     let repo = Repository::init(root_path).expect("Failed to init root repo");
-    let sig = Signature::now("Test", "test@test.com").unwrap();
+    let sig = fixture_signature();
 
     // Create an initial commit so HEAD exists
     {
@@ -546,7 +563,13 @@ pub fn git(args: &[&str]) {
 /// Like [`git()`] but returns the `Output` instead of panicking on non-zero
 /// exit. Useful for commands that may legitimately fail (e.g. `git rebase`
 /// hitting a conflict).
+///
+/// Pins the author/committer identity and date via `GIT_AUTHOR_*` /
+/// `GIT_COMMITTER_*` env vars so that commit SHAs are deterministic
+/// across runs and machines. Env vars take precedence over `-c` config,
+/// so `-c user.name=...` flags are redundant here but kept for clarity.
 pub fn git_may_fail(args: &[&str]) -> std::process::Output {
+    let pinned_date = format!("{FIXTURE_TIME} +0000");
     std::process::Command::new("git")
         .args([
             "-c",
@@ -558,6 +581,12 @@ pub fn git_may_fail(args: &[&str]) -> std::process::Output {
         ])
         .env("GIT_EDITOR", "true")
         .env("GIT_SEQUENCE_EDITOR", "true")
+        .env("GIT_AUTHOR_NAME", FIXTURE_NAME)
+        .env("GIT_AUTHOR_EMAIL", FIXTURE_EMAIL)
+        .env("GIT_AUTHOR_DATE", &pinned_date)
+        .env("GIT_COMMITTER_NAME", FIXTURE_NAME)
+        .env("GIT_COMMITTER_EMAIL", FIXTURE_EMAIL)
+        .env("GIT_COMMITTER_DATE", &pinned_date)
         .args(args)
         .output()
         .expect("Failed to run git")
