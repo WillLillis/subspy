@@ -14,9 +14,9 @@ use std::{
     io::{self, Write},
 };
 
-use crate::paint::{Paint, RED};
+use crate::paint::{Paint, RED, paint_into};
 
-use super::StatusResult;
+use super::{StatusResult, relativize::Relativizer};
 
 /// Length of the short-OID prefix git uses in `status` output (matches
 /// `core.abbrev`'s default of 7 hex chars).
@@ -215,18 +215,23 @@ fn print_rebase_header(info: &RebaseInfo, stdout: &mut impl Write) -> Result<(),
 }
 
 /// Prints the "Unmerged paths:" section for any conflicts in the index.
-/// Returns `true` if there were conflicts.
-pub fn print_unmerged_paths(repo: &Repository, stdout: &mut impl Write) -> StatusResult<bool> {
+/// Returns `true` if there were conflicts. Paths are routed through `rel`
+/// so they render cwd-relative, matching the rest of the human display.
+pub fn print_unmerged_paths(
+    repo: &Repository,
+    rel: &Relativizer<'_>,
+    stdout: &mut impl Write,
+) -> StatusResult<bool> {
     let index = repo.index()?;
     if !index.has_conflicts() {
         return Ok(false);
     }
 
     writeln!(stdout, "Unmerged paths:")?;
-    writeln!(
-        stdout,
-        "  (use \"git restore --staged <file>...\" to unstage)"
-    )?;
+    // Note: the `(use "git restore --staged <file>...")` hint belongs
+    // to the "Changes to be committed:" header (see `STAGED_HEADER` in
+    // `display.rs`), not here. Real `git status` only emits it there,
+    // gated on the existence of staged changes.
     writeln!(stdout, "  (use \"git add <file>...\" to mark resolution)")?;
 
     for conflict in index.conflicts()? {
@@ -255,15 +260,31 @@ pub fn print_unmerged_paths(repo: &Repository, stdout: &mut impl Write) -> Statu
             (false, false, true) => "added by them:   ",
             (false, false, false) => "both modified:   ",
         };
-        writeln!(stdout, "{}", Paint(RED, format_args!("\t{type_str}{path}")))?;
+        paint_into(stdout, RED, |out| {
+            write!(out, "\t{type_str}")?;
+            rel.write_to(out, path)
+        })?;
+        writeln!(stdout)?;
     }
     writeln!(stdout)?;
     Ok(true)
 }
 
 /// The detected repository state, used to print the appropriate header.
+///
+/// `branch_display` is the "On branch X" / "HEAD detached at <oid>" line
+/// that real git emits before the operation-state body. It's `None` only
+/// for rebase variants, which describe HEAD position internally (via the
+/// rebase header's `head_name` / `onto` fields).
 #[derive(Debug, PartialEq, Eq)]
-enum HeaderState {
+struct HeaderState {
+    branch_display: Option<String>,
+    body: HeaderBody,
+}
+
+/// The operation-specific portion of the header.
+#[derive(Debug, PartialEq, Eq)]
+enum HeaderBody {
     Rebase(RebaseInfo),
     CherryPick {
         short_oid: String,
@@ -286,7 +307,6 @@ enum HeaderState {
         has_conflicts: bool,
     },
     Normal {
-        branch_display: String,
         upstream: Option<(String, &'static str)>,
     },
 }
@@ -305,7 +325,10 @@ fn read_short_oid(repo: &Repository, filename: &str) -> String {
 /// etc.) and returns it along with branch/upstream info for display.
 fn get_header_state(repo: &Repository) -> StatusResult<HeaderState> {
     if let Some(info) = get_rebase_info(repo)? {
-        return Ok(HeaderState::Rebase(info));
+        return Ok(HeaderState {
+            branch_display: None,
+            body: HeaderBody::Rebase(info),
+        });
     }
 
     // `git rebase --apply` uses `rebase-apply/` instead of `rebase-merge/`.
@@ -313,43 +336,50 @@ fn get_header_state(repo: &Repository) -> StatusResult<HeaderState> {
     // doesn't handle since it only reads from `rebase-merge/`.
     if repo.path().join("rebase-apply").join("rebasing").exists() {
         let has_conflicts = repo.index()?.has_conflicts();
-        return Ok(HeaderState::RebaseWithApplyBackend { has_conflicts });
+        return Ok(HeaderState {
+            branch_display: None,
+            body: HeaderBody::RebaseWithApplyBackend { has_conflicts },
+        });
     }
 
     let head_ref = repo.head()?;
     let branch_display = current_branch_display(&head_ref);
     let has_conflicts = repo.index()?.has_conflicts();
 
-    match repo.state() {
+    let body = match repo.state() {
         git2::RepositoryState::CherryPick | git2::RepositoryState::CherryPickSequence => {
-            Ok(HeaderState::CherryPick {
+            HeaderBody::CherryPick {
                 short_oid: read_short_oid(repo, "CHERRY_PICK_HEAD"),
                 has_conflicts,
-            })
+            }
         }
-        git2::RepositoryState::Merge => Ok(HeaderState::Merge { has_conflicts }),
+        git2::RepositoryState::Merge => HeaderBody::Merge { has_conflicts },
         git2::RepositoryState::Revert | git2::RepositoryState::RevertSequence => {
-            Ok(HeaderState::Revert {
+            HeaderBody::Revert {
                 short_oid: read_short_oid(repo, "REVERT_HEAD"),
                 has_conflicts,
-            })
+            }
         }
-        git2::RepositoryState::Bisect => Ok(HeaderState::Bisect),
+        git2::RepositoryState::Bisect => HeaderBody::Bisect,
         git2::RepositoryState::ApplyMailbox | git2::RepositoryState::ApplyMailboxOrRebase => {
             // rebase-apply/rebasing exists for `git rebase --apply`,
             // rebase-apply/applying exists for `git am`.
             let rebase_apply = repo.path().join("rebase-apply");
             if rebase_apply.join("rebasing").exists() {
-                Ok(HeaderState::RebaseWithApplyBackend { has_conflicts })
+                HeaderBody::RebaseWithApplyBackend { has_conflicts }
             } else {
-                Ok(HeaderState::ApplyMailbox { has_conflicts })
+                HeaderBody::ApplyMailbox { has_conflicts }
             }
         }
-        _ => Ok(HeaderState::Normal {
-            branch_display,
+        _ => HeaderBody::Normal {
             upstream: get_upstream_status(repo, head_ref)?,
-        }),
-    }
+        },
+    };
+
+    Ok(HeaderState {
+        branch_display: Some(branch_display),
+        body,
+    })
 }
 
 /// Prints the status header: branch name, upstream tracking info, and any
@@ -363,9 +393,12 @@ pub fn print_header(repo: &Repository, stdout: &mut impl Write) -> StatusResult<
 /// Prints the operation-specific portion of the header (hints, conflict guidance, etc.).
 #[expect(clippy::too_many_lines, reason = "git has so much to say")]
 fn print_header_state(state: &HeaderState, stdout: &mut impl Write) -> Result<(), io::Error> {
-    match state {
-        HeaderState::Rebase(info) => print_rebase_header(info, stdout)?,
-        HeaderState::CherryPick {
+    if let Some(branch) = &state.branch_display {
+        writeln!(stdout, "{branch}")?;
+    }
+    match &state.body {
+        HeaderBody::Rebase(info) => print_rebase_header(info, stdout)?,
+        HeaderBody::CherryPick {
             short_oid,
             has_conflicts,
         } => {
@@ -394,7 +427,7 @@ fn print_header_state(state: &HeaderState, stdout: &mut impl Write) -> Result<()
             )?;
             writeln!(stdout)?;
         }
-        HeaderState::Merge { has_conflicts } => {
+        HeaderBody::Merge { has_conflicts } => {
             if *has_conflicts {
                 writeln!(stdout, "You have unmerged paths.")?;
                 writeln!(stdout, "  (fix conflicts and run \"git commit\")")?;
@@ -405,7 +438,7 @@ fn print_header_state(state: &HeaderState, stdout: &mut impl Write) -> Result<()
             }
             writeln!(stdout)?;
         }
-        HeaderState::Revert {
+        HeaderBody::Revert {
             short_oid,
             has_conflicts,
         } => {
@@ -428,7 +461,7 @@ fn print_header_state(state: &HeaderState, stdout: &mut impl Write) -> Result<()
             )?;
             writeln!(stdout)?;
         }
-        HeaderState::Bisect => {
+        HeaderBody::Bisect => {
             writeln!(stdout, "You are currently bisecting.")?;
             writeln!(
                 stdout,
@@ -436,7 +469,7 @@ fn print_header_state(state: &HeaderState, stdout: &mut impl Write) -> Result<()
             )?;
             writeln!(stdout)?;
         }
-        HeaderState::ApplyMailbox { has_conflicts } => {
+        HeaderBody::ApplyMailbox { has_conflicts } => {
             writeln!(stdout, "You are in the middle of an am session.")?;
             if *has_conflicts {
                 writeln!(
@@ -453,7 +486,7 @@ fn print_header_state(state: &HeaderState, stdout: &mut impl Write) -> Result<()
             )?;
             writeln!(stdout)?;
         }
-        HeaderState::RebaseWithApplyBackend { has_conflicts } => {
+        HeaderBody::RebaseWithApplyBackend { has_conflicts } => {
             writeln!(stdout, "You are currently rebasing.")?;
             if *has_conflicts {
                 writeln!(
@@ -473,11 +506,7 @@ fn print_header_state(state: &HeaderState, stdout: &mut impl Write) -> Result<()
             )?;
             writeln!(stdout)?;
         }
-        HeaderState::Normal {
-            branch_display,
-            upstream,
-        } => {
-            writeln!(stdout, "{branch_display}")?;
+        HeaderBody::Normal { upstream } => {
             if let Some((status_line, hint)) = upstream {
                 writeln!(stdout, "{status_line}")?;
                 if !hint.is_empty() {
@@ -624,7 +653,7 @@ mod tests {
         let (_tmp, repo) = init_repo();
         let state = get_header_state(&repo).unwrap();
         assert!(
-            matches!(state, HeaderState::Normal { .. }),
+            matches!(state.body, HeaderBody::Normal { .. }),
             "expected Normal, got {state:?}"
         );
     }
@@ -646,15 +675,15 @@ mod tests {
         let state = get_header_state(&repo).unwrap();
         assert!(
             matches!(
-                state,
-                HeaderState::CherryPick {
+                state.body,
+                HeaderBody::CherryPick {
                     has_conflicts: true,
                     ..
                 }
             ),
             "expected CherryPick with conflicts, got {state:?}"
         );
-        if let HeaderState::CherryPick { short_oid, .. } = &state {
+        if let HeaderBody::CherryPick { short_oid, .. } = &state.body {
             assert_eq!(short_oid.len(), SHORT_OID_LEN);
         }
     }
@@ -675,8 +704,8 @@ mod tests {
         let state = get_header_state(&repo).unwrap();
         assert!(
             matches!(
-                state,
-                HeaderState::Merge {
+                state.body,
+                HeaderBody::Merge {
                     has_conflicts: true
                 }
             ),
@@ -717,15 +746,15 @@ mod tests {
         let state = get_header_state(&repo).unwrap();
         assert!(
             matches!(
-                state,
-                HeaderState::Revert {
+                state.body,
+                HeaderBody::Revert {
                     has_conflicts: true,
                     ..
                 }
             ),
             "expected Revert with conflicts, got {state:?}"
         );
-        if let HeaderState::Revert { short_oid, .. } = &state {
+        if let HeaderBody::Revert { short_oid, .. } = &state.body {
             assert_eq!(short_oid.len(), SHORT_OID_LEN);
         }
     }
@@ -750,8 +779,8 @@ mod tests {
         let state = get_header_state(&repo).unwrap();
         assert!(
             matches!(
-                state,
-                HeaderState::CherryPick {
+                state.body,
+                HeaderBody::CherryPick {
                     has_conflicts: false,
                     ..
                 }
@@ -779,8 +808,8 @@ mod tests {
         let state = get_header_state(&repo).unwrap();
         assert!(
             matches!(
-                state,
-                HeaderState::Merge {
+                state.body,
+                HeaderBody::Merge {
                     has_conflicts: false
                 }
             ),
@@ -803,7 +832,7 @@ mod tests {
 
         let repo = Repository::open(tmp.path()).unwrap();
         let state = get_header_state(&repo).unwrap();
-        assert_eq!(state, HeaderState::Bisect);
+        assert_eq!(state.body, HeaderBody::Bisect);
     }
 
     #[test]
@@ -831,7 +860,7 @@ mod tests {
         // git am patch failures don't produce index conflicts - the patch
         // simply fails to apply and the index stays clean.
         assert!(
-            matches!(state, HeaderState::ApplyMailbox { .. }),
+            matches!(state.body, HeaderBody::ApplyMailbox { .. }),
             "expected ApplyMailbox, got {state:?}"
         );
     }
@@ -865,8 +894,8 @@ mod tests {
         let state = get_header_state(&repo).unwrap();
         assert!(
             matches!(
-                state,
-                HeaderState::RebaseWithApplyBackend {
+                state.body,
+                HeaderBody::RebaseWithApplyBackend {
                     has_conflicts: true
                 }
             ),

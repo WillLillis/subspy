@@ -392,7 +392,7 @@ pub fn display_status(
         rel,
         out,
     )?;
-    let has_conflicts = print_unmerged_paths(repo, out)?;
+    let has_conflicts = print_unmerged_paths(repo, rel, out)?;
     let changed_in_workdir = print_unstaged_changes(
         non_submodule_statuses,
         submodule_statuses,
