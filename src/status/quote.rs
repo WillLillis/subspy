@@ -28,34 +28,6 @@ pub fn needs_quoting(path: &str, mode: QuoteMode) -> bool {
         .any(|b| is_special_byte(b) || (mode == QuoteMode::QuoteSpace && b == b' '))
 }
 
-/// Streams `path` into `out` with porcelain quoting rules applied.
-///
-/// Under `-z` (`null_terminate=true`) paths are emitted verbatim - the
-/// NUL terminators are unambiguous, so the spec skips quoting. Otherwise
-/// the path is wrapped in `"..."` with C-style escapes iff
-/// [`needs_quoting`] under `mode`. Allocation-free in every case.
-///
-/// This handles cwd-agnostic emission (porcelain v1). For porcelain v2's
-/// cwd-relative output, see `Relativizer::write_quoted` which composes
-/// the same quoting around a `../` prefix.
-///
-/// # Errors
-///
-/// Returns any `io::Error` raised by writing.
-pub fn write_path<W: io::Write>(
-    out: &mut W,
-    path: &str,
-    null_terminate: bool,
-    mode: QuoteMode,
-) -> io::Result<()> {
-    if null_terminate || !needs_quoting(path, mode) {
-        return out.write_all(path.as_bytes());
-    }
-    out.write_all(b"\"")?;
-    write_escaped(out, path)?;
-    out.write_all(b"\"")
-}
-
 /// Writes `path` to `out` with C-style escapes applied per byte. The
 /// caller is responsible for emitting the surrounding `"..."` and for
 /// having checked [`needs_quoting`] when appropriate.

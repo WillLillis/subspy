@@ -18,6 +18,7 @@ mod porcelain_v2;
 mod quote;
 mod relativize;
 mod submodule;
+mod xy_line;
 
 #[cfg(test)]
 mod long_tests;
