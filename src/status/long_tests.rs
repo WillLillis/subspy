@@ -1,23 +1,8 @@
-//! Snapshot tests for the human-readable `display_status` output.
-//!
-//! Strategy: each case builds a fixture repo with a known state, runs
-//! subspy's `display_status` in-process, and compares the captured bytes
-//! to a committed snapshot file at
-//! `src/status/snapshots/human/<case>.snapshot`. Snapshots are seeded
-//! from real `git status` output (manually verified at the time of
-//! creation) but not compared live against git, since git's human
-//! display wording drifts between releases.
-//!
-//! Regenerating: set `UPDATE_HUMAN_SNAPSHOTS=1` in the env when running
-//! `cargo test`; the test will overwrite the snapshot file on disk and
-//! pass. Always inspect the resulting diff before committing.
-//!
-//! Determinism: commit SHAs leak into operation-state headers (rebase
-//! `onto`, cherry-pick/revert `short_oid`, detached `HEAD`). The
-//! `testutil::FIXTURE_*` constants and the env vars set by
-//! `testutil::git_may_fail` pin author/committer identity and date so
-//! SHAs are byte-stable. `NO_COLOR=1` is set in `.cargo/config.toml` so
-//! `paint::color_enabled()` returns `false` for the whole test binary.
+//! Snapshot tests for the long-format `display_status` output. Each
+//! case builds a fixture repo, runs `display_status` in-process, and
+//! compares the bytes to `src/status/snapshots/long/<case>.snapshot`.
+//! Regenerate with `UPDATE_LONG_SNAPSHOTS=1`. See CONTRIBUTING.md for
+//! workflow details.
 
 use git2::Repository;
 use pretty_assertions::assert_eq;
@@ -28,27 +13,24 @@ use testutil::{HarnessBuilder, Repo, TestHarness};
 use crate::{RepoKind, cli::ProjectPath};
 
 use super::{
-    IgnoreSubmodules, OutputOpts, UntrackedFiles, compute_local_statuses,
-    deleted_submodule_paths, display::display_status, submodule::apply_ignore_submodules,
+    IgnoreSubmodules, OutputOpts, UntrackedFiles, compute_local_statuses, deleted_submodule_paths,
+    display::display_status, submodule::apply_ignore_submodules,
 };
 
-/// A single fixture/case for the human snapshot suite.
 struct Case {
     name: &'static str,
     setup: Setup,
 }
 
-/// How to build the fixture and where to point `effective_cwd`.
 enum Setup {
-    /// Plain repo; `effective_cwd` equals the repo root.
+    /// `effective_cwd` equals the repo root.
     Plain(fn(&Path)),
-    /// Plain repo; `effective_cwd` is `repo_root/<subdir>`.
+    /// `effective_cwd` is `repo_root/<subdir>`.
     Subdir {
         setup: fn(&Path),
         subdir: &'static str,
     },
-    /// Repo with submodules built via `HarnessBuilder`; setup mutates
-    /// the harness (e.g. writes to a submodule's working tree).
+    /// Repo built via `HarnessBuilder` with submodules.
     WithSubmodules {
         names: &'static [&'static str],
         setup: fn(&TestHarness),
@@ -85,6 +67,13 @@ const CASES: &[Case] = &[
         setup: Setup::Plain(setup_renamed_staged),
     },
     Case {
+        name: "renamed_staged_in_subdir",
+        setup: Setup::Subdir {
+            setup: setup_renamed_staged_in_subdir,
+            subdir: "sub",
+        },
+    },
+    Case {
         name: "untracked_files",
         setup: Setup::Plain(setup_untracked),
     },
@@ -93,9 +82,6 @@ const CASES: &[Case] = &[
         setup: Setup::Plain(setup_untracked_in_dir),
     },
     Case {
-        // Regression test for the C-style quoting bug: paths with high
-        // bytes / control chars must be wrapped in `"..."` with escapes
-        // when `core.quotePath=true` (git's default).
         name: "untracked_high_byte_filename",
         setup: Setup::Plain(setup_untracked_high_byte_filename),
     },
@@ -104,9 +90,6 @@ const CASES: &[Case] = &[
         setup: Setup::Plain(setup_merge_with_conflict),
     },
     Case {
-        // Regression test for the bug where `print_unmerged_paths`
-        // bypassed `Relativizer`: conflict in `sub/file.txt`, cwd is
-        // `<root>/sub`, expected path display is `file.txt` (cwd-rel).
         name: "merge_with_conflict_in_subdir",
         setup: Setup::Subdir {
             setup: setup_merge_with_conflict_in_subdir,
@@ -137,6 +120,22 @@ const CASES: &[Case] = &[
             names: &["sub"],
             setup: setup_submodule_new_commits,
         },
+    },
+    Case {
+        name: "upstream_up_to_date",
+        setup: Setup::Plain(setup_upstream_up_to_date),
+    },
+    Case {
+        name: "upstream_ahead",
+        setup: Setup::Plain(setup_upstream_ahead),
+    },
+    Case {
+        name: "upstream_behind",
+        setup: Setup::Plain(setup_upstream_behind),
+    },
+    Case {
+        name: "upstream_diverged",
+        setup: Setup::Plain(setup_upstream_diverged),
     },
 ];
 
@@ -186,6 +185,19 @@ fn setup_renamed_staged(root: &Path) {
         .mv("file.txt", "renamed.txt");
 }
 
+fn setup_renamed_staged_in_subdir(root: &Path) {
+    // Rename inside `sub/`, so both paths render relative to the `sub/`
+    // cwd. The longer body ensures libgit2's rename detector matches.
+    Repo::init(root)
+        .write(
+            "sub/file.txt",
+            "line one\nline two\nline three\nline four\n",
+        )
+        .add_all()
+        .commit("initial")
+        .mv("sub/file.txt", "sub/renamed.txt");
+}
+
 fn setup_untracked(root: &Path) {
     setup_clean(root);
     Repo::new(root).write("untracked.txt", "x\n");
@@ -205,7 +217,6 @@ fn setup_untracked_high_byte_filename(root: &Path) {
     Repo::new(root).write("caf\u{00e9}.txt", "x\n");
 }
 
-/// Sets up a merge conflict on `file.txt` (left in-progress, not resolved).
 fn setup_merge_with_conflict(root: &Path) {
     let repo = Repo::init(root);
     repo.write("file.txt", "base\n")
@@ -223,9 +234,6 @@ fn setup_merge_with_conflict(root: &Path) {
     repo.try_git(&["merge", "feature"]);
 }
 
-/// Same as `setup_merge_with_conflict` but the conflicting file lives
-/// in `sub/`. `effective_cwd` is set to `sub/` by the case's `Subdir`
-/// configuration so the test verifies cwd-relative path emission.
 fn setup_merge_with_conflict_in_subdir(root: &Path) {
     let repo = Repo::init(root);
     repo.write("sub/file.txt", "base\n")
@@ -242,9 +250,6 @@ fn setup_merge_with_conflict_in_subdir(root: &Path) {
     repo.try_git(&["merge", "feature"]);
 }
 
-/// Sets up a cherry-pick that conflicts. The `short_oid` rendered in
-/// the header depends on the cherry-picked commit's SHA, which is
-/// deterministic thanks to the fixture date pin.
 fn setup_cherry_pick_with_conflict(root: &Path) {
     let repo = Repo::init(root);
     repo.write("file.txt", "base\n")
@@ -283,11 +288,81 @@ fn setup_submodule_new_commits(h: &TestHarness) {
         .commit("submodule advances");
 }
 
+// -- Upstream-tracking setups --
+//
+// We fake an upstream without a real remote: `update-ref` positions
+// `refs/remotes/origin/master`, and the configs below wire `master` to
+// track it. The url + fetch refspec are both required for git to treat
+// `origin/master` as a remote-tracking ref (otherwise `@{u}` won't
+// resolve); the url itself is a dummy and never fetched.
+
+fn configure_master_tracks_origin(repo: &Repo) {
+    repo.run_git(&["config", "branch.master.remote", "origin"]);
+    repo.run_git(&["config", "branch.master.merge", "refs/heads/master"]);
+    repo.run_git(&["config", "remote.origin.url", "/dev/null"]);
+    repo.run_git(&[
+        "config",
+        "remote.origin.fetch",
+        "+refs/heads/*:refs/remotes/origin/*",
+    ]);
+}
+
+fn setup_upstream_up_to_date(root: &Path) {
+    let repo = Repo::init(root);
+    repo.write("file.txt", "initial\n")
+        .add_all()
+        .commit("initial");
+    repo.run_git(&["update-ref", "refs/remotes/origin/master", "HEAD"]);
+    configure_master_tracks_origin(&repo);
+}
+
+fn setup_upstream_ahead(root: &Path) {
+    let repo = Repo::init(root);
+    repo.write("file.txt", "initial\n")
+        .add_all()
+        .commit("initial");
+    // origin/master pinned at the initial commit; HEAD advances past it.
+    repo.run_git(&["update-ref", "refs/remotes/origin/master", "HEAD"]);
+    configure_master_tracks_origin(&repo);
+    repo.write("file.txt", "ahead\n")
+        .add_all()
+        .commit("local commit");
+}
+
+fn setup_upstream_behind(root: &Path) {
+    let repo = Repo::init(root);
+    repo.write("file.txt", "initial\n")
+        .add_all()
+        .commit("initial");
+    // Make a second commit, mark it as origin/master, then reset HEAD back.
+    repo.write("file.txt", "remote\n")
+        .add_all()
+        .commit("remote commit");
+    repo.run_git(&["update-ref", "refs/remotes/origin/master", "HEAD"]);
+    repo.run_git(&["reset", "-q", "--hard", "HEAD~1"]);
+    configure_master_tracks_origin(&repo);
+}
+
+fn setup_upstream_diverged(root: &Path) {
+    let repo = Repo::init(root);
+    repo.write("file.txt", "initial\n")
+        .add_all()
+        .commit("initial");
+    // Build the "remote" side first, capture as origin/master, reset HEAD.
+    repo.write("file.txt", "remote\n")
+        .add_all()
+        .commit("remote commit");
+    repo.run_git(&["update-ref", "refs/remotes/origin/master", "HEAD"]);
+    repo.run_git(&["reset", "-q", "--hard", "HEAD~1"]);
+    configure_master_tracks_origin(&repo);
+    // Then advance HEAD on a different content path so the two diverge.
+    repo.write("file.txt", "local\n")
+        .add_all()
+        .commit("local commit");
+}
+
 // -- Harness wiring --
 
-/// Standard `OutputOpts` for human-display tests: untracked files shown,
-/// no porcelain, no `-z`, no `--branch`, ignored files hidden, all
-/// submodule entries included.
 const fn default_opts() -> OutputOpts {
     OutputOpts {
         porcelain: None,
@@ -299,17 +374,14 @@ const fn default_opts() -> OutputOpts {
     }
 }
 
-/// Returns the on-disk path for a case's snapshot, relative to the
-/// crate root via `CARGO_MANIFEST_DIR`.
 fn snapshot_path(case_name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("src/status/snapshots/human")
+        .join("src/status/snapshots/long")
         .join(format!("{case_name}.snapshot"))
 }
 
-/// Builds the same `git2::StatusOptions` that production `status::status`
-/// would for the given `opts` and `repo_kind`. Kept in sync with
-/// `status::mod` by hand; if the production options grow, mirror here.
+/// Mirrors the `StatusOptions` set up by production `status::status`.
+/// Kept in sync by hand.
 fn build_status_options(opts: OutputOpts, repo_kind: RepoKind) -> git2::StatusOptions {
     let mut so = git2::StatusOptions::new();
     match opts.untracked_files {
@@ -333,9 +405,7 @@ fn build_status_options(opts: OutputOpts, repo_kind: RepoKind) -> git2::StatusOp
     so
 }
 
-/// Runs subspy's `display_status` against `project` with `opts` and
-/// returns the captured bytes.
-fn run_subspy_human(project: &ProjectPath, opts: OutputOpts) -> Vec<u8> {
+fn run_subspy_long(project: &ProjectPath, opts: OutputOpts) -> Vec<u8> {
     let repo = Repository::open(&project.repo_root).unwrap();
     let mut so = build_status_options(opts, project.kind);
     let non_submod = repo.statuses(Some(&mut so)).unwrap();
@@ -354,18 +424,20 @@ fn run_subspy_human(project: &ProjectPath, opts: OutputOpts) -> Vec<u8> {
     let cwd_rel = super::cwd_relative_to_repo(&project.repo_root, &project.effective_cwd);
     let rel = super::relativize::Relativizer::new(&cwd_rel);
 
+    let entries = super::StatusEntries {
+        non_submod: &non_submod,
+        submodules: &submodules,
+        deleted_submodules: &deleted,
+    };
+
     let mut got: Vec<u8> = Vec::new();
-    display_status(&mut got, &repo, &non_submod, &submodules, &deleted, &rel).unwrap();
+    display_status(&mut got, &repo, &entries, &rel).unwrap();
     got
 }
 
-/// Compares `got` to the committed snapshot for `case_name`. With
-/// `UPDATE_HUMAN_SNAPSHOTS=1` set, instead overwrites the snapshot file
-/// with `got` and passes; the caller should then inspect the diff and
-/// commit if it's correct.
 fn assert_snapshot(case_name: &str, got: &[u8]) {
     let path = snapshot_path(case_name);
-    let updating = std::env::var_os("UPDATE_HUMAN_SNAPSHOTS").is_some();
+    let updating = std::env::var_os("UPDATE_LONG_SNAPSHOTS").is_some();
 
     if updating {
         if let Some(parent) = path.parent() {
@@ -379,7 +451,7 @@ fn assert_snapshot(case_name: &str, got: &[u8]) {
     let expected = std::fs::read(&path).unwrap_or_else(|e| {
         panic!(
             "missing snapshot for '{case_name}' at {} ({e}); \
-             re-run with UPDATE_HUMAN_SNAPSHOTS=1 to seed it",
+             re-run with UPDATE_LONG_SNAPSHOTS=1 to seed it",
             path.display()
         )
     });
@@ -387,14 +459,13 @@ fn assert_snapshot(case_name: &str, got: &[u8]) {
     let got_str = std::str::from_utf8(got).expect("subspy output not utf-8");
     let expected_str = std::str::from_utf8(&expected).expect("snapshot not utf-8");
     assert_eq!(
-        expected_str, got_str,
+        expected_str,
+        got_str,
         "snapshot mismatch for '{case_name}' (path: {})",
         path.display()
     );
 }
 
-/// Runs `case` end-to-end: builds the fixture, runs subspy, asserts
-/// against (or seeds) the snapshot.
 fn run_case(case: &Case) {
     match &case.setup {
         Setup::Plain(setup) => {
@@ -405,7 +476,7 @@ fn run_case(case: &Case) {
                 effective_cwd: tmp.path().to_path_buf(),
                 kind: RepoKind::Normal,
             };
-            let got = run_subspy_human(&project, default_opts());
+            let got = run_subspy_long(&project, default_opts());
             assert_snapshot(case.name, &got);
         }
         Setup::Subdir { setup, subdir } => {
@@ -416,7 +487,7 @@ fn run_case(case: &Case) {
                 effective_cwd: tmp.path().join(subdir),
                 kind: RepoKind::Normal,
             };
-            let got = run_subspy_human(&project, default_opts());
+            let got = run_subspy_long(&project, default_opts());
             assert_snapshot(case.name, &got);
         }
         Setup::WithSubmodules { names, setup } => {
@@ -431,7 +502,7 @@ fn run_case(case: &Case) {
                 effective_cwd: harness.root().path().to_path_buf(),
                 kind: RepoKind::WithSubmodules,
             };
-            let got = run_subspy_human(&project, default_opts());
+            let got = run_subspy_long(&project, default_opts());
             assert_snapshot(case.name, &got);
         }
     }

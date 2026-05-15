@@ -1,12 +1,12 @@
 //! Streams repo-relative paths out as cwd-relative paths for the
-//! human-readable `status` display.
+//! long-format `status` display.
 //!
 //! Subspy stores paths relative to the repo root (canonical form for
-//! IPC and submodule indexing). Real git's human-readable status output
+//! IPC and submodule indexing). Real git's long-format status output
 //! reports paths relative to the invocation cwd (or `git -C <path>`'s
 //! target). When the two differ - the user ran subspy from a
 //! subdirectory or passed `--dir` - we need to rewrite the path before
-//! emitting it so the human output matches git.
+//! emitting it so the output matches git.
 //!
 //! Porcelain output (v1/v2) is repo-root-relative regardless of cwd, by
 //! design - so it never goes through this module.
@@ -50,12 +50,9 @@ impl<'a> Relativizer<'a> {
         }
     }
 
-    /// Streams the cwd-relative form of `path` (a repo-relative path)
-    /// into `out`, applying [`QuoteMode::Standard`] C-style quoting -
-    /// matching real git's human display under the default
-    /// `core.quotePath=true`. Paths containing control characters, high
-    /// bytes, `"`, or `\` get wrapped in `"..."` with escapes; ordinary
-    /// paths are emitted verbatim.
+    /// Streams the cwd-relative form of `path` into `out` with
+    /// [`QuoteMode::Standard`] C-style quoting (git's default
+    /// `core.quotePath=true`).
     ///
     /// # Errors
     ///

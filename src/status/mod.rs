@@ -2,7 +2,7 @@
 //! in a format that mirrors `git status`.
 //!
 //! Output formats live in dedicated submodules:
-//! - [`display`] for the human-readable layout
+//! - [`display`] for the long-format (default, human-readable) layout
 //! - [`porcelain_v1`] and [`porcelain_v2`] for the machine-readable formats
 //!
 //! Helper modules:
@@ -20,7 +20,7 @@ mod relativize;
 mod submodule;
 
 #[cfg(test)]
-mod human_tests;
+mod long_tests;
 #[cfg(test)]
 mod porcelain_tests;
 
@@ -31,7 +31,7 @@ use thiserror::Error;
 use std::{borrow::Cow, io, path::Path};
 
 use crate::{
-    RepoKind,
+    RepoKind, StatusSummary,
     cli::ProjectPath,
     connection::{
         IpcError,
@@ -97,6 +97,20 @@ pub struct OutputOpts {
     pub untracked_files: UntrackedFiles,
     pub show_ignored: bool,
     pub branch: bool,
+}
+
+/// Porcelain-specific format flags (`-z` and `--branch`).
+#[derive(Debug, Clone, Copy)]
+pub struct PorcelainOpts {
+    pub null_terminate: bool,
+    pub branch: bool,
+}
+
+/// The set of status entries to render.
+pub struct StatusEntries<'a> {
+    pub non_submod: &'a git2::Statuses<'a>,
+    pub submodules: &'a [(String, StatusSummary)],
+    pub deleted_submodules: &'a [String],
 }
 
 /// Retrieves and displays the statuses for the repository described by
@@ -182,35 +196,25 @@ pub fn status(
     let cwd_rel = cwd_relative_to_repo(&project.repo_root, &project.effective_cwd);
     let rel = relativize::Relativizer::new(&cwd_rel);
 
+    let entries = StatusEntries {
+        non_submod: &non_submodule_statuses,
+        submodules: &submodule_statuses,
+        deleted_submodules: &deleted_submodule_paths,
+    };
+    let porcelain_opts = PorcelainOpts {
+        null_terminate,
+        branch,
+    };
+
     let mut out = io::BufWriter::with_capacity(64 * 1024, io::stdout().lock());
     match porcelain {
-        Some(PorcelainVersion::V1) => porcelain_v1::display_porcelain_v1(
-            &mut out,
-            &repo,
-            &non_submodule_statuses,
-            &submodule_statuses,
-            &deleted_submodule_paths,
-            null_terminate,
-            branch,
-        )?,
-        Some(PorcelainVersion::V2) => porcelain_v2::display_porcelain_v2(
-            &mut out,
-            &repo,
-            &non_submodule_statuses,
-            &submodule_statuses,
-            &deleted_submodule_paths,
-            &rel,
-            null_terminate,
-            branch,
-        )?,
-        None => display::display_status(
-            &mut out,
-            &repo,
-            &non_submodule_statuses,
-            &submodule_statuses,
-            &deleted_submodule_paths,
-            &rel,
-        )?,
+        Some(PorcelainVersion::V1) => {
+            porcelain_v1::display_porcelain_v1(&mut out, &repo, &entries, porcelain_opts)?;
+        }
+        Some(PorcelainVersion::V2) => {
+            porcelain_v2::display_porcelain_v2(&mut out, &repo, &entries, &rel, porcelain_opts)?;
+        }
+        None => display::display_status(&mut out, &repo, &entries, &rel)?,
     }
 
     Ok(())

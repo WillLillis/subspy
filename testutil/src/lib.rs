@@ -34,12 +34,8 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Polling interval between status checks.
 pub const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
-// Fixture identity / time pins. Every commit made through the test
-// harness uses these so commit SHAs are byte-stable across runs and
-// across CI environments. Required by the human-display snapshot tests,
-// which compare subspy output (including short-OIDs in operation-state
-// headers) against committed `.snapshot` files. The Unix timestamp is
-// arbitrary - any past, fixed value works.
+// Identity / time pins used by every fixture commit so SHAs are
+// byte-stable across runs - required by the long-format snapshot tests.
 pub const FIXTURE_NAME: &str = "Test";
 pub const FIXTURE_EMAIL: &str = "test@test.com";
 pub const FIXTURE_TIME: i64 = 1_700_000_000;
@@ -362,9 +358,6 @@ pub fn create_source_repo(path: &Path) {
         .unwrap();
 }
 
-/// Returns a `Signature` pinned to the fixture identity and timestamp so
-/// libgit2-driven commits produce deterministic SHAs (matching the env-
-/// pinned commits made through [`git_may_fail`]).
 fn fixture_signature() -> Signature<'static> {
     Signature::new(FIXTURE_NAME, FIXTURE_EMAIL, &Time::new(FIXTURE_TIME, 0)).unwrap()
 }
@@ -562,12 +555,8 @@ pub fn git(args: &[&str]) {
 
 /// Like [`git()`] but returns the `Output` instead of panicking on non-zero
 /// exit. Useful for commands that may legitimately fail (e.g. `git rebase`
-/// hitting a conflict).
-///
-/// Pins the author/committer identity and date via `GIT_AUTHOR_*` /
-/// `GIT_COMMITTER_*` env vars so that commit SHAs are deterministic
-/// across runs and machines. Env vars take precedence over `-c` config,
-/// so `-c user.name=...` flags are redundant here but kept for clarity.
+/// hitting a conflict). Pins author/committer identity + date via env
+/// so fixture commit SHAs are deterministic.
 pub fn git_may_fail(args: &[&str]) -> std::process::Output {
     let pinned_date = format!("{FIXTURE_TIME} +0000");
     std::process::Command::new("git")

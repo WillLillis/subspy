@@ -10,11 +10,10 @@ use crate::{
     paint::{GREEN, RED, paint_into},
 };
 
-use super::relativize::Relativizer;
-
 use super::{
-    StatusResult,
+    StatusEntries, StatusResult,
     header::{print_header, print_unmerged_paths},
+    relativize::Relativizer,
 };
 
 const STAGED_HEADER: &str = "Changes to be committed:
@@ -91,6 +90,16 @@ const fn unstaged_label(st: StatusSummary) -> &'static str {
 /// divergence) does not qualify.
 const fn has_workdir_changes(st: StatusSummary) -> bool {
     st.contains(StatusSummary::MODIFIED_CONTENT) || st.contains(StatusSummary::UNTRACKED_CONTENT)
+}
+
+/// Returns `true` if `st`'s `Display` impl emits the trailing
+/// `(modified content, ...)` suffix on a submodule entry.
+const fn has_status_info(st: StatusSummary) -> bool {
+    st.intersects(
+        StatusSummary::MODIFIED_CONTENT
+            .union(StatusSummary::UNTRACKED_CONTENT)
+            .union(StatusSummary::NEW_COMMITS),
+    )
 }
 
 /// Prints the "Changes to be committed:" section for staged files, submodules,
@@ -252,15 +261,14 @@ fn print_unstaged_changes(
             header = true;
         }
         let label = unstaged_label(*submod_status);
-        let istatus = submod_status.to_string();
         paint_into(stdout, RED, |out| {
             write!(out, "\t{label}")?;
             rel.write_to(out, submod_path)
         })?;
-        if istatus.is_empty() {
-            writeln!(stdout)?;
+        if has_status_info(*submod_status) {
+            writeln!(stdout, " {submod_status}")?;
         } else {
-            writeln!(stdout, " {istatus}")?;
+            writeln!(stdout)?;
         }
     }
 
@@ -361,16 +369,17 @@ fn print_lock_file_errors(
 pub fn display_status(
     out: &mut impl Write,
     repo: &Repository,
-    non_submodule_statuses: &Statuses<'_>,
-    submodule_statuses: &[(String, StatusSummary)],
-    deleted_submodule_paths: &[String],
+    entries: &StatusEntries<'_>,
     rel: &Relativizer<'_>,
 ) -> StatusResult<()> {
+    let StatusEntries {
+        non_submod,
+        submodules,
+        deleted_submodules,
+    } = *entries;
+
     // Fast path: nothing dirty
-    if non_submodule_statuses.is_empty()
-        && submodule_statuses.is_empty()
-        && deleted_submodule_paths.is_empty()
-    {
+    if non_submod.is_empty() && submodules.is_empty() && deleted_submodules.is_empty() {
         print_header(repo, out)?;
         writeln!(out, "nothing to commit, working tree clean")?;
         return Ok(());
@@ -378,29 +387,19 @@ pub fn display_status(
 
     print_header(repo, out)?;
 
-    let rm_in_workdir = non_submodule_statuses
+    let rm_in_workdir = non_submod
         .iter()
         .any(|e| e.status().contains(git2::Status::WT_DELETED))
-        || submodule_statuses
+        || submodules
             .iter()
             .any(|(_, st)| st.contains(StatusSummary::DELETED_WORKDIR));
 
-    let changes_in_index = print_staged_changes(
-        non_submodule_statuses,
-        submodule_statuses,
-        deleted_submodule_paths,
-        rel,
-        out,
-    )?;
+    let changes_in_index =
+        print_staged_changes(non_submod, submodules, deleted_submodules, rel, out)?;
     let has_conflicts = print_unmerged_paths(repo, rel, out)?;
-    let changed_in_workdir = print_unstaged_changes(
-        non_submodule_statuses,
-        submodule_statuses,
-        rm_in_workdir,
-        rel,
-        out,
-    )?;
-    let has_untracked = print_untracked_files(non_submodule_statuses, rel, out)?;
+    let changed_in_workdir =
+        print_unstaged_changes(non_submod, submodules, rm_in_workdir, rel, out)?;
+    let has_untracked = print_untracked_files(non_submod, rel, out)?;
 
     print_summary(
         changes_in_index,
@@ -409,7 +408,7 @@ pub fn display_status(
         out,
     )?;
 
-    print_lock_file_errors(submodule_statuses, out)?;
+    print_lock_file_errors(submodules, out)?;
 
     Ok(())
 }
@@ -514,5 +513,43 @@ mod tests {
     #[test]
     fn workdir_changes_clean() {
         assert!(!has_workdir_changes(StatusSummary::clean()));
+    }
+
+    // -- has_status_info --
+
+    #[test]
+    fn status_info_modified_content() {
+        assert!(has_status_info(StatusSummary::MODIFIED_CONTENT));
+    }
+
+    #[test]
+    fn status_info_untracked_content() {
+        assert!(has_status_info(StatusSummary::UNTRACKED_CONTENT));
+    }
+
+    #[test]
+    fn status_info_new_commits() {
+        // NEW_COMMITS alone does qualify here, unlike `has_workdir_changes`.
+        assert!(has_status_info(StatusSummary::NEW_COMMITS));
+    }
+
+    #[test]
+    fn status_info_staged_only() {
+        // Display omits STAGED bits, so a STAGED-only status produces
+        // no suffix and the predicate must return false.
+        assert!(!has_status_info(StatusSummary::STAGED));
+        assert!(!has_status_info(StatusSummary::STAGED_NEW));
+    }
+
+    #[test]
+    fn status_info_deleted_workdir_only() {
+        // Display also omits DELETED_WORKDIR (the "deleted:" label
+        // already carries that info).
+        assert!(!has_status_info(StatusSummary::DELETED_WORKDIR));
+    }
+
+    #[test]
+    fn status_info_clean() {
+        assert!(!has_status_info(StatusSummary::clean()));
     }
 }

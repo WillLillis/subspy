@@ -442,29 +442,24 @@ fn assert_outputs_match(project: &ProjectPath, case_name: &str, opts: OutputOpts
     let cwd_rel = super::cwd_relative_to_repo(&project.repo_root, &project.effective_cwd);
     let rel = super::relativize::Relativizer::new(&cwd_rel);
 
+    let entries = super::StatusEntries {
+        non_submod: &non_submod,
+        submodules: &submodules,
+        deleted_submodules: &deleted,
+    };
+    let porcelain_opts = super::PorcelainOpts {
+        null_terminate: opts.null_terminate,
+        branch: opts.branch,
+    };
+
     let mut got: Vec<u8> = Vec::new();
     match opts.porcelain {
-        Some(PorcelainVersion::V1) => display_porcelain_v1(
-            &mut got,
-            &repo,
-            &non_submod,
-            &submodules,
-            &deleted,
-            opts.null_terminate,
-            opts.branch,
-        )
-        .unwrap(),
-        Some(PorcelainVersion::V2) => display_porcelain_v2(
-            &mut got,
-            &repo,
-            &non_submod,
-            &submodules,
-            &deleted,
-            &rel,
-            opts.null_terminate,
-            opts.branch,
-        )
-        .unwrap(),
+        Some(PorcelainVersion::V1) => {
+            display_porcelain_v1(&mut got, &repo, &entries, porcelain_opts).unwrap();
+        }
+        Some(PorcelainVersion::V2) => {
+            display_porcelain_v2(&mut got, &repo, &entries, &rel, porcelain_opts).unwrap();
+        }
         None => panic!("porcelain test runner doesn't support non-porcelain output"),
     }
 

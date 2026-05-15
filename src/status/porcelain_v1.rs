@@ -5,15 +5,16 @@
 //! (`XY PATH\0ORIG\0` under `-z`) for renames. The `--branch` flag
 //! prepends a `## branch...upstream [ahead/behind]` header.
 
-use git2::{Repository, Statuses};
+use git2::Repository;
 use rustc_hash::FxHashMap;
 
+use std::borrow::Cow;
 use std::io::{self, Write};
 
 use crate::StatusSummary;
 
 use super::{
-    StatusResult,
+    PorcelainOpts, StatusEntries, StatusResult,
     conflict::{ConflictEntry, build_conflict_map},
     line_terminator,
     quote::{QuoteMode, write_path},
@@ -28,16 +29,18 @@ const QUOTE_MODE: QuoteMode = QuoteMode::QuoteSpace;
 
 /// Renders the full porcelain v1 output to `out`: an optional
 /// `## branch...` header followed by one `XY PATH` line per entry,
-/// terminated by LF or NUL per `null_terminate`.
+/// terminated by LF or NUL per `opts.null_terminate`.
 pub fn display_porcelain_v1(
     out: &mut impl Write,
     repo: &Repository,
-    non_submod: &Statuses<'_>,
-    submodule_statuses: &[(String, StatusSummary)],
-    deleted_submodule_paths: &[String],
-    null_terminate: bool,
-    branch: bool,
+    entries: &StatusEntries<'_>,
+    opts: PorcelainOpts,
 ) -> StatusResult<()> {
+    let PorcelainOpts {
+        null_terminate,
+        branch,
+    } = opts;
+
     if branch {
         write_branch_header(repo, out)?;
     }
@@ -47,7 +50,7 @@ pub fn display_porcelain_v1(
 
     // Match git's three-pass ordering: tracked (modified/staged/conflicted/
     // renamed) first, then untracked, then ignored.
-    for entry in non_submod.iter() {
+    for entry in entries.non_submod.iter() {
         let st = entry.status();
         if st == git2::Status::CURRENT
             || st == git2::Status::WT_NEW
@@ -64,22 +67,24 @@ pub fn display_porcelain_v1(
         }
     }
 
-    for (path, st) in submodule_statuses {
+    for (path, st) in entries.submodules {
         write_submodule(path, *st, out, null_terminate)?;
     }
 
-    for path in deleted_submodule_paths {
+    for path in entries.deleted_submodules {
         write_xy_path(out, "D ", path, null_terminate)?;
     }
 
-    for entry in non_submod
+    for entry in entries
+        .non_submod
         .iter()
         .filter(|e| e.status() == git2::Status::WT_NEW)
     {
         write_xy_path(out, "??", entry.path().unwrap_or(""), null_terminate)?;
     }
 
-    for entry in non_submod
+    for entry in entries
+        .non_submod
         .iter()
         .filter(|e| e.status().contains(git2::Status::IGNORED))
     {
@@ -243,10 +248,14 @@ fn write_renamed(
     } else {
         entry.index_to_workdir()
     };
-    let path_str =
-        |p: Option<&std::path::Path>| p.map(|p| p.display().to_string()).unwrap_or_default();
-    let old_path = path_str(delta.as_ref().and_then(|d| d.old_file().path()));
-    let new_path = path_str(delta.as_ref().and_then(|d| d.new_file().path()));
+    let old_path = delta
+        .as_ref()
+        .and_then(|d| d.old_file().path())
+        .map_or(Cow::Borrowed(""), |p| p.to_string_lossy());
+    let new_path = delta
+        .as_ref()
+        .and_then(|d| d.new_file().path())
+        .map_or(Cow::Borrowed(""), |p| p.to_string_lossy());
     if null_terminate {
         // -z form: `XY PATH\0ORIG\0` (path first, no arrow). No quoting
         // applies under -z.

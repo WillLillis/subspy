@@ -6,10 +6,11 @@
 //! prepends `# branch.oid`/`# branch.head`/`# branch.upstream`/`# branch.ab`
 //! header lines.
 
-use git2::{Repository, Statuses};
+use git2::Repository;
 use rustc_hash::FxHashMap;
 
 use std::{
+    borrow::Cow,
     io::{self, Write},
     path::Path,
 };
@@ -17,7 +18,7 @@ use std::{
 use crate::StatusSummary;
 
 use super::{
-    StatusResult,
+    PorcelainOpts, StatusEntries, StatusResult,
     conflict::{ConflictEntry, build_conflict_map},
     line_terminator,
     quote::QuoteMode,
@@ -33,20 +34,21 @@ const QUOTE_MODE: QuoteMode = QuoteMode::Standard;
 
 /// Renders the full porcelain v2 output to `out`: optional `# branch.*`
 /// header lines followed by one `1`/`2`/`u`/`?`/`!` line per entry,
-/// terminated by LF or NUL per `null_terminate`. `rel` is the
+/// terminated by LF or NUL per `opts.null_terminate`. `rel` is the
 /// cwd-aware relativizer; under `-z` it falls back to repo-root paths
 /// internally.
-#[expect(clippy::too_many_arguments)]
 pub fn display_porcelain_v2(
     out: &mut impl Write,
     repo: &Repository,
-    non_submod: &Statuses<'_>,
-    submodule_statuses: &[(String, StatusSummary)],
-    deleted_submodule_paths: &[String],
+    entries: &StatusEntries<'_>,
     rel: &Relativizer<'_>,
-    null_terminate: bool,
-    branch: bool,
+    opts: PorcelainOpts,
 ) -> StatusResult<()> {
+    let PorcelainOpts {
+        null_terminate,
+        branch,
+    } = opts;
+
     if branch {
         write_branch_headers(repo, out)?;
     }
@@ -57,7 +59,7 @@ pub fn display_porcelain_v2(
 
     // Match git's three-pass ordering: tracked (modified/staged/conflicted/
     // renamed) first, then untracked, then ignored.
-    for entry in non_submod.iter() {
+    for entry in entries.non_submod.iter() {
         let st = entry.status();
         if st == git2::Status::CURRENT
             || st == git2::Status::WT_NEW
@@ -74,7 +76,7 @@ pub fn display_porcelain_v2(
         }
     }
 
-    for (path, st) in submodule_statuses {
+    for (path, st) in entries.submodules {
         let h_head = head_tree
             .as_ref()
             .and_then(|t| t.get_path(Path::new(path)).ok())
@@ -85,7 +87,7 @@ pub fn display_porcelain_v2(
         write_submodule(path, *st, h_head, h_index, out, rel, null_terminate)?;
     }
 
-    for path in deleted_submodule_paths {
+    for path in entries.deleted_submodules {
         let h_head = head_tree
             .as_ref()
             .and_then(|t| t.get_path(Path::new(path)).ok())
@@ -93,7 +95,8 @@ pub fn display_porcelain_v2(
         write_deleted_submodule(path, h_head, out, rel, null_terminate)?;
     }
 
-    for entry in non_submod
+    for entry in entries
+        .non_submod
         .iter()
         .filter(|e| e.status() == git2::Status::WT_NEW)
     {
@@ -102,7 +105,8 @@ pub fn display_porcelain_v2(
         out.write_all(line_terminator(null_terminate).as_bytes())?;
     }
 
-    for entry in non_submod
+    for entry in entries
+        .non_submod
         .iter()
         .filter(|e| e.status().contains(git2::Status::IGNORED))
     {
@@ -299,10 +303,14 @@ fn write_renamed(
     } else {
         entry.index_to_workdir()
     };
-    let path_str =
-        |p: Option<&std::path::Path>| p.map(|p| p.display().to_string()).unwrap_or_default();
-    let old_path = path_str(delta.as_ref().and_then(|d| d.old_file().path()));
-    let new_path = path_str(delta.as_ref().and_then(|d| d.new_file().path()));
+    let old_path = delta
+        .as_ref()
+        .and_then(|d| d.old_file().path())
+        .map_or(Cow::Borrowed(""), |p| p.to_string_lossy());
+    let new_path = delta
+        .as_ref()
+        .and_then(|d| d.new_file().path())
+        .map_or(Cow::Borrowed(""), |p| p.to_string_lossy());
     let EntryModesAndOids {
         m_head,
         m_idx,
