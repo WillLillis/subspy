@@ -22,6 +22,10 @@ use super::{
     IgnoreSubmodules, OutputFormat, OutputOpts, PorcelainVersion, UntrackedFiles,
     compute_local_statuses, deleted_submodule_paths, porcelain_v1::display_porcelain_v1,
     porcelain_v2::display_porcelain_v2, submodule::apply_ignore_submodules,
+    test_fixtures::{
+        setup_upstream_ahead, setup_upstream_behind, setup_upstream_diverged,
+        setup_upstream_up_to_date,
+    },
 };
 
 fn setup_empty_repo(root: &Path) {
@@ -263,6 +267,14 @@ const CASES: &[Case] = &[
         &["sub_a"],
         setup_submod_rm_rf_workdir,
     ),
+    // Upstream tracking. Only `--branch` output diverges per upstream
+    // state, so these exist primarily to exercise the `v1_branch` /
+    // `v2_branch` matrix arms; without `--branch` they produce the
+    // same output as `clean`.
+    plain("upstream up-to-date", setup_upstream_up_to_date),
+    plain("upstream ahead", setup_upstream_ahead),
+    plain("upstream behind", setup_upstream_behind),
+    plain("upstream diverged", setup_upstream_diverged),
 ];
 
 const fn plain(name: &'static str, setup: fn(&Path)) -> Case {
