@@ -185,12 +185,26 @@ impl Drop for LockFileGuard<'_> {
 /// or the child process cannot be spawned.
 pub fn spawn_daemon(path: &Path, log_level: Option<&str>) -> std::io::Result<()> {
     let exe = std::env::current_exe()?;
+    let mut cmd = build_daemon_command(&exe, path, log_level);
+    crate::proc::configure_detached_daemon(&mut cmd);
+    cmd.spawn()?;
+    Ok(())
+}
+
+/// Builds the argv-pinned `Command` for the daemon child. Prepends
+/// [`INTERNAL_FLAG`] so the receiving process runs subspy's CLI even
+/// if `current_exe()` resolved to the `subspy-git` shim.
+///
+/// [`INTERNAL_FLAG`]: crate::entry::INTERNAL_FLAG
+fn build_daemon_command(
+    exe: &Path,
+    repo_path: &Path,
+    log_level: Option<&str>,
+) -> std::process::Command {
     let mut cmd = std::process::Command::new(exe);
-    // Prepend the internal sentinel so the receiving process runs subspy's
-    // CLI even if `current_exe()` is the `subspy-git` shim.
     cmd.arg(crate::entry::INTERNAL_FLAG)
         .arg("start")
-        .arg(path)
+        .arg(repo_path)
         .arg("--foreground")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -198,9 +212,32 @@ pub fn spawn_daemon(path: &Path, log_level: Option<&str>) -> std::io::Result<()>
     if let Some(level) = log_level {
         cmd.args(["--log-level", level]);
     }
+    cmd
+}
 
-    crate::proc::configure_detached_daemon(&mut cmd);
+#[cfg(test)]
+mod daemon_command_tests {
+    use super::build_daemon_command;
+    use crate::entry::INTERNAL_FLAG;
+    use std::ffi::OsStr;
+    use std::path::Path;
 
-    cmd.spawn()?;
-    Ok(())
+    #[test]
+    fn argv_starts_with_internal_flag_then_start_path_foreground() {
+        let cmd = build_daemon_command(Path::new("/path/to/subspy"), Path::new("/repo/root"), None);
+        let args: Vec<Option<&str>> = cmd.get_args().map(OsStr::to_str).collect();
+        assert_eq!(args[0], Some(INTERNAL_FLAG));
+        assert_eq!(args[1], Some("start"));
+        assert_eq!(args[2], Some("/repo/root"));
+        assert_eq!(args[3], Some("--foreground"));
+        assert_eq!(args.len(), 4, "no extra args when log_level is None");
+    }
+
+    #[test]
+    fn log_level_appended_when_provided() {
+        let cmd = build_daemon_command(Path::new("/exe"), Path::new("/repo"), Some("debug"));
+        let args: Vec<Option<&str>> = cmd.get_args().map(OsStr::to_str).collect();
+        assert_eq!(args.last().copied().flatten(), Some("debug"));
+        assert_eq!(args[args.len() - 2], Some("--log-level"));
+    }
 }
