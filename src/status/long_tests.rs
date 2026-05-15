@@ -120,7 +120,6 @@ const CASES: &[Case] = &[
     },
 ];
 
-
 // -- Harness wiring --
 
 const fn default_opts() -> OutputOpts {

@@ -20,8 +20,10 @@ use crate::{RepoKind, cli::ProjectPath};
 
 use super::{
     IgnoreSubmodules, OutputFormat, OutputOpts, PorcelainVersion, UntrackedFiles,
-    compute_local_statuses, deleted_submodule_paths, porcelain_v1::display_porcelain_v1,
-    porcelain_v2::display_porcelain_v2, submodule::apply_ignore_submodules,
+    compute_local_statuses, deleted_submodule_paths,
+    porcelain_v1::display_porcelain_v1,
+    porcelain_v2::display_porcelain_v2,
+    submodule::apply_ignore_submodules,
     test_fixtures::{
         setup_upstream_ahead, setup_upstream_behind, setup_upstream_diverged,
         setup_upstream_up_to_date,

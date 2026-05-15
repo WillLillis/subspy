@@ -255,7 +255,8 @@ fn assert_snapshot(case_name: &str, got: &[u8]) {
     let got_str = std::str::from_utf8(got).expect("subspy output not utf-8");
     let expected_str = std::str::from_utf8(&expected).expect("snapshot not utf-8");
     assert_eq!(
-        expected_str, got_str,
+        expected_str,
+        got_str,
         "snapshot mismatch for '{case_name}' (path: {})",
         path.display()
     );
