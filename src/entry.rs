@@ -39,7 +39,7 @@ where
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             if !err.to_string().is_empty() {
-                eprintln!("{}: {err}", Paint(RED, "Error"));
+                eprintln!("{}: {err}", Paint::new(RED, "Error"));
             }
             ExitCode::FAILURE
         }

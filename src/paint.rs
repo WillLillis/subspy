@@ -24,7 +24,7 @@ use anstyle::{AnsiColor, Color, Style};
 /// `NO_COLOR` (per <https://no-color.org>): any non-empty value disables
 /// styling. We read the environment once at first call and cache the
 /// answer for the rest of the process.
-pub fn color_enabled() -> bool {
+fn color_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| std::env::var_os("NO_COLOR").is_none_or(|v| v.is_empty()))
 }
@@ -41,14 +41,23 @@ pub const GREEN: Style = Style::new().fg_color(Some(Color::Ansi(AnsiColor::Green
 /// Embedding this in a `write!`/`format_args!` writes the ANSI prefix,
 /// the inner `T`'s `Display`, and the reset code straight into the
 /// formatter, never allocating an intermediate `String`.
-pub struct Paint<T>(pub Style, pub T);
+pub struct Paint<T> {
+    pub style: Style,
+    pub content: T,
+}
+
+impl<T> Paint<T> {
+    pub const fn new(style: Style, content: T) -> Self {
+        Self { style, content }
+    }
+}
 
 impl<T: Display> Display for Paint<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if color_enabled() {
-            write!(f, "{}{}{:#}", self.0, self.1, self.0)
+            write!(f, "{}{}{:#}", self.style, self.content, self.style)
         } else {
-            self.1.fmt(f)
+            self.content.fmt(f)
         }
     }
 }
@@ -88,7 +97,7 @@ mod tests {
         // so we just check that Display emits *something* containing the
         // value text, regardless of mode. Style-vs-plain is exercised by
         // the no-color test below via direct format string equivalence.
-        let s = format!("{}", Paint(RED, "hello"));
+        let s = format!("{}", Paint::new(RED, "hello"));
         assert!(s.contains("hello"));
     }
 

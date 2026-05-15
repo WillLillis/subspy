@@ -1,5 +1,5 @@
-//! Branch/upstream/operation-state header rendering for the human-readable
-//! `git status` output.
+//! Branch/upstream/operation-state header rendering for the long-format
+//! (default) `git status` output.
 //!
 //! Detects in-progress operations (rebase, merge, cherry-pick, revert,
 //! bisect, am, apply-backend rebase) and renders the same hint blocks
@@ -129,7 +129,7 @@ fn print_rebase_header(info: &RebaseInfo, stdout: &mut impl Write) -> Result<(),
     writeln!(
         stdout,
         "{} {}",
-        Paint(RED, format_args!("{label} in progress?; onto")),
+        Paint::new(RED, format_args!("{label} in progress?; onto")),
         info.onto_short
     )?;
 
@@ -215,8 +215,7 @@ fn print_rebase_header(info: &RebaseInfo, stdout: &mut impl Write) -> Result<(),
 }
 
 /// Prints the "Unmerged paths:" section for any conflicts in the index.
-/// Returns `true` if there were conflicts. Paths are routed through `rel`
-/// so they render cwd-relative, matching the rest of the human display.
+/// Returns `true` if there were conflicts.
 pub fn print_unmerged_paths(
     repo: &Repository,
     rel: &Relativizer<'_>,
@@ -228,10 +227,6 @@ pub fn print_unmerged_paths(
     }
 
     writeln!(stdout, "Unmerged paths:")?;
-    // Note: the `(use "git restore --staged <file>...")` hint belongs
-    // to the "Changes to be committed:" header (see `STAGED_HEADER` in
-    // `display.rs`), not here. Real `git status` only emits it there,
-    // gated on the existence of staged changes.
     writeln!(stdout, "  (use \"git add <file>...\" to mark resolution)")?;
 
     for conflict in index.conflicts()? {
@@ -270,19 +265,14 @@ pub fn print_unmerged_paths(
     Ok(true)
 }
 
-/// The detected repository state, used to print the appropriate header.
-///
-/// `branch_display` is the "On branch X" / "HEAD detached at <oid>" line
-/// that real git emits before the operation-state body. It's `None` only
-/// for rebase variants, which describe HEAD position internally (via the
-/// rebase header's `head_name` / `onto` fields).
+/// Branch / operation state for header rendering. `branch_display` is
+/// `None` for rebase variants (their body already describes HEAD position).
 #[derive(Debug, PartialEq, Eq)]
 struct HeaderState {
     branch_display: Option<String>,
     body: HeaderBody,
 }
 
-/// The operation-specific portion of the header.
 #[derive(Debug, PartialEq, Eq)]
 enum HeaderBody {
     Rebase(RebaseInfo),
@@ -525,7 +515,7 @@ fn current_branch_display(head_ref: &git2::Reference<'_>) -> String {
     if !head_ref.is_branch() {
         return format!(
             "{} {}",
-            Paint(RED, "HEAD detached at"),
+            Paint::new(RED, "HEAD detached at"),
             head_ref.target().map_or_else(
                 || "unknown".to_string(),
                 |oid| {

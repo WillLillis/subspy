@@ -307,11 +307,8 @@ impl DebugDump {
     ///
     /// Returns `Err` if the project path is invalid or the operation fails.
     pub fn run(self) -> RunResult<()> {
-        let project = get_project_path(self.dir)?;
-        if project.kind != RepoKind::WithSubmodules {
-            return Err(RunError::server_path(project.repo_root));
-        }
-        Ok(debug(&project.repo_root)?)
+        let repo_root = get_project_path(self.dir)?.require_with_submodules()?;
+        Ok(debug(&repo_root)?)
     }
 }
 
@@ -322,13 +319,10 @@ impl Reindex {
     ///
     /// Returns `Err` if the project path is invalid or the operation fails.
     pub fn run(self) -> RunResult<()> {
-        let project = get_project_path(self.dir)?;
-        if project.kind != RepoKind::WithSubmodules {
-            return Err(RunError::server_path(project.repo_root));
-        }
+        let repo_root = get_project_path(self.dir)?.require_with_submodules()?;
         let display_progress = std::io::stderr().is_terminal();
         Ok(reindex(
-            &project.repo_root,
+            &repo_root,
             self.replace_watchers,
             display_progress,
         )?)
@@ -342,11 +336,8 @@ impl Stop {
     ///
     /// Returns `Err` if the project path is invalid or the operation fails.
     pub fn run(self) -> RunResult<()> {
-        let project = get_project_path(self.dir)?;
-        if project.kind != RepoKind::WithSubmodules {
-            return Err(RunError::server_path(project.repo_root));
-        }
-        Ok(shutdown(&project.repo_root)?)
+        let repo_root = get_project_path(self.dir)?.require_with_submodules()?;
+        Ok(shutdown(&repo_root)?)
     }
 }
 
@@ -429,16 +420,13 @@ impl Start {
     ///
     /// Returns `Err` if the project path is invalid or the operation fails.
     pub fn run(self) -> RunResult<()> {
-        let project = get_project_path(self.dir)?;
-        if project.kind != RepoKind::WithSubmodules {
-            return Err(RunError::server_path(project.repo_root));
-        }
+        let repo_root = get_project_path(self.dir)?.require_with_submodules()?;
 
         if self.foreground {
-            Ok(watch(&project.repo_root, std::io::stderr().is_terminal())?)
+            Ok(watch(&repo_root, std::io::stderr().is_terminal())?)
         } else {
             let level_str = self.log_level.map(|l| l.to_string());
-            spawn_daemon(&project.repo_root, level_str.as_deref()).map_err(WatchError::from)?;
+            spawn_daemon(&repo_root, level_str.as_deref()).map_err(WatchError::from)?;
             Ok(())
         }
     }
@@ -452,6 +440,23 @@ pub struct ProjectPath {
     pub repo_root: PathBuf,
     pub effective_cwd: PathBuf,
     pub kind: RepoKind,
+}
+
+impl ProjectPath {
+    /// Returns `repo_root` for top-level submodule projects, the only
+    /// shape that admits a watch server.
+    ///
+    /// # Errors
+    ///
+    /// Returns `RunError::ProjectPath` when `kind` is not
+    /// `RepoKind::WithSubmodules`.
+    pub fn require_with_submodules(self) -> RunResult<PathBuf> {
+        if self.kind == RepoKind::WithSubmodules {
+            Ok(self.repo_root)
+        } else {
+            Err(RunError::server_path(self.repo_root))
+        }
+    }
 }
 
 /// Uses `path` if present or uses the current working directory. Ensures the resolved path
