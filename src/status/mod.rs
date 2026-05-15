@@ -22,13 +22,7 @@ mod submodule;
 mod xy_line;
 
 #[cfg(test)]
-mod long_tests;
-#[cfg(test)]
-mod porcelain_tests;
-#[cfg(test)]
-mod short_tests;
-#[cfg(test)]
-mod test_fixtures;
+mod tests;
 
 use clap::ValueEnum;
 use git2::Repository;

@@ -72,9 +72,8 @@ each with its own renderer but sharing common helpers.
 | `quote.rs` | Path quoting helpers (`needs_quoting`, `write_escaped`, `write_path`), `QuoteMode::{Standard, QuoteSpace}` |
 | `conflict.rs` | Shared conflict-index parsing for porcelain entries |
 | `submodule.rs` | `compute_local_statuses`, `deleted_submodule_paths`, `apply_ignore_submodules` |
-| `long_tests.rs` | Snapshot tests for the long-format `display_status` (see [Snapshot tests](#snapshot-tests)) |
-| `porcelain_tests.rs` | Live-oracle tests for porcelain v1 / v2 against real `git status` |
-| `snapshots/long/*.snapshot` | Committed snapshot fixtures for the long-format tests |
+| `tests/` | Output-format verification tests (see [Snapshot tests](#snapshot-tests)). Submodules: `long.rs` + `short.rs` (snapshot-based), `porcelain.rs` (live `git status` oracle), `fixtures.rs` (shared `setup_*` helpers) |
+| `snapshots/{long,short}/*.snapshot` | Committed snapshot fixtures for the long- and short-format tests |
 
 ### Connection (`src/connection/`)
 
@@ -170,44 +169,46 @@ These cover pure logic that doesn't require a running server: `StatusSummary` fl
 template parsing and expansion, `.gitmodules` parsing, display formatting, `HeaderState`
 detection, IPC wire format stability, and IPC message round-trips.
 
-### Snapshot tests (`src/status/{long,porcelain}_tests.rs`)
+### Snapshot tests (`src/status/tests/`)
 
-Two related test modules verify subspy's status output matches `git status`'s output for
-a curated set of repository states.
+Each renderer (long, porcelain v1, porcelain v2, short) has its own submodule under
+`src/status/tests/`, sharing fixture setups via `fixtures.rs`.
 
-**Porcelain v1 / v2** (`porcelain_tests.rs`): each case sets up a fixture repo, runs real
+**Porcelain v1 / v2** (`porcelain.rs`): each case sets up a fixture repo, runs real
 `git status --porcelain=v1` (or v2, with/without `-z`/`--branch`), and asserts byte-equality
 against subspy's in-process output. Porcelain is a documented stable interface, so live
-comparison against whatever `git` is on `PATH` is safe.
+comparison against whatever `git` is on `PATH` is safe - and if git ever drifts, the
+suite tells us immediately rather than silently masking it with a stale snapshot.
 
-**Long format** (`long_tests.rs`): the default human-readable `git status` output. Git's
-long-format wording shifts between releases (hint phrasings, header text), so live
-comparison would tie the suite to a specific git version. Instead, each case has a
-committed `.snapshot` file at `src/status/snapshots/long/<case>.snapshot` that captures
-the expected bytes. Snapshots are seeded from real `git status` output (manually
-verified at the time of creation) and frozen thereafter.
+**Long and short formats** (`long.rs`, `short.rs`): the default `git status` output (and
+its `-s` variant). Git's long-format wording shifts between releases (hint phrasings,
+header text), so live comparison would tie the suite to a specific git version. Instead,
+each case has a committed `.snapshot` file at `src/status/snapshots/{long,short}/<case>.snapshot`
+that captures the expected bytes. Snapshots are seeded from real `git status` output
+(manually verified at the time of creation) and frozen thereafter.
 
-To regenerate snapshots after a deliberate change to long-format output:
+To regenerate after a deliberate change:
 
 ```sh
-UPDATE_LONG_SNAPSHOTS=1 cargo test status::long_tests
+UPDATE_LONG_SNAPSHOTS=1 cargo test status::tests::long
+UPDATE_SHORT_SNAPSHOTS=1 cargo test status::tests::short
 ```
 
-This rewrites every `.snapshot` file on disk with subspy's current output and passes.
-Always inspect `git diff src/status/snapshots/long/` before committing so you don't
-silently rubber-stamp a regression.
+Each rewrites every `.snapshot` file on disk with subspy's current output and passes.
+Always inspect `git diff src/status/snapshots/` before committing so you don't silently
+rubber-stamp a regression.
 
 **Adding a new case:**
-1. Write a `setup_*` function in `long_tests.rs` (or `porcelain_tests.rs`) that mutates
-   a fresh repo into the desired state. The `testutil::Repo` builder pattern handles
-   most fixtures; for in-progress operations (rebase, merge, cherry-pick), use
+1. If the fixture is reusable, add a `setup_*` function to `fixtures.rs`. Otherwise,
+   inline a local helper in the per-renderer file. The `testutil::Repo` builder pattern
+   handles most setups; for in-progress operations (rebase, merge, cherry-pick), use
    `repo.try_git(&["merge", "feature"])` to allow non-zero exits.
-2. Add a `Case` entry to `CASES`. Long-format cases support three `Setup` variants:
-   `Plain`, `Subdir { setup, subdir }`, and `WithSubmodules { names, setup }`.
-3. Run `UPDATE_LONG_SNAPSHOTS=1 cargo test status::long_tests` to seed the snapshot.
-4. Cross-check the seeded snapshot against real `git -C <fixture> status` to confirm
-   correctness before committing - the snapshot tests don't catch divergences from
-   git on their own; they catch regressions in subspy's own output.
+2. Add a `Case` entry to that renderer's `CASES`. Long and short cases support three
+   `Setup` variants: `Plain`, `Subdir { setup, subdir }`, and `WithSubmodules { names,
+   setup }`. Short additionally carries a `branch: bool` toggling the `-b` header.
+3. For snapshot-based tests, run the matching `UPDATE_*_SNAPSHOTS=1 cargo test ...` to
+   seed the file, then cross-check against real `git -C <fixture> status` before
+   committing.
 
 **Determinism plumbing:**
 - `.cargo/config.toml` exports `NO_COLOR=1` so `paint::color_enabled()` caches `false`

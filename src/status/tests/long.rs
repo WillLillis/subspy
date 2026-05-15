@@ -1,7 +1,7 @@
-//! Snapshot tests for the short-format (`git status -s`) output. Each
-//! case builds a fixture repo, runs `short::display_short` in-process,
-//! and compares the bytes to `src/status/snapshots/short/<case>.snapshot`.
-//! Regenerate with `UPDATE_SHORT_SNAPSHOTS=1`. See CONTRIBUTING.md for
+//! Snapshot tests for the long-format `display_status` output. Each
+//! case builds a fixture repo, runs `display_status` in-process, and
+//! compares the bytes to `src/status/snapshots/long/<case>.snapshot`.
+//! Regenerate with `UPDATE_LONG_SNAPSHOTS=1`. See CONTRIBUTING.md for
 //! workflow details.
 
 use git2::Repository;
@@ -10,57 +10,46 @@ use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 use testutil::HarnessBuilder;
 
-use crate::{RepoKind, cli::ProjectPath};
-
-use super::{
-    IgnoreSubmodules, OutputFormat, OutputOpts, PorcelainOpts, StatusEntries, UntrackedFiles,
-    compute_local_statuses, deleted_submodule_paths, short::display_short,
-    submodule::apply_ignore_submodules, test_fixtures::*,
+use crate::{
+    RepoKind,
+    cli::ProjectPath,
+    status::{
+        IgnoreSubmodules, OutputFormat, OutputOpts, StatusEntries, UntrackedFiles,
+        compute_local_statuses, cwd_relative_to_repo, deleted_submodule_paths,
+        display::display_status, relativize::Relativizer, submodule::apply_ignore_submodules,
+    },
 };
 
-struct Case {
-    name: &'static str,
-    setup: Setup,
-    /// `--branch` / `-b`: emit the `## branch...` header.
-    branch: bool,
-}
+use super::fixtures::*;
 
 const CASES: &[Case] = &[
-    // Entry cases (no branch header).
     Case {
         name: "clean_repo",
         setup: Setup::Plain(setup_clean),
-        branch: false,
     },
     Case {
         name: "modified_workdir",
         setup: Setup::Plain(setup_modified_workdir),
-        branch: false,
     },
     Case {
         name: "staged_modified",
         setup: Setup::Plain(setup_staged_modified),
-        branch: false,
     },
     Case {
         name: "staged_new",
         setup: Setup::Plain(setup_staged_new),
-        branch: false,
     },
     Case {
         name: "deleted_workdir",
         setup: Setup::Plain(setup_deleted_workdir),
-        branch: false,
     },
     Case {
         name: "deleted_staged",
         setup: Setup::Plain(setup_deleted_staged),
-        branch: false,
     },
     Case {
         name: "renamed_staged",
         setup: Setup::Plain(setup_renamed_staged),
-        branch: false,
     },
     Case {
         name: "renamed_staged_in_subdir",
@@ -68,27 +57,22 @@ const CASES: &[Case] = &[
             setup: setup_renamed_staged_in_subdir,
             subdir: "sub",
         },
-        branch: false,
     },
     Case {
         name: "untracked_files",
         setup: Setup::Plain(setup_untracked),
-        branch: false,
     },
     Case {
         name: "untracked_in_dir",
         setup: Setup::Plain(setup_untracked_in_dir),
-        branch: false,
     },
     Case {
         name: "untracked_high_byte_filename",
         setup: Setup::Plain(setup_untracked_high_byte_filename),
-        branch: false,
     },
     Case {
         name: "merge_with_conflict",
         setup: Setup::Plain(setup_merge_with_conflict),
-        branch: false,
     },
     Case {
         name: "merge_with_conflict_in_subdir",
@@ -96,12 +80,10 @@ const CASES: &[Case] = &[
             setup: setup_merge_with_conflict_in_subdir,
             subdir: "sub",
         },
-        branch: false,
     },
     Case {
         name: "cherry_pick_with_conflict",
         setup: Setup::Plain(setup_cherry_pick_with_conflict),
-        branch: false,
     },
     Case {
         name: "submodule_modified",
@@ -109,7 +91,6 @@ const CASES: &[Case] = &[
             names: &["sub"],
             setup: setup_submodule_modified,
         },
-        branch: false,
     },
     Case {
         name: "submodule_deleted_workdir",
@@ -117,7 +98,6 @@ const CASES: &[Case] = &[
             names: &["sub"],
             setup: setup_submodule_deleted_workdir,
         },
-        branch: false,
     },
     Case {
         name: "submodule_new_commits",
@@ -125,55 +105,46 @@ const CASES: &[Case] = &[
             names: &["sub"],
             setup: setup_submodule_new_commits,
         },
-        branch: false,
-    },
-    // Branch-header cases (`-b` / `--branch`).
-    Case {
-        name: "branch_clean",
-        setup: Setup::Plain(setup_clean),
-        branch: true,
     },
     Case {
-        name: "branch_upstream_up_to_date",
+        name: "upstream_up_to_date",
         setup: Setup::Plain(setup_upstream_up_to_date),
-        branch: true,
     },
     Case {
-        name: "branch_upstream_ahead",
+        name: "upstream_ahead",
         setup: Setup::Plain(setup_upstream_ahead),
-        branch: true,
     },
     Case {
-        name: "branch_upstream_behind",
+        name: "upstream_behind",
         setup: Setup::Plain(setup_upstream_behind),
-        branch: true,
     },
     Case {
-        name: "branch_upstream_diverged",
+        name: "upstream_diverged",
         setup: Setup::Plain(setup_upstream_diverged),
-        branch: true,
     },
 ];
 
 // -- Harness wiring --
 
-fn opts_for(branch: bool) -> OutputOpts {
+const fn default_opts() -> OutputOpts {
     OutputOpts {
-        format: OutputFormat::Short,
+        format: OutputFormat::Long,
         null_terminate: false,
         ignore_submodules: IgnoreSubmodules::None,
         untracked_files: UntrackedFiles::Normal,
         show_ignored: false,
-        branch,
+        branch: false,
     }
 }
 
 fn snapshot_path(case_name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("src/status/snapshots/short")
+        .join("src/status/snapshots/long")
         .join(format!("{case_name}.snapshot"))
 }
 
+/// Mirrors the `StatusOptions` set up by production `status::status`.
+/// Kept in sync by hand.
 fn build_status_options(opts: OutputOpts, repo_kind: RepoKind) -> git2::StatusOptions {
     let mut so = git2::StatusOptions::new();
     match opts.untracked_files {
@@ -197,7 +168,7 @@ fn build_status_options(opts: OutputOpts, repo_kind: RepoKind) -> git2::StatusOp
     so
 }
 
-fn run_subspy_short(project: &ProjectPath, opts: OutputOpts) -> Vec<u8> {
+fn run_subspy_long(project: &ProjectPath, opts: OutputOpts) -> Vec<u8> {
     let repo = Repository::open(&project.repo_root).unwrap();
     let mut so = build_status_options(opts, project.kind);
     let non_submod = repo.statuses(Some(&mut so)).unwrap();
@@ -213,27 +184,23 @@ fn run_subspy_short(project: &ProjectPath, opts: OutputOpts) -> Vec<u8> {
     };
     let submodules = apply_ignore_submodules(submodules, opts.ignore_submodules);
 
-    let cwd_rel = super::cwd_relative_to_repo(&project.repo_root, &project.effective_cwd);
-    let rel = super::relativize::Relativizer::new(&cwd_rel);
+    let cwd_rel = cwd_relative_to_repo(&project.repo_root, &project.effective_cwd);
+    let rel = Relativizer::new(&cwd_rel);
 
     let entries = StatusEntries {
         non_submod: &non_submod,
         submodules: &submodules,
         deleted_submodules: &deleted,
     };
-    let porcelain_opts = PorcelainOpts {
-        null_terminate: opts.null_terminate,
-        branch: opts.branch,
-    };
 
     let mut got: Vec<u8> = Vec::new();
-    display_short(&mut got, &repo, &entries, &rel, porcelain_opts).unwrap();
+    display_status(&mut got, &repo, &entries, &rel).unwrap();
     got
 }
 
 fn assert_snapshot(case_name: &str, got: &[u8]) {
     let path = snapshot_path(case_name);
-    let updating = std::env::var_os("UPDATE_SHORT_SNAPSHOTS").is_some();
+    let updating = std::env::var_os("UPDATE_LONG_SNAPSHOTS").is_some();
 
     if updating {
         if let Some(parent) = path.parent() {
@@ -247,7 +214,7 @@ fn assert_snapshot(case_name: &str, got: &[u8]) {
     let expected = std::fs::read(&path).unwrap_or_else(|e| {
         panic!(
             "missing snapshot for '{case_name}' at {} ({e}); \
-             re-run with UPDATE_SHORT_SNAPSHOTS=1 to seed it",
+             re-run with UPDATE_LONG_SNAPSHOTS=1 to seed it",
             path.display()
         )
     });
@@ -263,7 +230,6 @@ fn assert_snapshot(case_name: &str, got: &[u8]) {
 }
 
 fn run_case(case: &Case) {
-    let opts = opts_for(case.branch);
     match &case.setup {
         Setup::Plain(setup) => {
             let tmp = TempDir::new().unwrap();
@@ -273,7 +239,7 @@ fn run_case(case: &Case) {
                 effective_cwd: tmp.path().to_path_buf(),
                 kind: RepoKind::Normal,
             };
-            let got = run_subspy_short(&project, opts);
+            let got = run_subspy_long(&project, default_opts());
             assert_snapshot(case.name, &got);
         }
         Setup::Subdir { setup, subdir } => {
@@ -284,7 +250,7 @@ fn run_case(case: &Case) {
                 effective_cwd: tmp.path().join(subdir),
                 kind: RepoKind::Normal,
             };
-            let got = run_subspy_short(&project, opts);
+            let got = run_subspy_long(&project, default_opts());
             assert_snapshot(case.name, &got);
         }
         Setup::WithSubmodules { names, setup } => {
@@ -299,14 +265,14 @@ fn run_case(case: &Case) {
                 effective_cwd: harness.root().path().to_path_buf(),
                 kind: RepoKind::WithSubmodules,
             };
-            let got = run_subspy_short(&project, opts);
+            let got = run_subspy_long(&project, default_opts());
             assert_snapshot(case.name, &got);
         }
     }
 }
 
 #[test]
-fn short_snapshots() {
+fn human_snapshots() {
     for case in CASES {
         run_case(case);
     }

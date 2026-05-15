@@ -1,14 +1,10 @@
 //! End-to-end tests for porcelain v1 and v2 output.
 //!
-//! Strategy: for each scenario we build a fixture repo, run real `git status`
-//! to capture the expected output, then run subspy's display function on the
-//! same repo with matching options and assert byte-equality. This uses real
-//! git as the oracle so we never drift from git's actual output format.
-//!
-//! Adding a new case: write a `setup_*` function that mutates a fresh repo
-//! into the desired state, then add a `Case` entry to `CASES`. Every case
-//! runs against the cartesian product of porcelain version, `-z`, and
-//! `--branch` matrix.
+//! Each case runs real `git status --porcelain[=v2] [-z] [--branch]` and
+//! asserts byte-equality with subspy's output. Live oracle (rather than
+//! committed snapshots like long / short) because porcelain is git's
+//! stability-promised format - if real git ever drifts, we want to know
+//! immediately rather than rubber-stamping a stale snapshot.
 
 use git2::Repository;
 use std::path::{Path, PathBuf};
@@ -16,18 +12,21 @@ use std::process::Command;
 use tempfile::TempDir;
 use testutil::{HarnessBuilder, Repo, TestHarness};
 
-use crate::{RepoKind, cli::ProjectPath};
-
-use super::{
-    IgnoreSubmodules, OutputFormat, OutputOpts, PorcelainVersion, UntrackedFiles,
-    compute_local_statuses, deleted_submodule_paths,
-    porcelain_v1::display_porcelain_v1,
-    porcelain_v2::display_porcelain_v2,
-    submodule::apply_ignore_submodules,
-    test_fixtures::{
-        setup_upstream_ahead, setup_upstream_behind, setup_upstream_diverged,
-        setup_upstream_up_to_date,
+use crate::{
+    RepoKind,
+    cli::ProjectPath,
+    status::{
+        IgnoreSubmodules, OutputFormat, OutputOpts, PorcelainOpts, PorcelainVersion,
+        StatusEntries, UntrackedFiles, compute_local_statuses, cwd_relative_to_repo,
+        deleted_submodule_paths, porcelain_v1::display_porcelain_v1,
+        porcelain_v2::display_porcelain_v2, relativize::Relativizer,
+        submodule::apply_ignore_submodules,
     },
+};
+
+use super::fixtures::{
+    setup_upstream_ahead, setup_upstream_behind, setup_upstream_diverged,
+    setup_upstream_up_to_date,
 };
 
 fn setup_empty_repo(root: &Path) {
@@ -454,15 +453,15 @@ fn assert_outputs_match(project: &ProjectPath, case_name: &str, opts: OutputOpts
 
     // Same Relativizer plumbing as production: v2 uses it (cwd-relative
     // output); v1 doesn't take one (always repo-root-relative).
-    let cwd_rel = super::cwd_relative_to_repo(&project.repo_root, &project.effective_cwd);
-    let rel = super::relativize::Relativizer::new(&cwd_rel);
+    let cwd_rel = cwd_relative_to_repo(&project.repo_root, &project.effective_cwd);
+    let rel = Relativizer::new(&cwd_rel);
 
-    let entries = super::StatusEntries {
+    let entries = StatusEntries {
         non_submod: &non_submod,
         submodules: &submodules,
         deleted_submodules: &deleted,
     };
-    let porcelain_opts = super::PorcelainOpts {
+    let porcelain_opts = PorcelainOpts {
         null_terminate: opts.null_terminate,
         branch: opts.branch,
     };
