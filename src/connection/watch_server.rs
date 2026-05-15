@@ -1351,7 +1351,7 @@ impl WatchServer {
             }
             match oper.recv(&self.watchers[index].receiver)? {
                 Ok(event) => match self.get_event_type(&event, index) {
-                    Some(EventType::RootGitOperation) if !self.root_rebasing => {
+                    Some(EventType::RootGitOperation) => {
                         if index == DOT_GITMODULES_WATCHER_IDX {
                             // .gitmodules changed, defer reindex. Don't
                             // spawn submodule tasks here: individual
@@ -1425,7 +1425,7 @@ impl WatchServer {
                             self.try_spawn_submod_update(i, &in_flight, &pending_lock_retries);
                         }
                     }
-                    Some(EventType::RootGitOperation | EventType::SubmoduleChange) | None => {}
+                    Some(EventType::SubmoduleChange) | None => {}
                 },
                 Err(e) => {
                     wait_for_in_flight(&in_flight);
