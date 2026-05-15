@@ -53,6 +53,7 @@ struct Intercept {
 #[derive(Debug, Default, PartialEq, Eq)]
 struct StatusArgs {
     porcelain: Option<PorcelainVersion>,
+    short: bool,
     null_terminate: bool,
     ignore_submodules: IgnoreSubmodules,
     untracked_files: Option<UntrackedFiles>,
@@ -67,6 +68,7 @@ impl From<Intercept> for Status {
             log_level: None,
             no_server: false,
             porcelain: value.args.porcelain,
+            short: value.args.short,
             null_terminate: value.args.null_terminate,
             ignore_submodules: value.args.ignore_submodules,
             untracked_files: value.args.untracked_files,
@@ -284,6 +286,12 @@ fn classify_status_arg(arg: &str, out: &mut StatusArgs, seen_double_dash: &mut b
 
     if arg == "-z" {
         out.null_terminate = true;
+        return true;
+    }
+
+    // -s | --short
+    if arg == "-s" || arg == "--short" {
+        out.short = true;
         return true;
     }
 
@@ -608,9 +616,24 @@ mod tests {
 
     #[test]
     fn status_with_unknown_flag_forwards() {
-        assert!(dispatch(&os(&["status", "--short"])).is_none());
-        assert!(dispatch(&os(&["status", "-s"])).is_none());
         assert!(dispatch(&os(&["status", "--ahead-behind"])).is_none());
+    }
+
+    #[test]
+    fn status_short_intercepts() {
+        for flag in &["-s", "--short"] {
+            let got = dispatch(&os(&["status", flag])).unwrap();
+            assert_eq!(
+                got,
+                intercept_with(
+                    StatusArgs {
+                        short: true,
+                        ..Default::default()
+                    },
+                    None,
+                )
+            );
+        }
     }
 
     #[test]

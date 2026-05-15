@@ -18,12 +18,13 @@ use super::{
     PorcelainOpts, StatusEntries, StatusResult,
     quote::QuoteMode,
     relativize::Relativizer,
-    xy_line::{LineStyle, display_xy_lines},
+    xy_line::{LineStyle, SubmoduleFormat, display_xy_lines},
 };
 
 const V1_STYLE: LineStyle = LineStyle {
     quote_mode: QuoteMode::QuoteSpace,
     palette: None,
+    submodule: SubmoduleFormat::Porcelain,
 };
 
 /// Renders the full porcelain v1 output to `out`.

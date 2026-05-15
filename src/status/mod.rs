@@ -17,6 +17,7 @@ mod porcelain_v1;
 mod porcelain_v2;
 mod quote;
 mod relativize;
+mod short;
 mod submodule;
 mod xy_line;
 
@@ -24,6 +25,10 @@ mod xy_line;
 mod long_tests;
 #[cfg(test)]
 mod porcelain_tests;
+#[cfg(test)]
+mod short_tests;
+#[cfg(test)]
+mod test_fixtures;
 
 use clap::ValueEnum;
 use git2::Repository;
@@ -65,6 +70,18 @@ pub enum PorcelainVersion {
     V2,
 }
 
+/// Which renderer to use for status output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OutputFormat {
+    /// Default `git status` output (the long, human-readable layout).
+    #[default]
+    Long,
+    /// `git status -s` / `--short` (terse `XY PATH` with colors).
+    Short,
+    /// `git status --porcelain[=v1|v2]` (stable machine-readable).
+    Porcelain(PorcelainVersion),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Default)]
 pub enum IgnoreSubmodules {
     #[default]
@@ -92,7 +109,7 @@ pub enum UntrackedFiles {
 /// Output format and filtering options passed through from git-status-compatible flags.
 #[derive(Debug, Clone, Copy)]
 pub struct OutputOpts {
-    pub porcelain: Option<PorcelainVersion>,
+    pub format: OutputFormat,
     pub null_terminate: bool,
     pub ignore_submodules: IgnoreSubmodules,
     pub untracked_files: UntrackedFiles,
@@ -128,7 +145,7 @@ pub fn status(
     opts: OutputOpts,
 ) -> StatusResult<()> {
     let OutputOpts {
-        porcelain,
+        format,
         null_terminate,
         ignore_submodules,
         untracked_files,
@@ -193,7 +210,7 @@ pub fn status(
     // - Porcelain v1: repo-root-relative regardless of cwd.
     // - Porcelain v2: cwd-relative without `-z`, repo-root-relative
     //   with `-z` (where paths are stable identifiers).
-    // - Regular display: cwd-relative.
+    // - Short and long: cwd-relative.
     let cwd_rel = cwd_relative_to_repo(&project.repo_root, &project.effective_cwd);
     let rel = relativize::Relativizer::new(&cwd_rel);
 
@@ -208,14 +225,17 @@ pub fn status(
     };
 
     let mut out = io::BufWriter::with_capacity(64 * 1024, io::stdout().lock());
-    match porcelain {
-        Some(PorcelainVersion::V1) => {
+    match format {
+        OutputFormat::Long => display::display_status(&mut out, &repo, &entries, &rel)?,
+        OutputFormat::Short => {
+            short::display_short(&mut out, &repo, &entries, &rel, porcelain_opts)?;
+        }
+        OutputFormat::Porcelain(PorcelainVersion::V1) => {
             porcelain_v1::display_porcelain_v1(&mut out, &repo, &entries, porcelain_opts)?;
         }
-        Some(PorcelainVersion::V2) => {
+        OutputFormat::Porcelain(PorcelainVersion::V2) => {
             porcelain_v2::display_porcelain_v2(&mut out, &repo, &entries, &rel, porcelain_opts)?;
         }
-        None => display::display_status(&mut out, &repo, &entries, &rel)?,
     }
 
     Ok(())

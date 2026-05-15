@@ -14,7 +14,10 @@ use crate::{
     prompt::{PromptError, prompt},
     reindex::{ReindexError, reindex},
     shutdown::{ShutdownError, shutdown},
-    status::{IgnoreSubmodules, OutputOpts, PorcelainVersion, StatusError, UntrackedFiles, status},
+    status::{
+        IgnoreSubmodules, OutputFormat, OutputOpts, PorcelainVersion, StatusError, UntrackedFiles,
+        status,
+    },
     watch::{WatchError, spawn_daemon},
 };
 
@@ -82,8 +85,11 @@ pub struct Status {
     #[arg(long)]
     pub no_server: bool,
     /// Use porcelain machine-readable format (version 1 or 2)
-    #[arg(long, value_name = "VERSION", default_missing_value = "1", num_args = 0..=1)]
+    #[arg(long, value_name = "VERSION", default_missing_value = "1", num_args = 0..=1, conflicts_with = "short")]
     pub porcelain: Option<PorcelainVersion>,
+    /// Use short format (`XY PATH`, colored)
+    #[arg(short, long, conflicts_with = "porcelain")]
+    pub short: bool,
     /// Terminate entries with NUL instead of newline
     #[arg(short = 'z')]
     pub null_terminate: bool,
@@ -106,8 +112,8 @@ pub struct Status {
     /// Show ignored files in the output
     #[arg(long)]
     pub ignored: bool,
-    /// Show branch and tracking info (porcelain modes only;
-    /// human-readable output always shows branch info)
+    /// Show branch and tracking info (short / porcelain modes;
+    /// long format always shows branch info)
     #[arg(short = 'b', long)]
     pub branch: bool,
 }
@@ -342,6 +348,19 @@ impl Stop {
 }
 
 impl Status {
+    /// Translates the mutually-exclusive `--short` / `--porcelain` flags
+    /// to the internal `OutputFormat`. Clap rejects the
+    /// `short && porcelain.is_some()` combination at parse time.
+    fn output_format(&self) -> OutputFormat {
+        if self.short {
+            OutputFormat::Short
+        } else if let Some(v) = self.porcelain {
+            OutputFormat::Porcelain(v)
+        } else {
+            OutputFormat::Long
+        }
+    }
+
     /// Resolves the project path and executes the `status` subcommand.
     ///
     /// # Errors
@@ -352,6 +371,7 @@ impl Status {
         // process cwd if --dir was absent), reused as the baseline for
         // path-formatting in status output. Mirrors `git -C <path>`'s
         // semantics.
+        let format = self.output_format();
         let project = get_project_path(self.dir)?;
         let display_progress = std::io::stderr().is_terminal();
         let use_server = !self.no_server
@@ -362,7 +382,7 @@ impl Status {
             display_progress,
             use_server,
             OutputOpts {
-                porcelain: self.porcelain,
+                format,
                 null_terminate: self.null_terminate,
                 ignore_submodules: self.ignore_submodules,
                 untracked_files: self.untracked_files.unwrap_or_default(),

@@ -19,8 +19,8 @@ use testutil::{HarnessBuilder, Repo, TestHarness};
 use crate::{RepoKind, cli::ProjectPath};
 
 use super::{
-    IgnoreSubmodules, OutputOpts, PorcelainVersion, UntrackedFiles, compute_local_statuses,
-    deleted_submodule_paths, porcelain_v1::display_porcelain_v1,
+    IgnoreSubmodules, OutputFormat, OutputOpts, PorcelainVersion, UntrackedFiles,
+    compute_local_statuses, deleted_submodule_paths, porcelain_v1::display_porcelain_v1,
     porcelain_v2::display_porcelain_v2, submodule::apply_ignore_submodules,
 };
 
@@ -317,10 +317,11 @@ fn setup_submod_rm_rf_workdir(h: &TestHarness) {
 /// subspy's defaults so the two sides agree without explicit redundant flags.
 fn git_status_args(opts: OutputOpts) -> Vec<String> {
     let mut a: Vec<String> = vec!["status".into()];
-    match opts.porcelain {
-        Some(PorcelainVersion::V1) => a.push("--porcelain".into()),
-        Some(PorcelainVersion::V2) => a.push("--porcelain=2".into()),
-        None => {}
+    match opts.format {
+        OutputFormat::Porcelain(PorcelainVersion::V1) => a.push("--porcelain".into()),
+        OutputFormat::Porcelain(PorcelainVersion::V2) => a.push("--porcelain=2".into()),
+        OutputFormat::Short => a.push("-s".into()),
+        OutputFormat::Long => {}
     }
     if opts.null_terminate {
         a.push("-z".into());
@@ -453,22 +454,24 @@ fn assert_outputs_match(project: &ProjectPath, case_name: &str, opts: OutputOpts
     };
 
     let mut got: Vec<u8> = Vec::new();
-    match opts.porcelain {
-        Some(PorcelainVersion::V1) => {
+    match opts.format {
+        OutputFormat::Porcelain(PorcelainVersion::V1) => {
             display_porcelain_v1(&mut got, &repo, &entries, porcelain_opts).unwrap();
         }
-        Some(PorcelainVersion::V2) => {
+        OutputFormat::Porcelain(PorcelainVersion::V2) => {
             display_porcelain_v2(&mut got, &repo, &entries, &rel, porcelain_opts).unwrap();
         }
-        None => panic!("porcelain test runner doesn't support non-porcelain output"),
+        OutputFormat::Long | OutputFormat::Short => {
+            panic!("porcelain test runner doesn't support non-porcelain output")
+        }
     }
 
     assert_eq!(
         got,
         expected,
-        "case '{}' (porcelain={:?}, z={}, branch={})\n--- git ---\n{}\n--- subspy ---\n{}",
+        "case '{}' (format={:?}, z={}, branch={})\n--- git ---\n{}\n--- subspy ---\n{}",
         case_name,
-        opts.porcelain,
+        opts.format,
         opts.null_terminate,
         opts.branch,
         String::from_utf8_lossy(&expected),
@@ -484,7 +487,7 @@ const fn opts_with(
     show_ignored: bool,
 ) -> OutputOpts {
     OutputOpts {
-        porcelain: Some(version),
+        format: OutputFormat::Porcelain(version),
         null_terminate,
         ignore_submodules: IgnoreSubmodules::None,
         untracked_files,

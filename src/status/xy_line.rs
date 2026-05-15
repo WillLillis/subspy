@@ -6,8 +6,8 @@
 //!
 //! - Quoting mode: porcelain v1 uses `QuoteSpace`, short uses `Standard`.
 //! - Relativization: porcelain v1 is always repo-root-relative; short is
-//!   cwd-relative. Both go through `Relativizer` - porcelain v1 just
-//!   constructs it with `cwd_rel = ""` so it's a no-op rewriter.
+//!   cwd-relative. Both go through `Relativizer` (porcelain v1 just
+//!   constructs it with `cwd_rel = ""` so it's a no-op rewriter).
 //! - Color: porcelain v1 is plain; short applies git's
 //!   `WT_STATUS_{UPDATED,CHANGED,UNMERGED,UNTRACKED,...}` colors.
 
@@ -33,6 +33,17 @@ pub(super) struct LineStyle {
     pub quote_mode: QuoteMode,
     /// `None` for porcelain v1 (uncolored). `Some` for short.
     pub palette: Option<&'static Palette>,
+    pub submodule: SubmoduleFormat,
+}
+
+/// How submodule Y characters are derived. Porcelain v1 collapses
+/// NEW_COMMITS / MODIFIED_CONTENT / UNTRACKED_CONTENT into a single
+/// 'M'; short distinguishes them as 'M' / 'm' / '?' so submodule
+/// states are visually distinct from regular files.
+#[derive(Clone, Copy)]
+pub(super) enum SubmoduleFormat {
+    Porcelain,
+    Short,
 }
 
 /// Color slots mirroring git's `WT_STATUS_*` constants.
@@ -91,7 +102,7 @@ pub(super) fn display_xy_lines(
     }
 
     for path in entries.deleted_submodules {
-        // `D ` - staged deletion of a submodule. X gets the staged color,
+        // `D ` (staged deletion of a submodule). X gets the staged color,
         // Y is blank.
         let x_color = style.palette.map(|p| p.updated);
         write_xy_path(
@@ -149,7 +160,7 @@ pub(super) fn display_xy_lines(
 }
 
 /// Maps a `git2::Status` to its XY index/worktree characters. Space
-/// (not `.`) for the unmodified slot - matches the v1/short wire format.
+/// (not `.`) for the unmodified slot, matching the v1/short wire format.
 const fn regular_xy(st: git2::Status) -> (char, char) {
     let x = if st.contains(git2::Status::INDEX_NEW) {
         'A'
@@ -178,8 +189,9 @@ const fn regular_xy(st: git2::Status) -> (char, char) {
     (x, y)
 }
 
-/// Maps a `StatusSummary` to the XY characters for a submodule entry.
-fn submodule_xy(st: StatusSummary) -> (char, char) {
+/// Maps a `StatusSummary` to the XY characters for a submodule entry,
+/// per the given [`SubmoduleFormat`].
+fn submodule_xy(st: StatusSummary, format: SubmoduleFormat) -> (char, char) {
     let x = if st.contains(StatusSummary::STAGED_NEW) {
         'A'
     } else if st.contains(StatusSummary::STAGED) {
@@ -189,14 +201,31 @@ fn submodule_xy(st: StatusSummary) -> (char, char) {
     };
     let y = if st.contains(StatusSummary::DELETED_WORKDIR) {
         'D'
-    } else if st.intersects(
-        StatusSummary::NEW_COMMITS
-            | StatusSummary::MODIFIED_CONTENT
-            | StatusSummary::UNTRACKED_CONTENT,
-    ) {
-        'M'
     } else {
-        ' '
+        match format {
+            SubmoduleFormat::Porcelain => {
+                if st.intersects(
+                    StatusSummary::NEW_COMMITS
+                        | StatusSummary::MODIFIED_CONTENT
+                        | StatusSummary::UNTRACKED_CONTENT,
+                ) {
+                    'M'
+                } else {
+                    ' '
+                }
+            }
+            SubmoduleFormat::Short => {
+                if st.contains(StatusSummary::NEW_COMMITS) {
+                    'M'
+                } else if st.contains(StatusSummary::MODIFIED_CONTENT) {
+                    'm'
+                } else if st.contains(StatusSummary::UNTRACKED_CONTENT) {
+                    '?'
+                } else {
+                    ' '
+                }
+            }
+        }
     };
     (x, y)
 }
@@ -359,7 +388,7 @@ fn write_submodule(
     null_terminate: bool,
     style: &LineStyle,
 ) -> io::Result<()> {
-    let (x, y) = submodule_xy(st);
+    let (x, y) = submodule_xy(st, style.submodule);
     let (x_color, y_color) = ordinary_colors(style);
     write_xy_path(
         out,
@@ -432,10 +461,13 @@ fn write_branch_header(
         .zip(upstream.get().peel_to_commit().ok())
         .and_then(|(l, u)| repo.graph_ahead_behind(l.id(), u.id()).ok());
 
-    if let Some((ahead, behind)) = counts
-        && (ahead != 0 || behind != 0)
-    {
-        write!(out, " [ahead {ahead}, behind {behind}]")?;
+    if let Some((ahead, behind)) = counts {
+        match (ahead, behind) {
+            (0, 0) => {}
+            (a, 0) => write!(out, " [ahead {a}]")?,
+            (0, b) => write!(out, " [behind {b}]")?,
+            (a, b) => write!(out, " [ahead {a}, behind {b}]")?,
+        }
     }
     out.write_all(b"\n")?;
     Ok(())
