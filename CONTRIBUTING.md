@@ -39,18 +39,42 @@ over IPC to retrieve or manipulate that cache.
 
 | File | Purpose |
 |---|---|
-| `main.rs` | Entry point: logging setup, CLI dispatch, error display |
-| `cli.rs` | Clap argument structs, subcommand definitions, `RunError` |
-| `lib.rs` | `StatusSummary` bitflags, ANSI paint helper, progress bar |
-| `git.rs` | Lightweight git helpers (`parse_gitmodules` -- fast `.gitmodules` parser) |
-| `watch.rs` | `spawn_daemon`, `LockFileGuard` (atomic lock file with fs-watcher wait) |
-| `status.rs` | `display_status` output formatting, `HeaderState` enum, `compute_local_statuses` |
+| `main.rs` | Thin process entry point: dispatches to `entry::subspy_entry` |
+| `entry.rs` | Shared CLI run loop, logging setup, error display; consumed by both `main.rs` and the `subspy-git` shim when it forwards `--subspy-internal` to subspy's CLI |
+| `cli.rs` | Clap argument structs, subcommand definitions, `RunError`, `ProjectPath` + `get_project_path` |
+| `lib.rs` | `StatusSummary` bitflags, progress bar, module declarations |
+| `paint.rs` | ANSI styling primitives (`Paint<T>` zero-alloc Display wrapper, `paint_into` streaming form, `NO_COLOR` handling) |
+| `proc.rs` | Cross-platform `Command` flag helpers (`configure_detached_daemon`, `configure_hidden_console`); no-ops on non-Windows |
+| `bitset.rs` | Inline bitset for dense integer sets (watcher indices) |
+| `git.rs` | Lightweight git helpers (`parse_gitmodules` -- fast `.gitmodules` parser; `configure_git2` for global libgit2 options) |
+| `watch.rs` | `spawn_daemon`, `build_daemon_command`, `LockFileGuard` (atomic lock file with fs-watcher wait) |
+| `status/` | Status output (see below) |
 | `prompt.rs` | Shell prompt integration -- fast, silent on all errors (experimental; exposed primitives may change) |
 | `list.rs` | `subspy list` -- submodule metadata with format templates |
 | `template.rs` | Template parsing, validation, placeholder expansion |
 | `shutdown.rs` | `subspy stop` command |
 | `reindex.rs` | `subspy reindex` command |
 | `debug.rs` | `subspy debug` -- dumps server internal state |
+
+### Status (`src/status/`)
+
+The `status` subcommand has three output modes (human, porcelain v1, porcelain v2),
+each with its own renderer but sharing common helpers.
+
+| File | Purpose |
+|---|---|
+| `mod.rs` | `status()` entry, `OutputOpts`, `PorcelainOpts`, `StatusEntries`, `cwd_relative_to_repo` |
+| `display.rs` | Human-readable output (`display_status`), section formatting, submodule predicates |
+| `header.rs` | Branch / upstream / operation-state header (`HeaderState`, `HeaderBody`, `print_header`, `print_unmerged_paths`) |
+| `porcelain_v1.rs` | `git status --porcelain=v1` output: `XY PATH` per entry, `QuoteSpace` quoting |
+| `porcelain_v2.rs` | `git status --porcelain=v2` output: `1`/`2`/`u`/`?`/`!` lines, `Standard` quoting |
+| `relativize.rs` | `Relativizer`: streams repo-root-relative paths as cwd-relative, applies C-style quoting via `QuoteMode` |
+| `quote.rs` | Path quoting helpers (`needs_quoting`, `write_escaped`, `write_path`), `QuoteMode::{Standard, QuoteSpace}` |
+| `conflict.rs` | Shared conflict-index parsing for porcelain entries |
+| `submodule.rs` | `compute_local_statuses`, `deleted_submodule_paths`, `apply_ignore_submodules` |
+| `long_tests.rs` | Snapshot tests for the long-format `display_status` (see [Snapshot tests](#snapshot-tests)) |
+| `porcelain_tests.rs` | Live-oracle tests for porcelain v1 / v2 against real `git status` |
+| `snapshots/long/*.snapshot` | Committed snapshot fixtures for the long-format tests |
 
 ### Connection (`src/connection/`)
 
@@ -138,13 +162,67 @@ Submodules that contain submodules of their own are not recursed into.
 ## Testing
 
 SubSpy's correctness depends on the watch server tracking every filesystem and git state
-change across arbitrarily many submodules. The testing strategy uses three layers:
+change across arbitrarily many submodules. The testing strategy uses four layers:
 
 ### Unit tests
 
 These cover pure logic that doesn't require a running server: `StatusSummary` flag predicates,
 template parsing and expansion, `.gitmodules` parsing, display formatting, `HeaderState`
 detection, IPC wire format stability, and IPC message round-trips.
+
+### Snapshot tests (`src/status/{long,porcelain}_tests.rs`)
+
+Two related test modules verify subspy's status output matches `git status`'s output for
+a curated set of repository states.
+
+**Porcelain v1 / v2** (`porcelain_tests.rs`): each case sets up a fixture repo, runs real
+`git status --porcelain=v1` (or v2, with/without `-z`/`--branch`), and asserts byte-equality
+against subspy's in-process output. Porcelain is a documented stable interface, so live
+comparison against whatever `git` is on `PATH` is safe.
+
+**Long format** (`long_tests.rs`): the default human-readable `git status` output. Git's
+long-format wording shifts between releases (hint phrasings, header text), so live
+comparison would tie the suite to a specific git version. Instead, each case has a
+committed `.snapshot` file at `src/status/snapshots/long/<case>.snapshot` that captures
+the expected bytes. Snapshots are seeded from real `git status` output (manually
+verified at the time of creation) and frozen thereafter.
+
+To regenerate snapshots after a deliberate change to long-format output:
+
+```sh
+UPDATE_LONG_SNAPSHOTS=1 cargo test status::long_tests
+```
+
+This rewrites every `.snapshot` file on disk with subspy's current output and passes.
+Always inspect `git diff src/status/snapshots/long/` before committing so you don't
+silently rubber-stamp a regression.
+
+**Adding a new case:**
+1. Write a `setup_*` function in `long_tests.rs` (or `porcelain_tests.rs`) that mutates
+   a fresh repo into the desired state. The `testutil::Repo` builder pattern handles
+   most fixtures; for in-progress operations (rebase, merge, cherry-pick), use
+   `repo.try_git(&["merge", "feature"])` to allow non-zero exits.
+2. Add a `Case` entry to `CASES`. Long-format cases support three `Setup` variants:
+   `Plain`, `Subdir { setup, subdir }`, and `WithSubmodules { names, setup }`.
+3. Run `UPDATE_LONG_SNAPSHOTS=1 cargo test status::long_tests` to seed the snapshot.
+4. Cross-check the seeded snapshot against real `git -C <fixture> status` to confirm
+   correctness before committing - the snapshot tests don't catch divergences from
+   git on their own; they catch regressions in subspy's own output.
+
+**Determinism plumbing:**
+- `.cargo/config.toml` exports `NO_COLOR=1` so `paint::color_enabled()` caches `false`
+  for the whole test binary regardless of TTY detection.
+- `testutil::FIXTURE_NAME` / `FIXTURE_EMAIL` / `FIXTURE_TIME` constants pin the author /
+  committer identity and date, both on the CLI path (`git_may_fail` sets `GIT_AUTHOR_*`
+  / `GIT_COMMITTER_*` env vars) and the libgit2 path (`fixture_signature()` builds a
+  `git2::Signature` with a fixed `Time`). This is required because operation-state
+  headers leak short OIDs (rebase `onto`, cherry-pick / revert `short_oid`, detached
+  `HEAD`).
+
+The `subdir` variant exists specifically to exercise the `Relativizer`: it sets
+`effective_cwd` to a subdirectory inside the repo so paths are emitted cwd-relative
+(e.g. `file.txt` instead of `sub/file.txt`). Use it for any case that's sensitive to
+path relativization (renames, conflicts, untracked files).
 
 ### Integration tests (`tests/`)
 
