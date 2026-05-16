@@ -51,13 +51,8 @@ struct Intercept {
 /// from `cli::Status` so it stays comparable in tests and never leaks
 /// subspy-only flags into the shim's surface.
 #[derive(Debug, Default, PartialEq, Eq)]
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "fields mirror independent git-status flags"
-)]
 struct StatusArgs {
-    porcelain: Option<PorcelainVersion>,
-    short: bool,
+    format: Option<FormatChoice>,
     null_terminate: bool,
     ignore_submodules: IgnoreSubmodules,
     untracked_files: Option<UntrackedFiles>,
@@ -65,14 +60,32 @@ struct StatusArgs {
     branch: bool,
 }
 
+/// User's explicit choice of `git status` output format. `None` in
+/// `StatusArgs::format` means the user didn't pass any format flag, in
+/// which case we render the default (long). Once set, a second
+/// format-affecting flag is treated as a conflict and dispatch falls
+/// back to forwarding so real git can emit its native error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FormatChoice {
+    Long,
+    Short,
+    Porcelain(PorcelainVersion),
+}
+
 impl From<Intercept> for Status {
     fn from(value: Intercept) -> Self {
+        let (porcelain, short) = match value.args.format {
+            Some(FormatChoice::Short) => (None, true),
+            Some(FormatChoice::Porcelain(v)) => (Some(v), false),
+            // Long and the absent case both map to the default long renderer.
+            Some(FormatChoice::Long) | None => (None, false),
+        };
         Self {
             dir: value.chdir,
             log_level: None,
             no_server: false,
-            porcelain: value.args.porcelain,
-            short: value.args.short,
+            porcelain,
+            short,
             null_terminate: value.args.null_terminate,
             ignore_submodules: value.args.ignore_submodules,
             untracked_files: value.args.untracked_files,
@@ -256,6 +269,20 @@ where
     Some(out)
 }
 
+/// Records the chosen output format. Repeated assignments of the same
+/// format are idempotent (matches git: `git status --long --long` is
+/// accepted). A different format is a conflict; returning `false` makes
+/// dispatch fall through to forwarding so real git emits its native
+/// error.
+fn set_format(out: &mut StatusArgs, choice: FormatChoice) -> bool {
+    if let Some(existing) = out.format {
+        existing == choice
+    } else {
+        out.format = Some(choice);
+        true
+    }
+}
+
 /// Per-arg classifier for status flags. Returns `true` if the arg was
 /// recognized (and `out` / `seen_double_dash` updated). Returns `false`
 /// for anything that should make dispatch fall back to forwarding.
@@ -273,29 +300,24 @@ fn classify_status_arg(arg: &str, out: &mut StatusArgs, seen_double_dash: &mut b
         return false;
     }
 
-    // --porcelain | --porcelain=N
+    // Format flags. Each one calls `set_format`, which returns `false` on
+    // a second assignment so the conflict (e.g. `--short --long`) falls
+    // through to forwarding and real git emits its native error.
     if arg == "--porcelain" {
-        out.porcelain = Some(PorcelainVersion::V1);
-        return true;
+        return set_format(out, FormatChoice::Porcelain(PorcelainVersion::V1));
     }
     if let Some(v) = arg.strip_prefix("--porcelain=") {
-        return match parse_porcelain(v) {
-            Some(p) => {
-                out.porcelain = Some(p);
-                true
-            }
-            None => false,
-        };
+        return parse_porcelain(v).is_some_and(|p| set_format(out, FormatChoice::Porcelain(p)));
+    }
+    if arg == "-s" || arg == "--short" {
+        return set_format(out, FormatChoice::Short);
+    }
+    if arg == "--long" {
+        return set_format(out, FormatChoice::Long);
     }
 
     if arg == "-z" {
         out.null_terminate = true;
-        return true;
-    }
-
-    // -s | --short
-    if arg == "-s" || arg == "--short" {
-        out.short = true;
         return true;
     }
 
@@ -453,7 +475,7 @@ mod tests {
             got,
             intercept_with(
                 StatusArgs {
-                    porcelain: Some(PorcelainVersion::V2),
+                    format: Some(FormatChoice::Porcelain(PorcelainVersion::V2)),
                     ..Default::default()
                 },
                 None,
@@ -464,7 +486,10 @@ mod tests {
     #[test]
     fn status_porcelain_no_value_defaults_to_v1() {
         let got = dispatch(&os(&["status", "--porcelain"])).unwrap();
-        assert_eq!(got.args.porcelain, Some(PorcelainVersion::V1));
+        assert_eq!(
+            got.args.format,
+            Some(FormatChoice::Porcelain(PorcelainVersion::V1))
+        );
     }
 
     #[test]
@@ -576,7 +601,10 @@ mod tests {
         ]))
         .unwrap();
         assert_eq!(got.chdir, Some(PathBuf::from("/repo")));
-        assert_eq!(got.args.porcelain, Some(PorcelainVersion::V2));
+        assert_eq!(
+            got.args.format,
+            Some(FormatChoice::Porcelain(PorcelainVersion::V2))
+        );
         assert!(got.args.null_terminate);
     }
 
@@ -631,13 +659,81 @@ mod tests {
                 got,
                 intercept_with(
                     StatusArgs {
-                        short: true,
+                        format: Some(FormatChoice::Short),
                         ..Default::default()
                     },
                     None,
                 )
             );
         }
+    }
+
+    #[test]
+    fn status_long_intercepts() {
+        let got = dispatch(&os(&["status", "--long"])).unwrap();
+        assert_eq!(got.args.format, Some(FormatChoice::Long));
+    }
+
+    #[test]
+    fn status_long_intercept_runs_default_long_renderer() {
+        // `--long` is the default; converting through `Status` should
+        // emit neither `--short` nor `--porcelain`.
+        let intercept = dispatch(&os(&["status", "--long"])).unwrap();
+        let status: Status = intercept.into();
+        assert!(!status.short);
+        assert!(status.porcelain.is_none());
+    }
+
+    #[test]
+    fn status_short_then_long_forwards() {
+        assert!(dispatch(&os(&["status", "--short", "--long"])).is_none());
+        assert!(dispatch(&os(&["status", "-s", "--long"])).is_none());
+    }
+
+    #[test]
+    fn status_long_then_short_forwards() {
+        assert!(dispatch(&os(&["status", "--long", "--short"])).is_none());
+        assert!(dispatch(&os(&["status", "--long", "-s"])).is_none());
+    }
+
+    #[test]
+    fn status_porcelain_then_long_forwards() {
+        assert!(dispatch(&os(&["status", "--porcelain", "--long"])).is_none());
+        assert!(dispatch(&os(&["status", "--porcelain=2", "--long"])).is_none());
+    }
+
+    #[test]
+    fn status_long_then_porcelain_forwards() {
+        assert!(dispatch(&os(&["status", "--long", "--porcelain"])).is_none());
+        assert!(dispatch(&os(&["status", "--long", "--porcelain=2"])).is_none());
+    }
+
+    #[test]
+    fn status_short_then_porcelain_forwards() {
+        // Pre-existing conflict that now also falls through to forwarding.
+        assert!(dispatch(&os(&["status", "--short", "--porcelain"])).is_none());
+    }
+
+    #[test]
+    fn status_porcelain_then_short_forwards() {
+        assert!(dispatch(&os(&["status", "--porcelain=2", "--short"])).is_none());
+    }
+
+    #[test]
+    fn status_repeated_same_format_intercepts() {
+        // `git status --long --long` is accepted by git (idempotent), and
+        // we mirror that.
+        let got = dispatch(&os(&["status", "--long", "--long"])).unwrap();
+        assert_eq!(got.args.format, Some(FormatChoice::Long));
+
+        let got = dispatch(&os(&["status", "--short", "--short"])).unwrap();
+        assert_eq!(got.args.format, Some(FormatChoice::Short));
+
+        let got = dispatch(&os(&["status", "--porcelain", "--porcelain"])).unwrap();
+        assert_eq!(
+            got.args.format,
+            Some(FormatChoice::Porcelain(PorcelainVersion::V1))
+        );
     }
 
     #[test]
@@ -708,7 +804,10 @@ mod tests {
         ]))
         .unwrap();
         assert_eq!(got.chdir, None);
-        assert_eq!(got.args.porcelain, Some(PorcelainVersion::V2));
+        assert_eq!(
+            got.args.format,
+            Some(FormatChoice::Porcelain(PorcelainVersion::V2))
+        );
         assert!(got.args.null_terminate);
         assert_eq!(got.args.untracked_files, Some(UntrackedFiles::All));
         assert_eq!(got.args.ignore_submodules, IgnoreSubmodules::All);
