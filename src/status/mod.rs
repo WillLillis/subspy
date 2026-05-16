@@ -3,11 +3,13 @@
 //!
 //! Output formats live in dedicated submodules:
 //! - [`display`] for the long-format (default, human-readable) layout
+//! - [`short`] for `git status -s` / `--short`
 //! - [`porcelain_v1`] and [`porcelain_v2`] for the machine-readable formats
 //!
 //! Helper modules:
-//! - [`header`]: branch/upstream/operation-state header rendering
-//! - [`conflict`]: shared conflict-index parsing for porcelain entries
+//! - [`xy_line`]: shared `XY PATH` writer for short + porcelain v1
+//! - [`header`]: branch/upstream/operation-state header rendering (long format)
+//! - [`conflict`]: shared conflict-index parsing
 //! - [`submodule`]: submodule status computation and filtering
 
 mod conflict;

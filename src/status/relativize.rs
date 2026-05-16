@@ -1,15 +1,20 @@
-//! Streams repo-relative paths out as cwd-relative paths for the
-//! long-format `status` display.
+//! Streams repo-relative paths out as cwd-relative paths.
 //!
 //! Subspy stores paths relative to the repo root (canonical form for
-//! IPC and submodule indexing). Real git's long-format status output
-//! reports paths relative to the invocation cwd (or `git -C <path>`'s
-//! target). When the two differ - the user ran subspy from a
-//! subdirectory or passed `--dir` - we need to rewrite the path before
-//! emitting it so the output matches git.
+//! IPC and submodule indexing). Real git's `status` output reports
+//! paths relative to the invocation cwd (or `git -C <path>`'s target).
+//! When the two differ - the user ran subspy from a subdirectory or
+//! passed `--dir` - we need to rewrite the path before emitting it so
+//! the output matches git.
 //!
-//! Porcelain output (v1/v2) is repo-root-relative regardless of cwd, by
-//! design - so it never goes through this module.
+//! Path-formatting policy by output mode:
+//! - Long, short, porcelain v2 (without `-z`): cwd-relative through
+//!   this module.
+//! - Porcelain v1: repo-root-relative regardless of cwd; goes through
+//!   `Relativizer::new("")` as a no-op pass-through so the shared
+//!   `xy_line` writer can use a single code path.
+//! - Porcelain v2 with `-z`: repo-root-relative (paths are stable
+//!   identifiers in `-z` mode).
 //!
 //! [`Relativizer`] streams the rewrite allocation-free: the path is
 //! split into "N `../` prefixes" + "the suffix of the input path after

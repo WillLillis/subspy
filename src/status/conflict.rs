@@ -1,8 +1,9 @@
-//! Shared conflict-index parsing for porcelain entries.
+//! Shared conflict-index parsing.
 //!
-//! Both porcelain v1 (terse `XY` codes) and porcelain v2 (rich `u`-line)
-//! need to derive conflict information from the index's three-stage
-//! entries. This module owns the lookup so the two formats stay aligned.
+//! Both the XY-line renderers (short, porcelain v1) and porcelain v2's
+//! rich `u`-line derive conflict information from the index's
+//! three-stage entries. This module owns the lookup so the formats
+//! stay aligned.
 
 use rustc_hash::FxHashMap;
 

@@ -51,6 +51,10 @@ struct Intercept {
 /// from `cli::Status` so it stays comparable in tests and never leaks
 /// subspy-only flags into the shim's surface.
 #[derive(Debug, Default, PartialEq, Eq)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "fields mirror independent git-status flags"
+)]
 struct StatusArgs {
     porcelain: Option<PorcelainVersion>,
     short: bool,

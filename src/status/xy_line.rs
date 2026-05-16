@@ -37,9 +37,9 @@ pub(super) struct LineStyle {
 }
 
 /// How submodule Y characters are derived. Porcelain v1 collapses
-/// NEW_COMMITS / MODIFIED_CONTENT / UNTRACKED_CONTENT into a single
-/// 'M'; short distinguishes them as 'M' / 'm' / '?' so submodule
-/// states are visually distinct from regular files.
+/// `NEW_COMMITS` / `MODIFIED_CONTENT` / `UNTRACKED_CONTENT` into a
+/// single 'M'; short distinguishes them as 'M' / 'm' / '?' so
+/// submodule states are visually distinct from regular files.
 #[derive(Clone, Copy)]
 pub(super) enum SubmoduleFormat {
     Porcelain,
@@ -104,18 +104,9 @@ pub(super) fn display_xy_lines(
     for path in entries.deleted_submodules {
         // `D ` (staged deletion of a submodule). X gets the staged color,
         // Y is blank.
-        let x_color = style.palette.map(|p| p.updated);
-        write_xy_path(
-            out,
-            'D',
-            x_color,
-            ' ',
-            None,
-            path,
-            rel,
-            null_terminate,
-            style,
-        )?;
+        let x = XyChar::new('D', style.palette.map(|p| p.updated));
+        let y = XyChar::new(' ', None);
+        write_xy_path(out, x, y, path, rel, null_terminate, style)?;
     }
 
     for entry in entries
@@ -123,13 +114,11 @@ pub(super) fn display_xy_lines(
         .iter()
         .filter(|e| e.status() == git2::Status::WT_NEW)
     {
-        let c = style.palette.map(|p| p.untracked);
+        let untracked = XyChar::new('?', style.palette.map(|p| p.untracked));
         write_xy_path(
             out,
-            '?',
-            c,
-            '?',
-            c,
+            untracked,
+            untracked,
             entry.path().unwrap_or(""),
             rel,
             null_terminate,
@@ -143,12 +132,11 @@ pub(super) fn display_xy_lines(
         .filter(|e| e.status().contains(git2::Status::IGNORED))
     {
         // Ignored entries get no color in git's default config.
+        let ignored = XyChar::new('!', None);
         write_xy_path(
             out,
-            '!',
-            None,
-            '!',
-            None,
+            ignored,
+            ignored,
             entry.path().unwrap_or(""),
             rel,
             null_terminate,
@@ -230,27 +218,32 @@ fn submodule_xy(st: StatusSummary, format: SubmoduleFormat) -> (char, char) {
     (x, y)
 }
 
-/// Writes a single character, optionally wrapped in a color span.
-fn paint_char(out: &mut impl Write, ch: char, color: Option<Style>) -> io::Result<()> {
-    match color {
-        Some(s) => paint_into(out, s, |o| write!(o, "{ch}")),
-        None => write!(out, "{ch}"),
+/// A single X or Y character + the color slot it should render in.
+/// Blank characters (`' '`) are never colored regardless of `color`.
+#[derive(Clone, Copy)]
+struct XyChar {
+    ch: char,
+    color: Option<Style>,
+}
+
+impl XyChar {
+    const fn new(ch: char, color: Option<Style>) -> Self {
+        Self { ch, color }
+    }
+
+    fn paint(self, out: &mut impl Write) -> io::Result<()> {
+        let color = if self.ch == ' ' { None } else { self.color };
+        match color {
+            Some(s) => paint_into(out, s, |o| write!(o, "{}", self.ch)),
+            None => write!(out, "{}", self.ch),
+        }
     }
 }
 
-/// Writes the `XY ` prefix using `x`/`y` chars and the colors implied
-/// by their slots: `x_color` (typically the "updated" slot, green for
-/// short) and `y_color` ("changed", red for short). Blank characters
-/// (`' '`) get no color regardless. The trailing space is plain.
-fn write_xy_prefix(
-    out: &mut impl Write,
-    x: char,
-    x_color: Option<Style>,
-    y: char,
-    y_color: Option<Style>,
-) -> io::Result<()> {
-    paint_char(out, x, if x == ' ' { None } else { x_color })?;
-    paint_char(out, y, if y == ' ' { None } else { y_color })?;
+/// Writes the `XY ` prefix. The trailing space is plain.
+fn write_xy_prefix(out: &mut impl Write, x: XyChar, y: XyChar) -> io::Result<()> {
+    x.paint(out)?;
+    y.paint(out)?;
     out.write_all(b" ")
 }
 
@@ -266,22 +259,19 @@ fn write_path(
 }
 
 /// Writes a line of the form `XY PATH<term>` with caller-supplied X/Y
-/// characters and color slots. Used for the three entry kinds whose
-/// code is fixed: `D ` for staged-deletion submodules, `??` for
-/// untracked, `!!` for ignored.
-#[allow(clippy::too_many_arguments)]
+/// characters. Used for the three entry kinds whose code is fixed:
+/// `D ` for staged-deletion submodules, `??` for untracked, `!!` for
+/// ignored.
 fn write_xy_path(
     out: &mut impl Write,
-    x: char,
-    x_color: Option<Style>,
-    y: char,
-    y_color: Option<Style>,
+    x: XyChar,
+    y: XyChar,
     path: &str,
     rel: &Relativizer<'_>,
     null_terminate: bool,
     style: &LineStyle,
 ) -> io::Result<()> {
-    write_xy_prefix(out, x, x_color, y, y_color)?;
+    write_xy_prefix(out, x, y)?;
     write_path(out, path, rel, null_terminate, style)?;
     out.write_all(line_terminator(null_terminate).as_bytes())
 }
@@ -304,7 +294,7 @@ fn write_ordinary(
 ) -> io::Result<()> {
     let (x, y) = regular_xy(entry.status());
     let (x_color, y_color) = ordinary_colors(style);
-    write_xy_prefix(out, x, x_color, y, y_color)?;
+    write_xy_prefix(out, XyChar::new(x, x_color), XyChar::new(y, y_color))?;
     write_path(out, entry.path().unwrap_or(""), rel, null_terminate, style)?;
     out.write_all(line_terminator(null_terminate).as_bytes())
 }
@@ -337,7 +327,7 @@ fn write_renamed(
         .and_then(|d| d.new_file().path())
         .map_or(Cow::Borrowed(""), |p| p.to_string_lossy());
 
-    write_xy_prefix(out, x, x_color, y, y_color)?;
+    write_xy_prefix(out, XyChar::new(x, x_color), XyChar::new(y, y_color))?;
     if null_terminate {
         write!(out, "{new_path}\0{old_path}\0")
     } else {
@@ -372,10 +362,10 @@ fn write_conflict(
         }
     });
     let mut chars = xy.chars();
-    let x = chars.next().unwrap();
-    let y = chars.next().unwrap();
-    let c = style.palette.map(|p| p.unmerged);
-    write_xy_path(out, x, c, y, c, path, rel, null_terminate, style)
+    let color = style.palette.map(|p| p.unmerged);
+    let x = XyChar::new(chars.next().unwrap(), color);
+    let y = XyChar::new(chars.next().unwrap(), color);
+    write_xy_path(out, x, y, path, rel, null_terminate, style)
 }
 
 /// Writes a submodule entry. XY derived from the [`StatusSummary`]
@@ -392,10 +382,8 @@ fn write_submodule(
     let (x_color, y_color) = ordinary_colors(style);
     write_xy_path(
         out,
-        x,
-        x_color,
-        y,
-        y_color,
+        XyChar::new(x, x_color),
+        XyChar::new(y, y_color),
         path,
         rel,
         null_terminate,

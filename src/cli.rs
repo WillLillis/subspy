@@ -351,7 +351,7 @@ impl Status {
     /// Translates the mutually-exclusive `--short` / `--porcelain` flags
     /// to the internal `OutputFormat`. Clap rejects the
     /// `short && porcelain.is_some()` combination at parse time.
-    fn output_format(&self) -> OutputFormat {
+    const fn output_format(&self) -> OutputFormat {
         if self.short {
             OutputFormat::Short
         } else if let Some(v) = self.porcelain {

@@ -272,7 +272,7 @@ fn run_case(case: &Case) {
 }
 
 #[test]
-fn human_snapshots() {
+fn long_snapshots() {
     for case in CASES {
         run_case(case);
     }

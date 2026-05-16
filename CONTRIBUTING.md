@@ -58,19 +58,22 @@ over IPC to retrieve or manipulate that cache.
 
 ### Status (`src/status/`)
 
-The `status` subcommand has three output modes (human, porcelain v1, porcelain v2),
-each with its own renderer but sharing common helpers.
+The `status` subcommand has four output modes (long, short, porcelain v1, porcelain v2),
+each with its own renderer. Long stands alone; short + porcelain v1 share an
+`XY PATH` line writer; porcelain v2 has its own `1`/`2`/`u`/`?`/`!` format.
 
 | File | Purpose |
 |---|---|
-| `mod.rs` | `status()` entry, `OutputOpts`, `PorcelainOpts`, `StatusEntries`, `cwd_relative_to_repo` |
-| `display.rs` | Human-readable output (`display_status`), section formatting, submodule predicates |
+| `mod.rs` | `status()` entry, `OutputFormat`, `OutputOpts`, `PorcelainOpts`, `StatusEntries`, `cwd_relative_to_repo` |
+| `display.rs` | Long-format output (`display_status`), section formatting, submodule predicates |
 | `header.rs` | Branch / upstream / operation-state header (`HeaderState`, `HeaderBody`, `print_header`, `print_unmerged_paths`) |
-| `porcelain_v1.rs` | `git status --porcelain=v1` output: `XY PATH` per entry, `QuoteSpace` quoting |
-| `porcelain_v2.rs` | `git status --porcelain=v2` output: `1`/`2`/`u`/`?`/`!` lines, `Standard` quoting |
+| `short.rs` | `git status -s` / `--short` (`display_short`): thin wrapper around `xy_line` with `Standard` quoting + `SHORT_PALETTE` colors |
+| `porcelain_v1.rs` | `git status --porcelain[=1]`: thin wrapper around `xy_line` with `QuoteSpace` quoting and no palette |
+| `porcelain_v2.rs` | `git status --porcelain=2` output: `1`/`2`/`u`/`?`/`!` lines, `Standard` quoting |
+| `xy_line.rs` | Shared `XY PATH` writer used by short + porcelain v1; `LineStyle`, `Palette`, `SubmoduleFormat`, branch-header logic |
 | `relativize.rs` | `Relativizer`: streams repo-root-relative paths as cwd-relative, applies C-style quoting via `QuoteMode` |
-| `quote.rs` | Path quoting helpers (`needs_quoting`, `write_escaped`, `write_path`), `QuoteMode::{Standard, QuoteSpace}` |
-| `conflict.rs` | Shared conflict-index parsing for porcelain entries |
+| `quote.rs` | Path quoting primitives (`needs_quoting`, `write_escaped`, `QuoteMode::{Standard, QuoteSpace}`) consumed by `Relativizer::write_quoted` |
+| `conflict.rs` | Shared conflict-index parsing for XY-line and porcelain v2 entries |
 | `submodule.rs` | `compute_local_statuses`, `deleted_submodule_paths`, `apply_ignore_submodules` |
 | `tests/` | Output-format verification tests (see [Snapshot tests](#snapshot-tests)). Submodules: `long.rs` + `short.rs` (snapshot-based), `porcelain.rs` (live `git status` oracle), `fixtures.rs` (shared `setup_*` helpers) |
 | `snapshots/{long,short}/*.snapshot` | Committed snapshot fixtures for the long- and short-format tests |

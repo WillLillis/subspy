@@ -16,16 +16,17 @@ use crate::{
     RepoKind,
     cli::ProjectPath,
     status::{
-        IgnoreSubmodules, OutputFormat, OutputOpts, PorcelainOpts, PorcelainVersion,
-        StatusEntries, UntrackedFiles, compute_local_statuses, cwd_relative_to_repo,
-        deleted_submodule_paths, porcelain_v1::display_porcelain_v1,
-        porcelain_v2::display_porcelain_v2, relativize::Relativizer,
-        submodule::apply_ignore_submodules,
+        IgnoreSubmodules, OutputFormat, OutputOpts, PorcelainOpts, PorcelainVersion, StatusEntries,
+        UntrackedFiles, compute_local_statuses, cwd_relative_to_repo, deleted_submodule_paths,
+        porcelain_v1::display_porcelain_v1, porcelain_v2::display_porcelain_v2,
+        relativize::Relativizer, submodule::apply_ignore_submodules,
     },
 };
 
 use super::fixtures::{
-    setup_upstream_ahead, setup_upstream_behind, setup_upstream_diverged,
+    setup_clean, setup_deleted_staged, setup_deleted_workdir, setup_modified_workdir,
+    setup_renamed_staged, setup_staged_modified, setup_staged_new, setup_untracked,
+    setup_untracked_in_dir, setup_upstream_ahead, setup_upstream_behind, setup_upstream_diverged,
     setup_upstream_up_to_date,
 };
 
@@ -37,36 +38,6 @@ fn setup_empty_repo_with_untracked(root: &Path) {
     Repo::init(root).write("untracked.txt", "x\n");
 }
 
-/// Initializes a repo with one committed file. Most setups build on this.
-fn setup_clean(root: &Path) {
-    Repo::init(root)
-        .write("file.txt", "initial\n")
-        .add_all()
-        .commit("initial");
-}
-
-fn setup_modified_workdir(root: &Path) {
-    setup_clean(root);
-    Repo::new(root).write("file.txt", "modified\n");
-}
-
-fn setup_untracked(root: &Path) {
-    setup_clean(root);
-    Repo::new(root).write("untracked.txt", "x\n");
-}
-
-fn setup_staged_modified(root: &Path) {
-    setup_clean(root);
-    Repo::new(root)
-        .write("file.txt", "staged change\n")
-        .add("file.txt");
-}
-
-fn setup_staged_new(root: &Path) {
-    setup_clean(root);
-    Repo::new(root).write("new.txt", "x\n").add("new.txt");
-}
-
 fn setup_staged_plus_workdir(root: &Path) {
     // Same file modified, staged, then modified again -> XY = "MM"
     setup_clean(root);
@@ -74,38 +45,6 @@ fn setup_staged_plus_workdir(root: &Path) {
         .write("file.txt", "staged\n")
         .add("file.txt")
         .write("file.txt", "modified again\n");
-}
-
-fn setup_deleted_staged(root: &Path) {
-    setup_clean(root);
-    Repo::new(root).rm_tracked("file.txt");
-}
-
-fn setup_deleted_workdir(root: &Path) {
-    setup_clean(root);
-    Repo::new(root).rm_file("file.txt");
-}
-
-fn setup_renamed_staged(root: &Path) {
-    // Regression test for the rename-detection + path-extraction bugs.
-    // The file needs nontrivial content for libgit2's rename detector to
-    // confidently match (matches git's diff.renames default behavior).
-    setup_clean(root);
-    Repo::new(root)
-        .write("file.txt", "line one\nline two\nline three\nline four\n")
-        .add_all()
-        .commit("longer content")
-        .mv("file.txt", "renamed.txt");
-}
-
-fn setup_untracked_in_dir(root: &Path) {
-    // Differentiates `--untracked-files=normal` (collapses to `subdir/`)
-    // from `--untracked-files=all` (expands to individual files).
-    setup_clean(root);
-    Repo::new(root)
-        .mkdir("subdir")
-        .write("subdir/a.txt", "a\n")
-        .write("subdir/b.txt", "b\n");
 }
 
 fn setup_ignored_files(root: &Path) {
