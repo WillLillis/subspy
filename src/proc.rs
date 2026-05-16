@@ -23,7 +23,8 @@ mod windows_flags {
 /// On Windows, sets `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP` so the
 /// child has no console and survives the parent / Ctrl+C in the parent
 /// shell. On other platforms this is a no-op.
-pub const fn configure_detached_daemon(cmd: &mut Command) {
+#[allow(clippy::missing_const_for_fn, reason = "non-const on Windows")]
+pub fn configure_detached_daemon(cmd: &mut Command) {
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt as _;
@@ -39,7 +40,8 @@ pub const fn configure_detached_daemon(cmd: &mut Command) {
 /// On Windows, sets `CREATE_NO_WINDOW` so a console-subsystem child does
 /// not allocate a fresh console while still inheriting any pipes the parent
 /// set up. On other platforms this is a no-op.
-pub const fn configure_hidden_console(cmd: &mut Command) {
+#[allow(clippy::missing_const_for_fn, reason = "non-const on Windows")]
+pub fn configure_hidden_console(cmd: &mut Command) {
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt as _;
