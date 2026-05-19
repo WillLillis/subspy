@@ -231,7 +231,7 @@ fn assert_snapshot(case_name: &str, got: &[u8]) {
     );
 }
 
-fn run_case(case: &Case) {
+fn run_case(case: &Case, opts: OutputOpts) {
     match &case.setup {
         Setup::Plain(setup) => {
             let tmp = TempDir::new().unwrap();
@@ -241,7 +241,7 @@ fn run_case(case: &Case) {
                 effective_cwd: tmp.path().to_path_buf(),
                 kind: RepoKind::Normal,
             };
-            let got = run_subspy_long(&project, default_opts());
+            let got = run_subspy_long(&project, opts);
             assert_snapshot(case.name, &got);
         }
         Setup::Subdir { setup, subdir } => {
@@ -252,7 +252,7 @@ fn run_case(case: &Case) {
                 effective_cwd: tmp.path().join(subdir),
                 kind: RepoKind::Normal,
             };
-            let got = run_subspy_long(&project, default_opts());
+            let got = run_subspy_long(&project, opts);
             assert_snapshot(case.name, &got);
         }
         Setup::WithSubmodules { names, setup } => {
@@ -267,7 +267,7 @@ fn run_case(case: &Case) {
                 effective_cwd: harness.root().path().to_path_buf(),
                 kind: RepoKind::WithSubmodules,
             };
-            let got = run_subspy_long(&project, default_opts());
+            let got = run_subspy_long(&project, opts);
             assert_snapshot(case.name, &got);
         }
     }
@@ -276,6 +276,30 @@ fn run_case(case: &Case) {
 #[test]
 fn long_snapshots() {
     for case in CASES {
-        run_case(case);
+        run_case(case, default_opts());
+    }
+}
+
+#[test]
+fn long_no_ahead_behind_snapshots() {
+    // `--no-ahead-behind` only changes output when the upstream is
+    // diverged from local; matched-OID cases short-circuit identically
+    // in both modes. Cover the ahead and diverged shapes.
+    const CASES: &[Case] = &[
+        Case {
+            name: "no_ahead_behind_upstream_ahead",
+            setup: Setup::Plain(setup_upstream_ahead),
+        },
+        Case {
+            name: "no_ahead_behind_upstream_diverged",
+            setup: Setup::Plain(setup_upstream_diverged),
+        },
+    ];
+    let opts = OutputOpts {
+        ahead_behind: false,
+        ..default_opts()
+    };
+    for case in CASES {
+        run_case(case, opts);
     }
 }

@@ -271,7 +271,10 @@ fn assert_snapshot(case_name: &str, got: &[u8]) {
 }
 
 fn run_case(case: &Case) {
-    let opts = opts_for(case.branch);
+    run_case_with(case, opts_for(case.branch));
+}
+
+fn run_case_with(case: &Case, opts: OutputOpts) {
     match &case.setup {
         Setup::Plain(setup) => {
             let tmp = TempDir::new().unwrap();
@@ -317,5 +320,31 @@ fn run_case(case: &Case) {
 fn short_snapshots() {
     for case in CASES {
         run_case(case);
+    }
+}
+
+#[test]
+fn short_no_ahead_behind_snapshots() {
+    // `--no-ahead-behind` only changes output when the upstream is
+    // diverged from local; matched-OID cases short-circuit identically
+    // in both modes. The bracket suffix becomes `[different]`.
+    const CASES: &[Case] = &[
+        Case {
+            name: "branch_no_ahead_behind_upstream_ahead",
+            setup: Setup::Plain(setup_upstream_ahead),
+            branch: true,
+        },
+        Case {
+            name: "branch_no_ahead_behind_upstream_diverged",
+            setup: Setup::Plain(setup_upstream_diverged),
+            branch: true,
+        },
+    ];
+    let opts = OutputOpts {
+        ahead_behind: false,
+        ..opts_for(true)
+    };
+    for case in CASES {
+        run_case_with(case, opts);
     }
 }
