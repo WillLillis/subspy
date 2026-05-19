@@ -9,7 +9,7 @@ use std::{
     env,
     ffi::{OsStr, OsString},
     iter::Peekable,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Command, ExitCode},
 };
 
@@ -415,7 +415,7 @@ where
     S: AsRef<OsStr>,
 {
     use std::os::unix::process::CommandExt as _;
-    let err = Command::new("git").args(argv).exec();
+    let err = Command::new(git_target()).args(argv).exec();
     eprintln!("subspy-git: failed to exec `git`: {err}");
     ExitCode::FAILURE
 }
@@ -426,9 +426,12 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    let mut cmd = Command::new("git");
+    use std::io::IsTerminal as _;
+    let mut cmd = Command::new(git_target());
     cmd.args(argv);
-    subspy::proc::configure_hidden_console(&mut cmd);
+    if !std::io::stdout().is_terminal() {
+        subspy::proc::configure_hidden_console(&mut cmd);
+    }
     match cmd.status() {
         Ok(status) => status
             .code()
@@ -439,6 +442,52 @@ where
             ExitCode::FAILURE
         }
     }
+}
+
+/// Resolves the binary to invoke for forwarded git commands. Normally this
+/// is just `"git"`, letting the OS do PATH resolution. However, when the shim
+/// itself is renamed to `git`/`git.exe` (as `Sourcetree` requires), the OS will
+/// resolve `"git"` back to us.
+///
+/// To avoid infinite recursion, walk `PATH` ourselves and pick the first match
+/// that isn't us.
+fn git_target() -> OsString {
+    let me = env::current_exe().ok();
+    let is_named_git = me
+        .as_ref()
+        .and_then(|p| p.file_stem())
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.eq_ignore_ascii_case("git"));
+    if !is_named_git {
+        return "git".into();
+    }
+    find_real_git(me.as_deref()).map_or_else(|| "git".into(), OsString::from)
+}
+
+#[cfg(unix)]
+const GIT_EXE: &str = "git";
+#[cfg(windows)]
+const GIT_EXE: &str = "git.exe";
+
+/// Walks `PATH` for a `git`/`git.exe` whose canonical path differs from
+/// `me`. Standard installations of Git on Windows use `git.exe`. Non-standard
+/// wrappers (`.cmd`, `.bat`, ...) aren't supported until proven otherwise.
+fn find_real_git(me: Option<&Path>) -> Option<PathBuf> {
+    let me_canonical = me.and_then(|p| std::fs::canonicalize(p).ok());
+    let path_var = env::var_os("PATH")?;
+    for dir in env::split_paths(&path_var) {
+        let candidate = dir.join(GIT_EXE);
+        if !candidate.is_file() {
+            continue;
+        }
+        let Ok(cand_canonical) = std::fs::canonicalize(&candidate) else {
+            continue;
+        };
+        if Some(&cand_canonical) != me_canonical.as_ref() {
+            return Some(candidate);
+        }
+    }
+    None
 }
 
 #[cfg(test)]
