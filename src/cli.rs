@@ -116,6 +116,19 @@ pub struct Status {
     /// long format always shows branch info)
     #[arg(short = 'b', long)]
     pub branch: bool,
+    /// Compute and display detailed ahead/behind upstream counts (default).
+    #[arg(long = "ahead-behind", conflicts_with = "no_ahead_behind")]
+    pub ahead_behind: bool,
+    /// Skip the commit-graph walk and emit only the divergence
+    /// relationship without specific counts.
+    #[arg(long = "no-ahead-behind", conflicts_with = "ahead_behind")]
+    pub no_ahead_behind: bool,
+    /// Quote bytes `>= 0x80` in paths as octal escapes (git's default).
+    /// Set to `false` to emit such bytes verbatim (matches
+    /// `-c core.quotepath=false`).
+    #[arg(long = "quote-path", default_value_t = true,
+          action = clap::ArgAction::Set)]
+    pub quote_path: bool,
 }
 
 #[derive(Args, Debug)]
@@ -377,6 +390,9 @@ impl Status {
         let use_server = !self.no_server
             && project.kind == RepoKind::WithSubmodules
             && self.ignore_submodules != IgnoreSubmodules::All;
+        // Default is on; only the explicit `--no-ahead-behind` flips it off.
+        // `--ahead-behind` is accepted for symmetry but is the default.
+        let ahead_behind = !self.no_ahead_behind;
         Ok(status(
             &project,
             display_progress,
@@ -388,6 +404,8 @@ impl Status {
                 untracked_files: self.untracked_files.unwrap_or_default(),
                 show_ignored: self.ignored,
                 branch: self.branch,
+                ahead_behind,
+                quote_path: self.quote_path,
             },
         )?)
     }

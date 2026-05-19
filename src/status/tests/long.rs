@@ -134,6 +134,8 @@ const fn default_opts() -> OutputOpts {
         untracked_files: UntrackedFiles::Normal,
         show_ignored: false,
         branch: false,
+        ahead_behind: true,
+        quote_path: true,
     }
 }
 
@@ -185,7 +187,7 @@ fn run_subspy_long(project: &ProjectPath, opts: OutputOpts) -> Vec<u8> {
     let submodules = apply_ignore_submodules(submodules, opts.ignore_submodules);
 
     let cwd_rel = cwd_relative_to_repo(&project.repo_root, &project.effective_cwd);
-    let rel = Relativizer::new(&cwd_rel);
+    let rel = Relativizer::new(&cwd_rel, true);
 
     let entries = StatusEntries {
         non_submod: &non_submod,
@@ -194,7 +196,7 @@ fn run_subspy_long(project: &ProjectPath, opts: OutputOpts) -> Vec<u8> {
     };
 
     let mut got: Vec<u8> = Vec::new();
-    display_status(&mut got, &repo, &entries, &rel).unwrap();
+    display_status(&mut got, &repo, &entries, &rel, opts.ahead_behind).unwrap();
     got
 }
 

@@ -268,7 +268,13 @@ fn setup_submod_rm_rf_workdir(h: &TestHarness) {
 /// Translates `OutputOpts` to the equivalent `git status` argv. Mirrors
 /// subspy's defaults so the two sides agree without explicit redundant flags.
 fn git_status_args(opts: OutputOpts) -> Vec<String> {
-    let mut a: Vec<String> = vec!["status".into()];
+    let mut a: Vec<String> = Vec::new();
+    // `-c` globals must precede the subcommand.
+    if !opts.quote_path {
+        a.push("-c".into());
+        a.push("core.quotepath=false".into());
+    }
+    a.push("status".into());
     match opts.format {
         OutputFormat::Porcelain(PorcelainVersion::V1) => a.push("--porcelain".into()),
         OutputFormat::Porcelain(PorcelainVersion::V2) => a.push("--porcelain=2".into()),
@@ -281,6 +287,9 @@ fn git_status_args(opts: OutputOpts) -> Vec<String> {
     if opts.branch {
         a.push("--branch".into());
     }
+    if !opts.ahead_behind {
+        a.push("--no-ahead-behind".into());
+    }
     match opts.untracked_files {
         UntrackedFiles::Normal => {} // git's default
         UntrackedFiles::All => a.push("--untracked-files=all".into()),
@@ -290,7 +299,7 @@ fn git_status_args(opts: OutputOpts) -> Vec<String> {
         a.push("--ignored".into());
     }
     match opts.ignore_submodules {
-        IgnoreSubmodules::None => {} // matches subspy's default; git's default for status is "all"
+        IgnoreSubmodules::None => {} // default: show submodule changes (same in subspy and git)
         IgnoreSubmodules::Untracked => a.push("--ignore-submodules=untracked".into()),
         IgnoreSubmodules::Dirty => a.push("--ignore-submodules=dirty".into()),
         IgnoreSubmodules::All => a.push("--ignore-submodules=all".into()),
@@ -393,7 +402,7 @@ fn assert_outputs_match(project: &ProjectPath, case_name: &str, opts: OutputOpts
     // Same Relativizer plumbing as production: v2 uses it (cwd-relative
     // output); v1 doesn't take one (always repo-root-relative).
     let cwd_rel = cwd_relative_to_repo(&project.repo_root, &project.effective_cwd);
-    let rel = Relativizer::new(&cwd_rel);
+    let rel = Relativizer::new(&cwd_rel, true);
 
     let entries = StatusEntries {
         non_submod: &non_submod,
@@ -403,6 +412,8 @@ fn assert_outputs_match(project: &ProjectPath, case_name: &str, opts: OutputOpts
     let porcelain_opts = PorcelainOpts {
         null_terminate: opts.null_terminate,
         branch: opts.branch,
+        ahead_behind: opts.ahead_behind,
+        quote_path: opts.quote_path,
     };
 
     let mut got: Vec<u8> = Vec::new();
@@ -445,6 +456,8 @@ const fn opts_with(
         untracked_files,
         show_ignored,
         branch,
+        ahead_behind: true,
+        quote_path: true,
     }
 }
 
@@ -583,6 +596,78 @@ fn v2_ignored() {
         UntrackedFiles::Normal,
         true,
     );
+    for c in CASES {
+        run_case(c, opts);
+    }
+}
+
+#[test]
+fn v1_quotepath_false() {
+    // `path_with_non_ASCII` is the case where the setting actually
+    // changes output: bytes >= 0x80 should be emitted verbatim.
+    let opts = OutputOpts {
+        format: OutputFormat::Porcelain(PorcelainVersion::V1),
+        null_terminate: false,
+        ignore_submodules: IgnoreSubmodules::None,
+        untracked_files: UntrackedFiles::Normal,
+        show_ignored: false,
+        branch: false,
+        ahead_behind: true,
+        quote_path: false,
+    };
+    for c in CASES {
+        run_case(c, opts);
+    }
+}
+
+#[test]
+fn v2_quotepath_false() {
+    let opts = OutputOpts {
+        format: OutputFormat::Porcelain(PorcelainVersion::V2),
+        null_terminate: false,
+        ignore_submodules: IgnoreSubmodules::None,
+        untracked_files: UntrackedFiles::Normal,
+        show_ignored: false,
+        branch: false,
+        ahead_behind: true,
+        quote_path: false,
+    };
+    for c in CASES {
+        run_case(c, opts);
+    }
+}
+
+#[test]
+fn v1_branch_no_ahead_behind() {
+    // `[different]` instead of `[ahead/behind N]` for diverged upstreams.
+    let opts = OutputOpts {
+        format: OutputFormat::Porcelain(PorcelainVersion::V1),
+        null_terminate: false,
+        ignore_submodules: IgnoreSubmodules::None,
+        untracked_files: UntrackedFiles::Normal,
+        show_ignored: false,
+        branch: true,
+        ahead_behind: false,
+        quote_path: true,
+    };
+    for c in CASES {
+        run_case(c, opts);
+    }
+}
+
+#[test]
+fn v2_branch_no_ahead_behind() {
+    // `+? -?` instead of `+N -M` for diverged upstreams.
+    let opts = OutputOpts {
+        format: OutputFormat::Porcelain(PorcelainVersion::V2),
+        null_terminate: false,
+        ignore_submodules: IgnoreSubmodules::None,
+        untracked_files: UntrackedFiles::Normal,
+        show_ignored: false,
+        branch: true,
+        ahead_behind: false,
+        quote_path: true,
+    };
     for c in CASES {
         run_case(c, opts);
     }

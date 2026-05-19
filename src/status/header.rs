@@ -313,7 +313,7 @@ fn read_short_oid(repo: &Repository, filename: &str) -> String {
 
 /// Determines the repository's current operation state (rebase, merge, cherry-pick,
 /// etc.) and returns it along with branch/upstream info for display.
-fn get_header_state(repo: &Repository) -> StatusResult<HeaderState> {
+fn get_header_state(repo: &Repository, ahead_behind: bool) -> StatusResult<HeaderState> {
     if let Some(info) = get_rebase_info(repo)? {
         return Ok(HeaderState {
             branch_display: None,
@@ -362,7 +362,7 @@ fn get_header_state(repo: &Repository) -> StatusResult<HeaderState> {
             }
         }
         _ => HeaderBody::Normal {
-            upstream: get_upstream_status(repo, head_ref)?,
+            upstream: get_upstream_status(repo, head_ref, ahead_behind)?,
         },
     };
 
@@ -374,8 +374,12 @@ fn get_header_state(repo: &Repository) -> StatusResult<HeaderState> {
 
 /// Prints the status header: branch name, upstream tracking info, and any
 /// in-progress operation (rebase, merge, cherry-pick, etc.).
-pub fn print_header(repo: &Repository, stdout: &mut impl Write) -> StatusResult<()> {
-    let state = get_header_state(repo)?;
+pub fn print_header(
+    repo: &Repository,
+    stdout: &mut impl Write,
+    ahead_behind: bool,
+) -> StatusResult<()> {
+    let state = get_header_state(repo, ahead_behind)?;
     print_header_state(&state, stdout)?;
     Ok(())
 }
@@ -535,9 +539,14 @@ fn current_branch_display(head_ref: &git2::Reference<'_>) -> String {
 
 /// Returns the upstream tracking status (e.g. "ahead 3", "behind 1") and a hint
 /// string, or `None` if HEAD is detached or has no upstream configured.
+///
+/// When `ahead_behind` is `false` and the local/upstream OIDs differ,
+/// skips the graph walk and emits the "refer to different commits"
+/// form. With matched OIDs we still emit the "up to date" message.
 fn get_upstream_status(
     repo: &Repository,
     head_ref: git2::Reference<'_>,
+    ahead_behind: bool,
 ) -> StatusResult<Option<(String, &'static str)>> {
     if !head_ref.is_branch() {
         return Ok(None);
@@ -557,6 +566,20 @@ fn get_upstream_status(
     // Get local and upstream commit OIDs
     let local_oid = local_branch.get().peel_to_commit()?.id();
     let upstream_oid = upstream_branch.get().peel_to_commit()?.id();
+
+    if local_oid == upstream_oid {
+        return Ok(Some((
+            format!("Your branch is up to date with '{name}'."),
+            "",
+        )));
+    }
+
+    if !ahead_behind {
+        return Ok(Some((
+            format!("Your branch and '{name}' refer to different commits."),
+            "(use \"git status --ahead-behind\" for details)",
+        )));
+    }
 
     // Compare graphs
     let (ahead, behind) = repo.graph_ahead_behind(local_oid, upstream_oid)?;
@@ -641,7 +664,7 @@ mod tests {
     #[test]
     fn header_state_clean_repo() {
         let (_tmp, repo) = init_repo();
-        let state = get_header_state(&repo).unwrap();
+        let state = get_header_state(&repo, true).unwrap();
         assert!(
             matches!(state.body, HeaderBody::Normal { .. }),
             "expected Normal, got {state:?}"
@@ -662,7 +685,7 @@ mod tests {
         assert!(!output.status.success(), "expected cherry-pick to conflict");
 
         let repo = Repository::open(tmp.path()).unwrap();
-        let state = get_header_state(&repo).unwrap();
+        let state = get_header_state(&repo, true).unwrap();
         assert!(
             matches!(
                 state.body,
@@ -691,7 +714,7 @@ mod tests {
         assert!(!output.status.success(), "expected merge to conflict");
 
         let repo = Repository::open(tmp.path()).unwrap();
-        let state = get_header_state(&repo).unwrap();
+        let state = get_header_state(&repo, true).unwrap();
         assert!(
             matches!(
                 state.body,
@@ -733,7 +756,7 @@ mod tests {
         assert!(!output.status.success(), "expected revert to conflict");
 
         let repo = Repository::open(tmp.path()).unwrap();
-        let state = get_header_state(&repo).unwrap();
+        let state = get_header_state(&repo, true).unwrap();
         assert!(
             matches!(
                 state.body,
@@ -766,7 +789,7 @@ mod tests {
         git(&["-C", &root, "add", "file.txt"]);
 
         let repo = Repository::open(tmp.path()).unwrap();
-        let state = get_header_state(&repo).unwrap();
+        let state = get_header_state(&repo, true).unwrap();
         assert!(
             matches!(
                 state.body,
@@ -795,7 +818,7 @@ mod tests {
         git(&["-C", &root, "add", "file.txt"]);
 
         let repo = Repository::open(tmp.path()).unwrap();
-        let state = get_header_state(&repo).unwrap();
+        let state = get_header_state(&repo, true).unwrap();
         assert!(
             matches!(
                 state.body,
@@ -821,7 +844,7 @@ mod tests {
         git(&["-C", &root, "bisect", "good", "HEAD~1"]);
 
         let repo = Repository::open(tmp.path()).unwrap();
-        let state = get_header_state(&repo).unwrap();
+        let state = get_header_state(&repo, true).unwrap();
         assert_eq!(state.body, HeaderBody::Bisect);
     }
 
@@ -846,7 +869,7 @@ mod tests {
         assert!(!output.status.success(), "expected git am to conflict");
 
         let repo = Repository::open(tmp.path()).unwrap();
-        let state = get_header_state(&repo).unwrap();
+        let state = get_header_state(&repo, true).unwrap();
         // git am patch failures don't produce index conflicts - the patch
         // simply fails to apply and the index stays clean.
         assert!(
@@ -881,7 +904,7 @@ mod tests {
         );
 
         let repo = Repository::open(tmp.path()).unwrap();
-        let state = get_header_state(&repo).unwrap();
+        let state = get_header_state(&repo, true).unwrap();
         assert!(
             matches!(
                 state.body,
@@ -984,7 +1007,7 @@ mod tests {
     #[test]
     fn upstream_up_to_date() {
         let (_tmp, repo) = init_repo_with_remote();
-        let (status_line, hint) = get_upstream_status(&repo, repo.head().unwrap())
+        let (status_line, hint) = get_upstream_status(&repo, repo.head().unwrap(), true)
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -1003,7 +1026,7 @@ mod tests {
         git(&["-C", &local, "commit", "-m", "local commit"]);
 
         let repo = Repository::open(repo.workdir().unwrap()).unwrap();
-        let (status_line, hint) = get_upstream_status(&repo, repo.head().unwrap())
+        let (status_line, hint) = get_upstream_status(&repo, repo.head().unwrap(), true)
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -1036,7 +1059,7 @@ mod tests {
         git(&["-C", &local, "fetch"]);
 
         let repo = Repository::open(repo.workdir().unwrap()).unwrap();
-        let (status_line, hint) = get_upstream_status(&repo, repo.head().unwrap())
+        let (status_line, hint) = get_upstream_status(&repo, repo.head().unwrap(), true)
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -1072,7 +1095,7 @@ mod tests {
         git(&["-C", &local, "fetch"]);
 
         let repo = Repository::open(repo.workdir().unwrap()).unwrap();
-        let (status_line, hint) = get_upstream_status(&repo, repo.head().unwrap())
+        let (status_line, hint) = get_upstream_status(&repo, repo.head().unwrap(), true)
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -1090,7 +1113,7 @@ mod tests {
     fn upstream_none_without_remote() {
         let (_tmp, repo) = init_repo();
         assert!(
-            get_upstream_status(&repo, repo.head().unwrap())
+            get_upstream_status(&repo, repo.head().unwrap(), true)
                 .unwrap()
                 .is_none()
         );

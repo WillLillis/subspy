@@ -26,17 +26,25 @@ use super::{
     unborn_branch_name,
 };
 
-/// Porcelain v2 uses `Standard` mode (matches `git status --porcelain=2`,
-/// which uses `quote_c_style` without `QUOTE_PATH_QUOTE_SP`). Spaces are
-/// preserved verbatim; only escapes/control/high-bytes/`"`/`\` trigger
-/// quoting.
-const QUOTE_MODE: QuoteMode = QuoteMode::Standard;
+/// Per-call rendering constants shared by every `write_*` helper:
+/// where to slot paths relative to (`rel`), whether the line
+/// terminator is NUL (`null_terminate`), and the quoting policy
+/// (`quote_mode`).
+struct RenderOpts<'a> {
+    rel: &'a Relativizer<'a>,
+    null_terminate: bool,
+    quote_mode: QuoteMode,
+}
 
 /// Renders the full porcelain v2 output to `out`: optional `# branch.*`
 /// header lines followed by one `1`/`2`/`u`/`?`/`!` line per entry,
 /// terminated by LF or NUL per `opts.null_terminate`. `rel` is the
 /// cwd-aware relativizer; under `-z` it falls back to repo-root paths
 /// internally.
+///
+/// Quoting policy: porcelain v2 doesn't treat a plain space as
+/// "unusual" (no `QUOTE_PATH_QUOTE_SP`). High bytes are quoted unless
+/// the caller passed `-c core.quotepath=false` via `opts.quote_path`.
 pub fn display_porcelain_v2(
     out: &mut impl Write,
     repo: &Repository,
@@ -47,10 +55,20 @@ pub fn display_porcelain_v2(
     let PorcelainOpts {
         null_terminate,
         branch,
+        ahead_behind,
+        quote_path,
     } = opts;
+    let render_opts = RenderOpts {
+        rel,
+        null_terminate,
+        quote_mode: QuoteMode {
+            quote_path,
+            ..QuoteMode::STANDARD
+        },
+    };
 
     if branch {
-        write_branch_headers(repo, out)?;
+        write_branch_headers(repo, out, ahead_behind)?;
     }
 
     let index = repo.index()?;
@@ -68,11 +86,11 @@ pub fn display_porcelain_v2(
             continue;
         }
         if st.contains(git2::Status::CONFLICTED) {
-            write_conflict(&entry, &conflicts, out, rel, null_terminate)?;
+            write_conflict(&entry, &conflicts, out, &render_opts)?;
         } else if st.intersects(git2::Status::INDEX_RENAMED | git2::Status::WT_RENAMED) {
-            write_renamed(&entry, out, rel, null_terminate)?;
+            write_renamed(&entry, out, &render_opts)?;
         } else {
-            write_ordinary(&entry, out, rel, null_terminate)?;
+            write_ordinary(&entry, out, &render_opts)?;
         }
     }
 
@@ -84,7 +102,7 @@ pub fn display_porcelain_v2(
         let h_index = index
             .get_path(Path::new(path), 0)
             .map_or_else(git2::Oid::zero, |e| e.id);
-        write_submodule(path, *st, h_head, h_index, out, rel, null_terminate)?;
+        write_submodule(path, *st, h_head, h_index, out, &render_opts)?;
     }
 
     for path in entries.deleted_submodules {
@@ -92,7 +110,7 @@ pub fn display_porcelain_v2(
             .as_ref()
             .and_then(|t| t.get_path(Path::new(path)).ok())
             .map_or_else(git2::Oid::zero, |e| e.id());
-        write_deleted_submodule(path, h_head, out, rel, null_terminate)?;
+        write_deleted_submodule(path, h_head, out, &render_opts)?;
     }
 
     for entry in entries
@@ -101,8 +119,13 @@ pub fn display_porcelain_v2(
         .filter(|e| e.status() == git2::Status::WT_NEW)
     {
         out.write_all(b"? ")?;
-        rel.write_quoted(out, entry.path().unwrap_or(""), null_terminate, QUOTE_MODE)?;
-        out.write_all(line_terminator(null_terminate).as_bytes())?;
+        render_opts.rel.write_quoted(
+            out,
+            entry.path().unwrap_or(""),
+            render_opts.null_terminate,
+            render_opts.quote_mode,
+        )?;
+        out.write_all(line_terminator(render_opts.null_terminate).as_bytes())?;
     }
 
     for entry in entries
@@ -111,15 +134,28 @@ pub fn display_porcelain_v2(
         .filter(|e| e.status().contains(git2::Status::IGNORED))
     {
         out.write_all(b"! ")?;
-        rel.write_quoted(out, entry.path().unwrap_or(""), null_terminate, QUOTE_MODE)?;
-        out.write_all(line_terminator(null_terminate).as_bytes())?;
+        render_opts.rel.write_quoted(
+            out,
+            entry.path().unwrap_or(""),
+            render_opts.null_terminate,
+            render_opts.quote_mode,
+        )?;
+        out.write_all(line_terminator(render_opts.null_terminate).as_bytes())?;
     }
 
     Ok(())
 }
 
 /// Writes the `# branch.*` header lines for porcelain v2 output.
-fn write_branch_headers(repo: &Repository, out: &mut impl Write) -> StatusResult<()> {
+///
+/// With `ahead_behind = false` and a diverged upstream, emits
+/// `# branch.ab +? -?` rather than computing exact counts. When the
+/// OIDs are equal we emit `+0 -0` without the graph walk.
+fn write_branch_headers(
+    repo: &Repository,
+    out: &mut impl Write,
+    ahead_behind: bool,
+) -> StatusResult<()> {
     let Ok(head) = repo.head() else {
         // Unborn HEAD (empty repo, no commits yet).
         let head_ref = repo.find_reference("HEAD").ok();
@@ -151,10 +187,13 @@ fn write_branch_headers(repo: &Repository, out: &mut impl Write) -> StatusResult
         writeln!(out, "# branch.upstream {upstream_name}")?;
         let local_oid = local.get().peel_to_commit().map(|c| c.id());
         let up_oid = upstream.get().peel_to_commit().map(|c| c.id());
-        if let (Ok(l), Ok(u)) = (local_oid, up_oid)
-            && let Ok((ahead, behind)) = repo.graph_ahead_behind(l, u)
-        {
-            writeln!(out, "# branch.ab +{ahead} -{behind}")?;
+        if let (Ok(l), Ok(u)) = (local_oid, up_oid) {
+            if !ahead_behind && l != u {
+                // Skip the graph walk and report only divergence.
+                writeln!(out, "# branch.ab +? -?")?;
+            } else if let Ok((ahead, behind)) = repo.graph_ahead_behind(l, u) {
+                writeln!(out, "# branch.ab +{ahead} -{behind}")?;
+            }
         }
     }
 
@@ -264,8 +303,7 @@ fn extract_modes_and_oids(entry: &git2::StatusEntry<'_>) -> EntryModesAndOids {
 fn write_ordinary(
     entry: &git2::StatusEntry<'_>,
     out: &mut impl Write,
-    rel: &Relativizer<'_>,
-    null_terminate: bool,
+    render_opts: &RenderOpts<'_>,
 ) -> Result<(), io::Error> {
     let (x, y) = regular_xy(entry.status());
     let EntryModesAndOids {
@@ -279,8 +317,13 @@ fn write_ordinary(
         out,
         "1 {x}{y} N... {m_head:06o} {m_idx:06o} {m_work:06o} {h_head} {h_idx} ",
     )?;
-    rel.write_quoted(out, entry.path().unwrap_or(""), null_terminate, QUOTE_MODE)?;
-    out.write_all(line_terminator(null_terminate).as_bytes())
+    render_opts.rel.write_quoted(
+        out,
+        entry.path().unwrap_or(""),
+        render_opts.null_terminate,
+        render_opts.quote_mode,
+    )?;
+    out.write_all(line_terminator(render_opts.null_terminate).as_bytes())
 }
 
 /// Writes a rename entry as a porcelain v2 `2` line:
@@ -291,8 +334,7 @@ fn write_ordinary(
 fn write_renamed(
     entry: &git2::StatusEntry<'_>,
     out: &mut impl Write,
-    rel: &Relativizer<'_>,
-    null_terminate: bool,
+    render_opts: &RenderOpts<'_>,
 ) -> Result<(), io::Error> {
     let st = entry.status();
     let (x, y) = regular_xy(st);
@@ -322,11 +364,25 @@ fn write_renamed(
         out,
         "2 {x}{y} N... {m_head:06o} {m_idx:06o} {m_work:06o} {h_head} {h_idx} R100 ",
     )?;
-    rel.write_quoted(out, &new_path, null_terminate, QUOTE_MODE)?;
+    render_opts.rel.write_quoted(
+        out,
+        &new_path,
+        render_opts.null_terminate,
+        render_opts.quote_mode,
+    )?;
     // Path separator: NUL with -z, TAB without.
-    out.write_all(if null_terminate { b"\0" } else { b"\t" })?;
-    rel.write_quoted(out, &old_path, null_terminate, QUOTE_MODE)?;
-    out.write_all(line_terminator(null_terminate).as_bytes())
+    out.write_all(if render_opts.null_terminate {
+        b"\0"
+    } else {
+        b"\t"
+    })?;
+    render_opts.rel.write_quoted(
+        out,
+        &old_path,
+        render_opts.null_terminate,
+        render_opts.quote_mode,
+    )?;
+    out.write_all(line_terminator(render_opts.null_terminate).as_bytes())
 }
 
 /// Writes a conflicted entry as a porcelain v2 `u` line:
@@ -338,8 +394,7 @@ fn write_conflict(
     entry: &git2::StatusEntry<'_>,
     conflicts: &FxHashMap<String, ConflictEntry>,
     out: &mut impl Write,
-    rel: &Relativizer<'_>,
-    null_terminate: bool,
+    render_opts: &RenderOpts<'_>,
 ) -> Result<(), io::Error> {
     let path = entry.path().unwrap_or("");
     let m_work = entry
@@ -378,8 +433,13 @@ fn write_conflict(
         out,
         "u {xy} N... {m1:06o} {m2:06o} {m3:06o} {m_work:06o} {h1} {h2} {h3} ",
     )?;
-    rel.write_quoted(out, path, null_terminate, QUOTE_MODE)?;
-    out.write_all(line_terminator(null_terminate).as_bytes())
+    render_opts.rel.write_quoted(
+        out,
+        path,
+        render_opts.null_terminate,
+        render_opts.quote_mode,
+    )?;
+    out.write_all(line_terminator(render_opts.null_terminate).as_bytes())
 }
 
 /// Writes a submodule entry as a porcelain v2 `1` line with the `sub`
@@ -395,8 +455,7 @@ fn write_submodule(
     h_head: git2::Oid,
     h_index: git2::Oid,
     out: &mut impl Write,
-    rel: &Relativizer<'_>,
-    null_terminate: bool,
+    render_opts: &RenderOpts<'_>,
 ) -> Result<(), io::Error> {
     // `x`/`y` mirror git's XY notation; `c`/`m`/`u` mirror the
     // porcelain v2 `S<C><M><U>` sub-field positions.
@@ -431,8 +490,13 @@ fn write_submodule(
         "1 {x}{y} S{c}{m}{u} {:06o} {:06o} {:06o} {h_head} {h_index} ",
         m_head, 0o160_000_u32, m_work,
     )?;
-    rel.write_quoted(out, path, null_terminate, QUOTE_MODE)?;
-    out.write_all(line_terminator(null_terminate).as_bytes())
+    render_opts.rel.write_quoted(
+        out,
+        path,
+        render_opts.null_terminate,
+        render_opts.quote_mode,
+    )?;
+    out.write_all(line_terminator(render_opts.null_terminate).as_bytes())
 }
 
 /// Writes a submodule whose gitlink was removed from the index (via
@@ -443,8 +507,7 @@ fn write_deleted_submodule(
     path: &str,
     h_head: git2::Oid,
     out: &mut impl Write,
-    rel: &Relativizer<'_>,
-    null_terminate: bool,
+    render_opts: &RenderOpts<'_>,
 ) -> Result<(), io::Error> {
     write!(
         out,
@@ -454,6 +517,11 @@ fn write_deleted_submodule(
         0u32,
         git2::Oid::zero(),
     )?;
-    rel.write_quoted(out, path, null_terminate, QUOTE_MODE)?;
-    out.write_all(line_terminator(null_terminate).as_bytes())
+    render_opts.rel.write_quoted(
+        out,
+        path,
+        render_opts.null_terminate,
+        render_opts.quote_mode,
+    )?;
+    out.write_all(line_terminator(render_opts.null_terminate).as_bytes())
 }

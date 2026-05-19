@@ -1,11 +1,10 @@
 //! Streams repo-relative paths out as cwd-relative paths.
 //!
 //! Subspy stores paths relative to the repo root (canonical form for
-//! IPC and submodule indexing). Real git's `status` output reports
-//! paths relative to the invocation cwd (or `git -C <path>`'s target).
-//! When the two differ - the user ran subspy from a subdirectory or
-//! passed `--dir` - we need to rewrite the path before emitting it so
-//! the output matches git.
+//! IPC and submodule indexing). `git status` reports paths relative to
+//! the invocation cwd (or `git -C <path>`'s target). When the two
+//! differ, the user ran subspy from a subdirectory or passed `--dir`, so
+//! we rewrite the path before emitting.
 //!
 //! Path-formatting policy by output mode:
 //! - Long, short, porcelain v2 (without `-z`): cwd-relative through
@@ -36,14 +35,18 @@ pub struct Relativizer<'a> {
     /// a non-empty value, zero for an empty value). Cached so each
     /// `write_to` call doesn't reslice.
     cwd_components: usize,
+    /// `core.quotepath` (default `true`). Threaded through so [`write_to`]
+    /// (long-format path emission) can suppress octal escaping of high
+    /// bytes when the user set `-c core.quotepath=false`.
+    quote_path: bool,
 }
 
 impl<'a> Relativizer<'a> {
     /// Builds a relativizer from `cwd_rel`, the path of the effective
-    /// cwd relative to the repo root. Pass `""` when the cwd is the
-    /// repo root itself.
+    /// cwd relative to the repo root, and the user's `core.quotepath`
+    /// setting. Pass `""` for `cwd_rel` when the cwd is the repo root.
     #[must_use]
-    pub fn new(cwd_rel: &'a str) -> Self {
+    pub fn new(cwd_rel: &'a str, quote_path: bool) -> Self {
         let cwd_components = if cwd_rel.is_empty() {
             0
         } else {
@@ -52,18 +55,23 @@ impl<'a> Relativizer<'a> {
         Self {
             cwd_rel,
             cwd_components,
+            quote_path,
         }
     }
 
-    /// Streams the cwd-relative form of `path` into `out` with
-    /// [`QuoteMode::Standard`] C-style quoting (git's default
-    /// `core.quotePath=true`).
+    /// Streams the cwd-relative form of `path` into `out` with C-style
+    /// quoting, honoring the `core.quotepath` setting passed to
+    /// [`Relativizer::new`].
     ///
     /// # Errors
     ///
     /// Returns any `io::Error` raised by writing.
     pub fn write_to<W: io::Write>(&self, out: &mut W, path: &str) -> io::Result<()> {
-        self.write_quoted(out, path, false, QuoteMode::Standard)
+        let mode = QuoteMode {
+            quote_space: false,
+            quote_path: self.quote_path,
+        };
+        self.write_quoted(out, path, false, mode)
     }
 
     /// Streams the cwd-relative form of `path` with porcelain quoting
@@ -74,9 +82,9 @@ impl<'a> Relativizer<'a> {
     ///
     /// Under `-z` (`null_terminate=true`) both quoting and
     /// relativization are skipped - the path is emitted as stored
-    /// (repo-root-relative, byte-verbatim). This matches `git status
-    /// --porcelain=2 -z`'s contract of emitting paths as stable
-    /// identifiers, separated only by NUL.
+    /// (repo-root-relative, byte-verbatim). Per `git status
+    /// --porcelain=2 -z`, paths in `-z` mode are stable identifiers
+    /// separated only by NUL.
     ///
     /// # Errors
     ///
@@ -101,7 +109,7 @@ impl<'a> Relativizer<'a> {
             out.write_all(b"../")?;
         }
         if need_quote {
-            write_escaped(out, remaining)?;
+            write_escaped(out, remaining, mode)?;
         } else {
             out.write_all(remaining.as_bytes())?;
         }
@@ -144,7 +152,7 @@ mod tests {
     use super::*;
 
     fn formatted(cwd_rel: &str, path: &str) -> String {
-        let rel = Relativizer::new(cwd_rel);
+        let rel = Relativizer::new(cwd_rel, true);
         let mut out: Vec<u8> = Vec::new();
         rel.write_to(&mut out, path).unwrap();
         String::from_utf8(out).unwrap()
@@ -201,10 +209,10 @@ mod tests {
 
     #[test]
     fn cwd_components_count_matches_split_count() {
-        assert_eq!(Relativizer::new("").cwd_components, 0);
-        assert_eq!(Relativizer::new("a").cwd_components, 1);
-        assert_eq!(Relativizer::new("a/b").cwd_components, 2);
-        assert_eq!(Relativizer::new("a/b/c").cwd_components, 3);
+        assert_eq!(Relativizer::new("", true).cwd_components, 0);
+        assert_eq!(Relativizer::new("a", true).cwd_components, 1);
+        assert_eq!(Relativizer::new("a/b", true).cwd_components, 2);
+        assert_eq!(Relativizer::new("a/b/c", true).cwd_components, 3);
     }
 
     #[test]

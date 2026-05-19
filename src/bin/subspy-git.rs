@@ -44,6 +44,8 @@ fn main() -> ExitCode {
 #[derive(Debug, Default, PartialEq, Eq)]
 struct Intercept {
     chdir: Option<PathBuf>,
+    /// `-c core.quotepath=<bool>` if seen, else `None` (use git's default).
+    quote_path: Option<bool>,
     args: StatusArgs,
 }
 
@@ -58,6 +60,9 @@ struct StatusArgs {
     untracked_files: Option<UntrackedFiles>,
     show_ignored: bool,
     branch: bool,
+    /// `--ahead-behind` / `--no-ahead-behind`. `None` = git's default (on);
+    /// only affects formats that emit upstream ahead/behind info.
+    ahead_behind: Option<bool>,
 }
 
 /// User's explicit choice of `git status` output format. `None` in
@@ -80,6 +85,14 @@ impl From<Intercept> for Status {
             // Long and the absent case both map to the default long renderer.
             Some(FormatChoice::Long) | None => (None, false),
         };
+        // `cli::Status` exposes both `--ahead-behind` and `--no-ahead-behind`
+        // and reconciles them in `Status::run`. Mirror that representation
+        // here, defaulting both off when the shim didn't see either form.
+        let (ahead_behind, no_ahead_behind) = match value.args.ahead_behind {
+            Some(true) => (true, false),
+            Some(false) => (false, true),
+            None => (false, false),
+        };
         Self {
             dir: value.chdir,
             log_level: None,
@@ -91,6 +104,11 @@ impl From<Intercept> for Status {
             untracked_files: value.args.untracked_files,
             ignored: value.args.show_ignored,
             branch: value.args.branch,
+            ahead_behind,
+            no_ahead_behind,
+            // Set by parsing `-c core.quotepath=<bool>`; defaults to true
+            // (git's default).
+            quote_path: value.quote_path.unwrap_or(true),
         }
     }
 }
@@ -109,7 +127,7 @@ where
     let mut intercept = Intercept::default();
 
     while let Some(os_arg) = rest.next() {
-        match classify_global(&os_arg, rest.peek(), &mut intercept) {
+        match classify_global(&os_arg, rest.peek(), &mut intercept).ok()? {
             GlobalAction::Skip => {}
             GlobalAction::SkipWithValue => {
                 rest.next()?;
@@ -118,12 +136,16 @@ where
                 intercept.args = parse_status_args(&mut rest)?;
                 return Some(intercept);
             }
-            GlobalAction::Unknown => return None,
         }
     }
     // Reached end of args with no subcommand (e.g. bare `git`, or `git -p`).
     None
 }
+
+/// Marker returned as `Err` from parsing helpers when an arg can't be
+/// faithfully honored locally. Dispatch unwinds and the original argv is
+/// forwarded to real `git`.
+struct Forward;
 
 /// What dispatch should do after seeing a single arg in the global-option
 /// stream. `Skip` and `SkipWithValue` mean dispatch keeps walking; the
@@ -132,7 +154,6 @@ enum GlobalAction {
     Skip,
     SkipWithValue,
     StatusFollows,
-    Unknown,
 }
 
 /// Classifies a single arg in the pre-subcommand stream. Peeks the next
@@ -142,58 +163,59 @@ fn classify_global(
     os_arg: &OsStr,
     next: Option<&OsString>,
     intercept: &mut Intercept,
-) -> GlobalAction {
-    let Some(arg) = os_arg.to_str() else {
-        return GlobalAction::Unknown;
-    };
+) -> Result<GlobalAction, Forward> {
+    let arg = os_arg.to_str().ok_or(Forward)?;
     if !arg.starts_with('-') {
         return if arg == "status" {
-            GlobalAction::StatusFollows
+            Ok(GlobalAction::StatusFollows)
         } else {
-            GlobalAction::Unknown
+            Err(Forward)
         };
     }
     let next_str = next.and_then(|o| o.to_str());
     consume_global(arg, next_str, intercept)
 }
 
-/// Try to consume a single global option. Returns `Unknown` to forward to
-/// real git, `Skip` if it was a self-contained recognized flag, or
-/// `SkipWithValue` if the next arg is its value.
-fn consume_global(arg: &str, next: Option<&str>, intercept: &mut Intercept) -> GlobalAction {
+/// Consume a single global option. Returns the action dispatch should
+/// take, or `Err(Forward)` for anything that should fall through to
+/// real git.
+fn consume_global(
+    arg: &str,
+    next: Option<&str>,
+    intercept: &mut Intercept,
+) -> Result<GlobalAction, Forward> {
     // -C handling: -C path | -Cpath | -C=path
     if let Some(rest) = arg.strip_prefix("-C") {
         if rest.is_empty() {
             // Multiple -C is rare and composes oddly across relative paths;
             // just forward in that case rather than getting it subtly wrong.
             if intercept.chdir.is_some() {
-                return GlobalAction::Unknown;
+                return Err(Forward);
             }
-            let Some(path) = next else {
-                return GlobalAction::Unknown;
-            };
+            let path = next.ok_or(Forward)?;
             intercept.chdir = Some(PathBuf::from(path));
-            return GlobalAction::SkipWithValue;
+            return Ok(GlobalAction::SkipWithValue);
         }
         if intercept.chdir.is_some() {
-            return GlobalAction::Unknown;
+            return Err(Forward);
         }
         let path = rest.strip_prefix('=').unwrap_or(rest);
         intercept.chdir = Some(PathBuf::from(path));
-        return GlobalAction::Skip;
+        return Ok(GlobalAction::Skip);
     }
 
-    // -c handling: -c key=val | -ckey=val. We don't read git config from the
-    // shim, but the value still has to be consumed correctly.
+    // -c handling: -c key=val | -ckey=val. Most `-c` settings the shim
+    // doesn't care about (it doesn't drive git's config system), but
+    // `core.quotepath` affects path output, so we extract it and apply
+    // it during rendering.
     if let Some(rest) = arg.strip_prefix("-c") {
         if rest.is_empty() {
-            return if next.is_some() {
-                GlobalAction::SkipWithValue
-            } else {
-                GlobalAction::Unknown
-            };
+            let value = next.ok_or(Forward)?;
+            apply_minus_c(value, intercept);
+            return Ok(GlobalAction::SkipWithValue);
         }
-        return GlobalAction::Skip;
+        apply_minus_c(rest, intercept);
+        return Ok(GlobalAction::Skip);
     }
 
     // Long options. Split off any `=value` so we can match on the bare name.
@@ -206,12 +228,40 @@ fn consume_global(arg: &str, next: Option<&str>, intercept: &mut Intercept) -> G
 
     // Short flags without value.
     match arg {
-        "-p" | "-P" => GlobalAction::Skip,
-        _ => GlobalAction::Unknown, // unknown short option: forward
+        "-p" | "-P" => Ok(GlobalAction::Skip),
+        _ => Err(Forward), // unknown short option: forward
     }
 }
 
-fn classify_long_global(name: &str, has_attached: bool, next: Option<&str>) -> GlobalAction {
+/// Inspects a `-c key=value` payload for settings the shim needs to
+/// honor at render time. Currently only `core.quotepath` is plumbed
+/// through; other config values are ignored at the shim level (they go
+/// to git unchanged when we forward).
+fn apply_minus_c(payload: &str, intercept: &mut Intercept) {
+    let Some((key, value)) = payload.split_once('=') else {
+        return;
+    };
+    if key.eq_ignore_ascii_case("core.quotepath") {
+        intercept.quote_path = parse_git_bool(value);
+    }
+}
+
+/// Parses a git-style boolean literal (case-insensitive `true`/`false`,
+/// `on`/`off`, `yes`/`no`, or `1`/`0`). Returns `None` for anything
+/// unrecognized, leaving the default behavior in place.
+fn parse_git_bool(s: &str) -> Option<bool> {
+    match s.to_ascii_lowercase().as_str() {
+        "true" | "on" | "yes" | "1" => Some(true),
+        "false" | "off" | "no" | "0" | "" => Some(false),
+        _ => None,
+    }
+}
+
+fn classify_long_global(
+    name: &str,
+    has_attached: bool,
+    next: Option<&str>,
+) -> Result<GlobalAction, Forward> {
     // Safe boolean globals - ignore.
     if matches!(
         name,
@@ -225,20 +275,20 @@ fn classify_long_global(name: &str, has_attached: bool, next: Option<&str>) -> G
         // If the caller wrote `--paginate=foo` (malformed), forward and let git
         // produce the error.
         return if has_attached {
-            GlobalAction::Unknown
+            Err(Forward)
         } else {
-            GlobalAction::Skip
+            Ok(GlobalAction::Skip)
         };
     }
 
     // --config-env=name=envvar | --config-env name=envvar -- ignore.
     if name == "config-env" {
         return if has_attached {
-            GlobalAction::Skip
+            Ok(GlobalAction::Skip)
         } else if next.is_some() {
-            GlobalAction::SkipWithValue
+            Ok(GlobalAction::SkipWithValue)
         } else {
-            GlobalAction::Unknown
+            Err(Forward)
         };
     }
 
@@ -246,7 +296,7 @@ fn classify_long_global(name: &str, has_attached: bool, next: Option<&str>) -> G
     // (--git-dir, --work-tree, --namespace, --exec-path, --super-prefix,
     // --list-cmds, --attr-source, --bare, pathspec globbing flags) or is a
     // terminal action (--help, --version, --html-path, etc.).
-    GlobalAction::Unknown
+    Err(Forward)
 }
 
 /// Validate the args after `status`. Returns `None` if any flag is one
@@ -259,55 +309,59 @@ where
     let mut seen_double_dash = false;
 
     for os_arg in rest.by_ref() {
-        if !os_arg
-            .to_str()
-            .is_some_and(|arg| classify_status_arg(arg, &mut out, &mut seen_double_dash))
-        {
-            return None;
-        }
+        let arg = os_arg.to_str()?;
+        classify_status_arg(arg, &mut out, &mut seen_double_dash).ok()?;
     }
     Some(out)
 }
 
 /// Records the chosen output format. Repeated assignments of the same
 /// format are idempotent (matches git: `git status --long --long` is
-/// accepted). A different format is a conflict; returning `false` makes
-/// dispatch fall through to forwarding so real git emits its native
-/// error.
-fn set_format(out: &mut StatusArgs, choice: FormatChoice) -> bool {
+/// accepted). A different choice is a conflict; we forward so real git
+/// emits its native error.
+fn set_format(out: &mut StatusArgs, choice: FormatChoice) -> Result<(), Forward> {
     if let Some(existing) = out.format {
-        existing == choice
+        if existing == choice {
+            Ok(())
+        } else {
+            Err(Forward)
+        }
     } else {
         out.format = Some(choice);
-        true
+        Ok(())
     }
 }
 
-/// Per-arg classifier for status flags. Returns `true` if the arg was
-/// recognized (and `out` / `seen_double_dash` updated). Returns `false`
+/// Per-arg classifier for status flags. `Ok(())` if the arg was
+/// recognized (and `out` / `seen_double_dash` updated). `Err(Forward)`
 /// for anything that should make dispatch fall back to forwarding.
-fn classify_status_arg(arg: &str, out: &mut StatusArgs, seen_double_dash: &mut bool) -> bool {
+fn classify_status_arg(
+    arg: &str,
+    out: &mut StatusArgs,
+    seen_double_dash: &mut bool,
+) -> Result<(), Forward> {
     // Anything after `--` is a pathspec. Subspy doesn't filter by path.
     if *seen_double_dash {
-        return false;
+        return Err(Forward);
     }
     if arg == "--" {
         *seen_double_dash = true;
-        return true;
+        return Ok(());
     }
     // Bare positional after `status` -> pathspec, forward.
     if !arg.starts_with('-') {
-        return false;
+        return Err(Forward);
     }
 
-    // Format flags. Each one calls `set_format`, which returns `false` on
-    // a second assignment so the conflict (e.g. `--short --long`) falls
-    // through to forwarding and real git emits its native error.
+    // Format flags. `set_format` returns `Err(Forward)` on a conflict
+    // (e.g. `--short --long`); dispatch falls through and real git emits
+    // its native error.
     if arg == "--porcelain" {
         return set_format(out, FormatChoice::Porcelain(PorcelainVersion::V1));
     }
     if let Some(v) = arg.strip_prefix("--porcelain=") {
-        return parse_porcelain(v).is_some_and(|p| set_format(out, FormatChoice::Porcelain(p)));
+        let version = parse_porcelain(v).ok_or(Forward)?;
+        return set_format(out, FormatChoice::Porcelain(version));
     }
     if arg == "-s" || arg == "--short" {
         return set_format(out, FormatChoice::Short);
@@ -318,57 +372,65 @@ fn classify_status_arg(arg: &str, out: &mut StatusArgs, seen_double_dash: &mut b
 
     if arg == "-z" {
         out.null_terminate = true;
-        return true;
+        return Ok(());
     }
 
     // --ignore-submodules[=WHEN]
     if arg == "--ignore-submodules" {
         out.ignore_submodules = IgnoreSubmodules::All;
-        return true;
+        return Ok(());
     }
     if let Some(v) = arg.strip_prefix("--ignore-submodules=") {
-        return match parse_ignore_submodules(v) {
-            Some(ignore) => {
-                out.ignore_submodules = ignore;
-                true
-            }
-            None => false,
-        };
+        out.ignore_submodules = parse_ignore_submodules(v).ok_or(Forward)?;
+        return Ok(());
     }
 
     // --untracked-files[=MODE] | -u | -uMODE
     // Per git-status(1) the optional MODE defaults to `all`.
     if arg == "--untracked-files" || arg == "-u" {
         out.untracked_files = Some(UntrackedFiles::All);
-        return true;
+        return Ok(());
     }
     if let Some(v) = arg
         .strip_prefix("--untracked-files=")
         .or_else(|| arg.strip_prefix("-u"))
     {
-        return match parse_untracked(v) {
-            Some(u) => {
-                out.untracked_files = Some(u);
-                true
-            }
-            None => false,
-        };
+        out.untracked_files = Some(parse_untracked(v).ok_or(Forward)?);
+        return Ok(());
     }
 
     // --ignored (no =MODE form supported; subspy doesn't expose ignored modes)
     if arg == "--ignored" {
         out.show_ignored = true;
-        return true;
+        return Ok(());
     }
 
     // --branch | -b: emit `# branch.*` headers in porcelain modes.
     if arg == "--branch" || arg == "-b" {
         out.branch = true;
-        return true;
+        return Ok(());
+    }
+
+    // --ahead-behind / --no-ahead-behind: detailed upstream divergence
+    // counts. The two flags conflict; the second one signals Forward
+    // so real git's error path runs.
+    if arg == "--ahead-behind" {
+        if out.ahead_behind == Some(false) {
+            return Err(Forward);
+        }
+        out.ahead_behind = Some(true);
+        return Ok(());
+    }
+    if arg == "--no-ahead-behind" {
+        if out.ahead_behind == Some(true) {
+            return Err(Forward);
+        }
+        out.ahead_behind = Some(false);
+        return Ok(());
     }
 
     // Anything else: forward to real git.
-    false
+    Err(Forward)
 }
 
 fn parse_porcelain(s: &str) -> Option<PorcelainVersion> {
@@ -507,6 +569,7 @@ mod tests {
     fn intercept_with(args: StatusArgs, chdir: Option<&str>) -> Intercept {
         Intercept {
             chdir: chdir.map(PathBuf::from),
+            quote_path: None,
             args,
         }
     }
@@ -697,7 +760,74 @@ mod tests {
 
     #[test]
     fn status_with_unknown_flag_forwards() {
-        assert!(dispatch(&os(&["status", "--ahead-behind"])).is_none());
+        assert!(dispatch(&os(&["status", "--column"])).is_none());
+    }
+
+    #[test]
+    fn status_ahead_behind_intercepts() {
+        let got = dispatch(&os(&["status", "--ahead-behind"])).unwrap();
+        assert_eq!(got.args.ahead_behind, Some(true));
+    }
+
+    #[test]
+    fn status_no_ahead_behind_intercepts() {
+        let got = dispatch(&os(&["status", "--no-ahead-behind"])).unwrap();
+        assert_eq!(got.args.ahead_behind, Some(false));
+    }
+
+    #[test]
+    fn status_ahead_behind_conflict_forwards() {
+        // Conflicting forms in either order fall through to real git so
+        // its error path runs.
+        assert!(dispatch(&os(&["status", "--ahead-behind", "--no-ahead-behind"])).is_none());
+        assert!(dispatch(&os(&["status", "--no-ahead-behind", "--ahead-behind"])).is_none());
+    }
+
+    #[test]
+    fn sourcetree_status_invocation_intercepts() {
+        // The actual command Sourcetree issues on every poll.
+        let got = dispatch(&os(&[
+            "-c",
+            "diff.mnemonicprefix=false",
+            "-c",
+            "core.quotepath=false",
+            "--no-optional-locks",
+            "status",
+            "--porcelain",
+            "--ignore-submodules=dirty",
+            "--untracked-files=all",
+            "--no-ahead-behind",
+        ]))
+        .unwrap();
+        assert_eq!(
+            got.args.format,
+            Some(FormatChoice::Porcelain(PorcelainVersion::V1))
+        );
+        assert_eq!(got.args.ignore_submodules, IgnoreSubmodules::Dirty);
+        assert_eq!(got.args.untracked_files, Some(UntrackedFiles::All));
+        assert_eq!(got.args.ahead_behind, Some(false));
+        assert_eq!(got.quote_path, Some(false));
+    }
+
+    #[test]
+    fn core_quotepath_attached_form() {
+        // `-c core.quotepath=true` (separate value) and `-ccore.quotepath=true`
+        // (attached) should both be recognized.
+        let got = dispatch(&os(&["-ccore.quotepath=true", "status"])).unwrap();
+        assert_eq!(got.quote_path, Some(true));
+    }
+
+    #[test]
+    fn core_quotepath_separate_form() {
+        let got = dispatch(&os(&["-c", "core.quotepath=true", "status"])).unwrap();
+        assert_eq!(got.quote_path, Some(true));
+    }
+
+    #[test]
+    fn other_dash_c_settings_pass_through() {
+        // We don't care about `diff.mnemonicprefix`; just consume it.
+        let got = dispatch(&os(&["-c", "diff.mnemonicprefix=false", "status"])).unwrap();
+        assert_eq!(got.quote_path, None);
     }
 
     #[test]

@@ -104,6 +104,7 @@ pub enum UntrackedFiles {
 
 /// Output format and filtering options passed through from git-status-compatible flags.
 #[derive(Debug, Clone, Copy)]
+#[expect(clippy::struct_excessive_bools, reason = "matches git")]
 pub struct OutputOpts {
     pub format: OutputFormat,
     pub null_terminate: bool,
@@ -111,13 +112,24 @@ pub struct OutputOpts {
     pub untracked_files: UntrackedFiles,
     pub show_ignored: bool,
     pub branch: bool,
+    /// Compute and display detailed upstream ahead/behind counts. When
+    /// false, long format reports only divergence (no specific counts)
+    /// and porcelain v2 emits `# branch.ab +? -?`.
+    pub ahead_behind: bool,
+    /// `core.quotepath` (default `true`). When `false`, bytes `>= 0x80`
+    /// in paths are emitted verbatim instead of as octal escapes.
+    pub quote_path: bool,
 }
 
-/// Porcelain-specific format flags (`-z` and `--branch`).
+/// Porcelain-specific format flags (`-z`, `--branch`, `--ahead-behind`,
+/// `core.quotepath`).
 #[derive(Debug, Clone, Copy)]
+#[expect(clippy::struct_excessive_bools, reason = "matches git")]
 pub struct PorcelainOpts {
     pub null_terminate: bool,
     pub branch: bool,
+    pub ahead_behind: bool,
+    pub quote_path: bool,
 }
 
 /// The set of status entries to render.
@@ -147,6 +159,8 @@ pub fn status(
         untracked_files,
         show_ignored,
         branch,
+        ahead_behind,
+        quote_path,
     } = opts;
     // Send IPC request early so the server starts processing while we do local work.
     let mut conn = if use_server {
@@ -208,7 +222,7 @@ pub fn status(
     //   with `-z` (where paths are stable identifiers).
     // - Short and long: cwd-relative.
     let cwd_rel = cwd_relative_to_repo(&project.repo_root, &project.effective_cwd);
-    let rel = relativize::Relativizer::new(&cwd_rel);
+    let rel = relativize::Relativizer::new(&cwd_rel, quote_path);
 
     let entries = StatusEntries {
         non_submod: &non_submodule_statuses,
@@ -218,11 +232,15 @@ pub fn status(
     let porcelain_opts = PorcelainOpts {
         null_terminate,
         branch,
+        ahead_behind,
+        quote_path,
     };
 
     let mut out = io::BufWriter::with_capacity(64 * 1024, io::stdout().lock());
     match format {
-        OutputFormat::Long => display::display_status(&mut out, &repo, &entries, &rel)?,
+        OutputFormat::Long => {
+            display::display_status(&mut out, &repo, &entries, &rel, ahead_behind)?;
+        }
         OutputFormat::Short => {
             short::display_short(&mut out, &repo, &entries, &rel, porcelain_opts)?;
         }

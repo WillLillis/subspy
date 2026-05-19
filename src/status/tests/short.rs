@@ -169,6 +169,8 @@ fn opts_for(branch: bool) -> OutputOpts {
         untracked_files: UntrackedFiles::Normal,
         show_ignored: false,
         branch,
+        ahead_behind: true,
+        quote_path: true,
     }
 }
 
@@ -218,7 +220,7 @@ fn run_subspy_short(project: &ProjectPath, opts: OutputOpts) -> Vec<u8> {
     let submodules = apply_ignore_submodules(submodules, opts.ignore_submodules);
 
     let cwd_rel = cwd_relative_to_repo(&project.repo_root, &project.effective_cwd);
-    let rel = Relativizer::new(&cwd_rel);
+    let rel = Relativizer::new(&cwd_rel, true);
 
     let entries = StatusEntries {
         non_submod: &non_submod,
@@ -228,6 +230,8 @@ fn run_subspy_short(project: &ProjectPath, opts: OutputOpts) -> Vec<u8> {
     let porcelain_opts = PorcelainOpts {
         null_terminate: opts.null_terminate,
         branch: opts.branch,
+        ahead_behind: opts.ahead_behind,
+        quote_path: opts.quote_path,
     };
 
     let mut got: Vec<u8> = Vec::new();

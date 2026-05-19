@@ -371,6 +371,7 @@ pub fn display_status(
     repo: &Repository,
     entries: &StatusEntries<'_>,
     rel: &Relativizer<'_>,
+    ahead_behind: bool,
 ) -> StatusResult<()> {
     let StatusEntries {
         non_submod,
@@ -380,12 +381,12 @@ pub fn display_status(
 
     // Fast path: nothing dirty
     if non_submod.is_empty() && submodules.is_empty() && deleted_submodules.is_empty() {
-        print_header(repo, out)?;
+        print_header(repo, out, ahead_behind)?;
         writeln!(out, "nothing to commit, working tree clean")?;
         return Ok(());
     }
 
-    print_header(repo, out)?;
+    print_header(repo, out, ahead_behind)?;
 
     let rm_in_workdir = non_submod
         .iter()

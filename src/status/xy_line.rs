@@ -71,10 +71,13 @@ pub(super) fn display_xy_lines(
     let PorcelainOpts {
         null_terminate,
         branch,
+        ahead_behind,
+        // `quote_path` already baked into `style.quote_mode`.
+        quote_path: _,
     } = opts;
 
     if branch {
-        write_branch_header(repo, out, style)?;
+        write_branch_header(repo, out, style, ahead_behind)?;
     }
 
     let index = repo.index()?;
@@ -393,11 +396,13 @@ fn write_submodule(
 
 /// Writes the `## branch...upstream [ahead/behind]` header. Color is
 /// applied to the local-branch name and the upstream name when a
-/// palette is present.
+/// palette is present. With `ahead_behind = false` and a diverged
+/// upstream, emits `[different]` rather than the specific counts.
 fn write_branch_header(
     repo: &Repository,
     out: &mut impl Write,
     style: &LineStyle,
+    ahead_behind: bool,
 ) -> StatusResult<()> {
     let Ok(head) = repo.head() else {
         let head_ref = repo.find_reference("HEAD").ok();
@@ -442,19 +447,20 @@ fn write_branch_header(
     out.write_all(b"...")?;
     paint_str(out, upstream_name, style.palette.map(|p| p.remote_branch))?;
 
-    let counts = local
-        .get()
-        .peel_to_commit()
-        .ok()
-        .zip(upstream.get().peel_to_commit().ok())
-        .and_then(|(l, u)| repo.graph_ahead_behind(l.id(), u.id()).ok());
-
-    if let Some((ahead, behind)) = counts {
-        match (ahead, behind) {
-            (0, 0) => {}
-            (a, 0) => write!(out, " [ahead {a}]")?,
-            (0, b) => write!(out, " [behind {b}]")?,
-            (a, b) => write!(out, " [ahead {a}, behind {b}]")?,
+    let local_oid = local.get().peel_to_commit().ok().map(|c| c.id());
+    let upstream_oid = upstream.get().peel_to_commit().ok().map(|c| c.id());
+    if let (Some(l), Some(u)) = (local_oid, upstream_oid) {
+        if l == u {
+            // No divergence: no bracket suffix, no graph walk.
+        } else if !ahead_behind {
+            write!(out, " [different]")?;
+        } else if let Ok((ahead, behind)) = repo.graph_ahead_behind(l, u) {
+            match (ahead, behind) {
+                (0, 0) => {}
+                (a, 0) => write!(out, " [ahead {a}]")?,
+                (0, b) => write!(out, " [behind {b}]")?,
+                (a, b) => write!(out, " [ahead {a}, behind {b}]")?,
+            }
         }
     }
     out.write_all(b"\n")?;

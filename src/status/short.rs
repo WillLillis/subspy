@@ -30,12 +30,6 @@ const SHORT_PALETTE: Palette = Palette {
     unmerged: RED,
 };
 
-const SHORT_STYLE: LineStyle = LineStyle {
-    quote_mode: QuoteMode::Standard,
-    palette: Some(&SHORT_PALETTE),
-    submodule: SubmoduleFormat::Short,
-};
-
 /// Renders the full short output to `out`.
 pub fn display_short(
     out: &mut impl Write,
@@ -44,5 +38,13 @@ pub fn display_short(
     rel: &Relativizer<'_>,
     opts: PorcelainOpts,
 ) -> StatusResult<()> {
-    display_xy_lines(out, repo, entries, rel, opts, &SHORT_STYLE)
+    let style = LineStyle {
+        quote_mode: QuoteMode {
+            quote_path: opts.quote_path,
+            ..QuoteMode::STANDARD
+        },
+        palette: Some(&SHORT_PALETTE),
+        submodule: SubmoduleFormat::Short,
+    };
+    display_xy_lines(out, repo, entries, rel, opts, &style)
 }
