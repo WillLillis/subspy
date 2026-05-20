@@ -810,6 +810,44 @@ mod tests {
     }
 
     #[test]
+    fn gitextensions_status_invocation_intercepts() {
+        // The actual command GitExtensions issues for fast status polls.
+        let got = dispatch(&os(&[
+            "status",
+            "--porcelain=2",
+            "-z",
+            "--untracked-files=all",
+            "--ignore-submodules=all",
+        ]))
+        .unwrap();
+        assert_eq!(
+            got.args.format,
+            Some(FormatChoice::Porcelain(PorcelainVersion::V2))
+        );
+        assert!(got.args.null_terminate);
+        assert_eq!(got.args.untracked_files, Some(UntrackedFiles::All));
+        assert_eq!(got.args.ignore_submodules, IgnoreSubmodules::All);
+    }
+
+    #[test]
+    fn gitextensions_status_monitor_invocation_intercepts() {
+        // The command `GitStatusMonitor` issues on every poll, per
+        // GitExtensions v6.0.5 source (`Commands.Arguments.cs:250`,
+        // `GitStatusMonitor.cs:499`). Bare `--untracked-files` is
+        // git-equivalent to `--untracked-files=all` per git-status(1);
+        // no `--ignore-submodules` is passed, so the daemon serves
+        // submodule statuses from cache.
+        let got = dispatch(&os(&["status", "--porcelain=2", "-z", "--untracked-files"])).unwrap();
+        assert_eq!(
+            got.args.format,
+            Some(FormatChoice::Porcelain(PorcelainVersion::V2))
+        );
+        assert!(got.args.null_terminate);
+        assert_eq!(got.args.untracked_files, Some(UntrackedFiles::All));
+        assert_eq!(got.args.ignore_submodules, IgnoreSubmodules::None);
+    }
+
+    #[test]
     fn core_quotepath_attached_form() {
         // `-c core.quotepath=true` (separate value) and `-ccore.quotepath=true`
         // (attached) should both be recognized.

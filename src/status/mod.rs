@@ -208,7 +208,9 @@ pub fn status(
 
     let submodule_statuses = match conn {
         Some(ref mut c) => recv_status_response(c, display_progress)?.0,
-        None if project.kind == RepoKind::WithSubmodules => {
+        None if project.kind == RepoKind::WithSubmodules
+            && ignore_submodules != IgnoreSubmodules::All =>
+        {
             compute_local_statuses(&project.repo_root, &repo)?
         }
         None => Vec::new(),
