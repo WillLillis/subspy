@@ -19,6 +19,11 @@ use super::{
 const STAGED_HEADER: &str = "Changes to be committed:
   (use \"git restore --staged <file>...\" to unstage)";
 
+/// Staged-section header when HEAD is unborn: there's no commit to restore
+/// from, so git tells you to use `git rm --cached` to unstage.
+const STAGED_HEADER_UNBORN: &str = "Changes to be committed:
+  (use \"git rm --cached <file>...\" to unstage)";
+
 const UNTRACKED_HEADER: &str = "Untracked files:
   (use \"git add <file>...\" to include in what will be committed)";
 
@@ -109,9 +114,15 @@ fn print_staged_changes(
     submodule_statuses: &[(String, StatusSummary)],
     deleted_submodule_paths: &[String],
     rel: &Relativizer<'_>,
+    is_unborn: bool,
     stdout: &mut impl Write,
 ) -> Result<bool, io::Error> {
     let mut header = false;
+    let staged_header = if is_unborn {
+        STAGED_HEADER_UNBORN
+    } else {
+        STAGED_HEADER
+    };
 
     for entry in non_submod
         .iter()
@@ -126,7 +137,7 @@ fn print_staged_changes(
             _ => continue,
         };
         if !header {
-            writeln!(stdout, "{STAGED_HEADER}")?;
+            writeln!(stdout, "{staged_header}")?;
             header = true;
         }
         let Some(index) = entry.head_to_index() else {
@@ -159,7 +170,7 @@ fn print_staged_changes(
 
     for path in deleted_submodule_paths {
         if !header {
-            writeln!(stdout, "{STAGED_HEADER}")?;
+            writeln!(stdout, "{staged_header}")?;
             header = true;
         }
         paint_into(stdout, GREEN, |out| {
@@ -171,7 +182,7 @@ fn print_staged_changes(
 
     for (submod_path, st) in submodule_statuses.iter().filter(|(_, st)| is_staged(*st)) {
         if !header {
-            writeln!(stdout, "{STAGED_HEADER}")?;
+            writeln!(stdout, "{staged_header}")?;
             header = true;
         }
         let label = staged_label(*st);
@@ -310,13 +321,26 @@ fn print_untracked_files(
     Ok(header)
 }
 
-/// Prints the footer hint (e.g. "nothing added to commit but untracked files present").
-fn print_summary(
+/// What the working tree looks like, for the footer-summary decision.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "four independent signals about the working tree; no natural grouping"
+)]
+struct SummaryState {
     changes_in_index: bool,
     changed_in_workdir: bool,
     has_untracked: bool,
-    stdout: &mut impl Write,
-) -> Result<(), io::Error> {
+    is_unborn: bool,
+}
+
+/// Prints the footer hint (e.g. "nothing added to commit but untracked files present").
+fn print_summary(state: &SummaryState, stdout: &mut impl Write) -> Result<(), io::Error> {
+    let &SummaryState {
+        changes_in_index,
+        changed_in_workdir,
+        has_untracked,
+        is_unborn,
+    } = state;
     match (changes_in_index, changed_in_workdir, has_untracked) {
         (false, true, _) => {
             writeln!(
@@ -324,7 +348,16 @@ fn print_summary(
                 "no changes added to commit (use \"git add\" and/or \"git commit -a\")"
             )?;
         }
-        (false, false, false) => writeln!(stdout, "nothing to commit, working tree clean")?,
+        (false, false, false) => {
+            if is_unborn {
+                writeln!(
+                    stdout,
+                    "nothing to commit (create/copy files and use \"git add\" to track)"
+                )?;
+            } else {
+                writeln!(stdout, "nothing to commit, working tree clean")?;
+            }
+        }
         (false, false, true) => {
             writeln!(
                 stdout,
@@ -379,10 +412,22 @@ pub fn display_status(
         deleted_submodules,
     } = *entries;
 
+    let is_unborn = repo
+        .head()
+        .err()
+        .is_some_and(|e| e.code() == git2::ErrorCode::UnbornBranch);
+
     // Fast path: nothing dirty
     if non_submod.is_empty() && submodules.is_empty() && deleted_submodules.is_empty() {
         print_header(repo, out, ahead_behind)?;
-        writeln!(out, "nothing to commit, working tree clean")?;
+        if is_unborn {
+            writeln!(
+                out,
+                "nothing to commit (create/copy files and use \"git add\" to track)"
+            )?;
+        } else {
+            writeln!(out, "nothing to commit, working tree clean")?;
+        }
         return Ok(());
     }
 
@@ -395,17 +440,26 @@ pub fn display_status(
             .iter()
             .any(|(_, st)| st.contains(StatusSummary::DELETED_WORKDIR));
 
-    let changes_in_index =
-        print_staged_changes(non_submod, submodules, deleted_submodules, rel, out)?;
+    let changes_in_index = print_staged_changes(
+        non_submod,
+        submodules,
+        deleted_submodules,
+        rel,
+        is_unborn,
+        out,
+    )?;
     let has_conflicts = print_unmerged_paths(repo, rel, out)?;
     let changed_in_workdir =
         print_unstaged_changes(non_submod, submodules, rm_in_workdir, rel, out)?;
     let has_untracked = print_untracked_files(non_submod, rel, out)?;
 
     print_summary(
-        changes_in_index,
-        changed_in_workdir || has_conflicts,
-        has_untracked,
+        &SummaryState {
+            changes_in_index,
+            changed_in_workdir: changed_in_workdir || has_conflicts,
+            has_untracked,
+            is_unborn,
+        },
         out,
     )?;
 

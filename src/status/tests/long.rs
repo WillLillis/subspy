@@ -63,6 +63,18 @@ const CASES: &[Case] = &[
         setup: Setup::Plain(setup_untracked),
     },
     Case {
+        name: "unborn_empty",
+        setup: Setup::Plain(setup_unborn_empty),
+    },
+    Case {
+        name: "unborn_untracked",
+        setup: Setup::Plain(setup_unborn_untracked),
+    },
+    Case {
+        name: "unborn_staged",
+        setup: Setup::Plain(setup_unborn_staged),
+    },
+    Case {
         name: "untracked_in_dir",
         setup: Setup::Plain(setup_untracked_in_dir),
     },

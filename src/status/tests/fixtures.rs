@@ -6,12 +6,12 @@
 use std::path::Path;
 use testutil::{Repo, TestHarness};
 
-pub(super) struct Case {
+pub struct Case {
     pub name: &'static str,
     pub setup: Setup,
 }
 
-pub(super) enum Setup {
+pub enum Setup {
     /// `effective_cwd` equals the repo root.
     Plain(fn(&Path)),
     /// `effective_cwd` is `repo_root/<subdir>`.
@@ -28,41 +28,41 @@ pub(super) enum Setup {
 
 // -- Plain setups --
 
-pub(super) fn setup_clean(root: &Path) {
+pub fn setup_clean(root: &Path) {
     Repo::init(root)
         .write("file.txt", "initial\n")
         .add_all()
         .commit("initial");
 }
 
-pub(super) fn setup_modified_workdir(root: &Path) {
+pub fn setup_modified_workdir(root: &Path) {
     setup_clean(root);
     Repo::new(root).write("file.txt", "modified\n");
 }
 
-pub(super) fn setup_staged_modified(root: &Path) {
+pub fn setup_staged_modified(root: &Path) {
     setup_clean(root);
     Repo::new(root)
         .write("file.txt", "staged change\n")
         .add("file.txt");
 }
 
-pub(super) fn setup_staged_new(root: &Path) {
+pub fn setup_staged_new(root: &Path) {
     setup_clean(root);
     Repo::new(root).write("new.txt", "x\n").add("new.txt");
 }
 
-pub(super) fn setup_deleted_workdir(root: &Path) {
+pub fn setup_deleted_workdir(root: &Path) {
     setup_clean(root);
     Repo::new(root).rm_file("file.txt");
 }
 
-pub(super) fn setup_deleted_staged(root: &Path) {
+pub fn setup_deleted_staged(root: &Path) {
     setup_clean(root);
     Repo::new(root).rm_tracked("file.txt");
 }
 
-pub(super) fn setup_renamed_staged(root: &Path) {
+pub fn setup_renamed_staged(root: &Path) {
     // Longer body so libgit2's rename detector recognizes the move.
     Repo::init(root)
         .write("file.txt", "line one\nline two\nline three\nline four\n")
@@ -71,7 +71,7 @@ pub(super) fn setup_renamed_staged(root: &Path) {
         .mv("file.txt", "renamed.txt");
 }
 
-pub(super) fn setup_renamed_staged_in_subdir(root: &Path) {
+pub fn setup_renamed_staged_in_subdir(root: &Path) {
     Repo::init(root)
         .write(
             "sub/file.txt",
@@ -82,12 +82,26 @@ pub(super) fn setup_renamed_staged_in_subdir(root: &Path) {
         .mv("sub/file.txt", "sub/renamed.txt");
 }
 
-pub(super) fn setup_untracked(root: &Path) {
+pub fn setup_unborn_empty(root: &Path) {
+    Repo::init(root);
+}
+
+pub fn setup_unborn_untracked(root: &Path) {
+    Repo::init(root).write("untracked.txt", "x\n");
+}
+
+pub fn setup_unborn_staged(root: &Path) {
+    Repo::init(root)
+        .write("staged.txt", "x\n")
+        .add("staged.txt");
+}
+
+pub fn setup_untracked(root: &Path) {
     setup_clean(root);
     Repo::new(root).write("untracked.txt", "x\n");
 }
 
-pub(super) fn setup_untracked_in_dir(root: &Path) {
+pub fn setup_untracked_in_dir(root: &Path) {
     setup_clean(root);
     Repo::new(root)
         .mkdir("subdir")
@@ -95,13 +109,13 @@ pub(super) fn setup_untracked_in_dir(root: &Path) {
         .write("subdir/b.txt", "y\n");
 }
 
-pub(super) fn setup_untracked_high_byte_filename(root: &Path) {
+pub fn setup_untracked_high_byte_filename(root: &Path) {
     setup_clean(root);
     // U+00E9 (e-acute) -> bytes 0xC3 0xA9; quoted form is "caf\303\251.txt".
     Repo::new(root).write("caf\u{00e9}.txt", "x\n");
 }
 
-pub(super) fn setup_merge_with_conflict(root: &Path) {
+pub fn setup_merge_with_conflict(root: &Path) {
     let repo = Repo::init(root);
     repo.write("file.txt", "base\n")
         .add_all()
@@ -117,7 +131,7 @@ pub(super) fn setup_merge_with_conflict(root: &Path) {
     repo.try_git(&["merge", "feature"]);
 }
 
-pub(super) fn setup_merge_with_conflict_in_subdir(root: &Path) {
+pub fn setup_merge_with_conflict_in_subdir(root: &Path) {
     let repo = Repo::init(root);
     repo.write("sub/file.txt", "base\n")
         .add_all()
@@ -133,7 +147,7 @@ pub(super) fn setup_merge_with_conflict_in_subdir(root: &Path) {
     repo.try_git(&["merge", "feature"]);
 }
 
-pub(super) fn setup_cherry_pick_with_conflict(root: &Path) {
+pub fn setup_cherry_pick_with_conflict(root: &Path) {
     let repo = Repo::init(root);
     repo.write("file.txt", "base\n")
         .add_all()
@@ -151,16 +165,16 @@ pub(super) fn setup_cherry_pick_with_conflict(root: &Path) {
 
 // -- Submodule setups --
 
-pub(super) fn setup_submodule_modified(h: &TestHarness) {
+pub fn setup_submodule_modified(h: &TestHarness) {
     h.submodule("sub").write("README.md", "modified\n");
 }
 
-pub(super) fn setup_submodule_deleted_workdir(h: &TestHarness) {
+pub fn setup_submodule_deleted_workdir(h: &TestHarness) {
     let path = h.submodule("sub").path().to_path_buf();
     std::fs::remove_dir_all(&path).unwrap();
 }
 
-pub(super) fn setup_submodule_new_commits(h: &TestHarness) {
+pub fn setup_submodule_new_commits(h: &TestHarness) {
     h.submodule("sub")
         .write("README.md", "moved forward\n")
         .add_all()
@@ -186,7 +200,7 @@ fn configure_master_tracks_origin(repo: &Repo) {
     ]);
 }
 
-pub(super) fn setup_upstream_up_to_date(root: &Path) {
+pub fn setup_upstream_up_to_date(root: &Path) {
     let repo = Repo::init(root);
     repo.write("file.txt", "initial\n")
         .add_all()
@@ -195,7 +209,7 @@ pub(super) fn setup_upstream_up_to_date(root: &Path) {
     configure_master_tracks_origin(&repo);
 }
 
-pub(super) fn setup_upstream_ahead(root: &Path) {
+pub fn setup_upstream_ahead(root: &Path) {
     let repo = Repo::init(root);
     repo.write("file.txt", "initial\n")
         .add_all()
@@ -207,7 +221,7 @@ pub(super) fn setup_upstream_ahead(root: &Path) {
         .commit("local commit");
 }
 
-pub(super) fn setup_upstream_behind(root: &Path) {
+pub fn setup_upstream_behind(root: &Path) {
     let repo = Repo::init(root);
     repo.write("file.txt", "initial\n")
         .add_all()
@@ -220,7 +234,7 @@ pub(super) fn setup_upstream_behind(root: &Path) {
     configure_master_tracks_origin(&repo);
 }
 
-pub(super) fn setup_upstream_diverged(root: &Path) {
+pub fn setup_upstream_diverged(root: &Path) {
     let repo = Repo::init(root);
     repo.write("file.txt", "initial\n")
         .add_all()

@@ -299,6 +299,8 @@ enum HeaderBody {
     Normal {
         upstream: Option<(String, &'static str)>,
     },
+    /// HEAD points at a branch that has no commits yet (fresh `git init`).
+    Unborn,
 }
 
 /// Reads a `*_HEAD` file (e.g. `CHERRY_PICK_HEAD`, `REVERT_HEAD`) and returns
@@ -332,7 +334,23 @@ fn get_header_state(repo: &Repository, ahead_behind: bool) -> StatusResult<Heade
         });
     }
 
-    let head_ref = repo.head()?;
+    let head_ref = match repo.head() {
+        Ok(r) => r,
+        Err(e) if e.code() == git2::ErrorCode::UnbornBranch => {
+            // Fresh repo with no commits: `HEAD` is a symbolic ref to a
+            // not-yet-created branch. Show "On branch <name>\n\nNo commits yet".
+            let symbolic = repo.find_reference("HEAD").ok();
+            let branch = symbolic
+                .as_ref()
+                .and_then(|r| super::unborn_branch_name(r))
+                .unwrap_or("(unknown)");
+            return Ok(HeaderState {
+                branch_display: Some(format!("On branch {branch}")),
+                body: HeaderBody::Unborn,
+            });
+        }
+        Err(e) => return Err(e.into()),
+    };
     let branch_display = current_branch_display(&head_ref);
     let has_conflicts = repo.index()?.has_conflicts();
 
@@ -509,6 +527,7 @@ fn print_header_state(state: &HeaderState, stdout: &mut impl Write) -> Result<()
                 writeln!(stdout)?;
             }
         }
+        HeaderBody::Unborn => writeln!(stdout, "\nNo commits yet\n")?,
     }
 
     Ok(())
@@ -668,6 +687,25 @@ mod tests {
         assert!(
             matches!(state.body, HeaderBody::Normal { .. }),
             "expected Normal, got {state:?}"
+        );
+    }
+
+    #[test]
+    fn header_state_unborn_branch() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().display().to_string();
+        git(&["-C", &root, "init", "--initial-branch=master"]);
+        let repo = Repository::open(tmp.path()).unwrap();
+
+        let state = get_header_state(&repo, true).unwrap();
+        assert_eq!(state.body, HeaderBody::Unborn);
+        assert_eq!(state.branch_display.as_deref(), Some("On branch master"));
+
+        let mut out = Vec::new();
+        print_header_state(&state, &mut out).unwrap();
+        assert_eq!(
+            std::str::from_utf8(&out).unwrap(),
+            "On branch master\n\nNo commits yet\n\n",
         );
     }
 
