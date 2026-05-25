@@ -25,7 +25,7 @@ pub fn deleted_submodule_paths(repo: &Repository) -> StatusResult<Vec<String>> {
     let mut deleted = Vec::new();
     head_tree.walk(git2::TreeWalkMode::PreOrder, |root, entry| {
         if entry.filemode() == i32::from(git2::FileMode::Commit) {
-            let Some(name) = entry.name() else {
+            let Ok(name) = entry.name() else {
                 return git2::TreeWalkResult::Skip;
             };
             let path = if root.is_empty() {

@@ -287,5 +287,7 @@ const fn line_terminator(null_terminate: bool) -> &'static str {
 /// `HEAD` still points at some `refs/heads/<branch>`.
 fn unborn_branch_name<'a>(head: &'a git2::Reference<'_>) -> Option<&'a str> {
     head.symbolic_target()
+        .ok()
+        .flatten()
         .map(|t| t.strip_prefix("refs/heads/").unwrap_or(t))
 }

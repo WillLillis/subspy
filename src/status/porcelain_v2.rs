@@ -98,10 +98,10 @@ pub fn display_porcelain_v2(
         let h_head = head_tree
             .as_ref()
             .and_then(|t| t.get_path(Path::new(path)).ok())
-            .map_or_else(git2::Oid::zero, |e| e.id());
+            .map_or(git2::Oid::ZERO_SHA1, |e| e.id());
         let h_index = index
             .get_path(Path::new(path), 0)
-            .map_or_else(git2::Oid::zero, |e| e.id);
+            .map_or(git2::Oid::ZERO_SHA1, |e| e.id);
         write_submodule(path, *st, h_head, h_index, out, &render_opts)?;
     }
 
@@ -109,7 +109,7 @@ pub fn display_porcelain_v2(
         let h_head = head_tree
             .as_ref()
             .and_then(|t| t.get_path(Path::new(path)).ok())
-            .map_or_else(git2::Oid::zero, |e| e.id());
+            .map_or(git2::Oid::ZERO_SHA1, |e| e.id());
         write_deleted_submodule(path, h_head, out, &render_opts)?;
     }
 
@@ -171,18 +171,18 @@ fn write_branch_headers(
     let oid = head
         .peel_to_commit()
         .ok()
-        .map_or_else(git2::Oid::zero, |c| c.id());
+        .map_or(git2::Oid::ZERO_SHA1, |c| c.id());
     writeln!(out, "# branch.oid {oid}")?;
 
     let branch_name = Some(&head)
         .filter(|h| h.is_branch())
-        .and_then(|h| h.shorthand());
+        .and_then(|h| h.shorthand().ok());
     writeln!(out, "# branch.head {}", branch_name.unwrap_or("(detached)"))?;
 
     if let Some(name) = branch_name
         && let Ok(local) = repo.find_branch(name, git2::BranchType::Local)
         && let Ok(upstream) = local.upstream()
-        && let Some(upstream_name) = upstream.get().shorthand()
+        && let Ok(upstream_name) = upstream.get().shorthand()
     {
         writeln!(out, "# branch.upstream {upstream_name}")?;
         let local_oid = local.get().peel_to_commit().map(|c| c.id());
@@ -285,7 +285,7 @@ fn extract_modes_and_oids(entry: &git2::StatusEntry<'_>) -> EntryModesAndOids {
         .head_to_index()
         .map(|d| d.new_file().id())
         .or_else(|| entry.index_to_workdir().map(|d| d.old_file().id()))
-        .unwrap_or_else(git2::Oid::zero);
+        .unwrap_or(git2::Oid::ZERO_SHA1);
     let h_head = entry.head_to_index().map_or(h_idx, |d| d.old_file().id());
     EntryModesAndOids {
         m_head,
@@ -400,18 +400,16 @@ fn write_conflict(
     let m_work = entry
         .index_to_workdir()
         .map_or(0u32, |d| u32::from(d.new_file().mode()));
-    let (xy, m1, m2, m3, h1, h2, h3) = conflicts.get(path).map_or_else(
-        || {
-            (
-                "UU",
-                0u32,
-                0u32,
-                0u32,
-                git2::Oid::zero(),
-                git2::Oid::zero(),
-                git2::Oid::zero(),
-            )
-        },
+    let (xy, m1, m2, m3, h1, h2, h3) = conflicts.get(path).map_or(
+        (
+            "UU",
+            0u32,
+            0u32,
+            0u32,
+            git2::Oid::ZERO_SHA1,
+            git2::Oid::ZERO_SHA1,
+            git2::Oid::ZERO_SHA1,
+        ),
         |c| {
             let xy = match (c.ancestor.is_some(), c.ours.is_some(), c.theirs.is_some()) {
                 (false, true, true) => "AA",
@@ -423,9 +421,9 @@ fn write_conflict(
             let m1 = c.ancestor.map_or(0u32, |(m, _)| m);
             let m2 = c.ours.map_or(0u32, |(m, _)| m);
             let m3 = c.theirs.map_or(0u32, |(m, _)| m);
-            let h1 = c.ancestor.map_or_else(git2::Oid::zero, |(_, id)| id);
-            let h2 = c.ours.map_or_else(git2::Oid::zero, |(_, id)| id);
-            let h3 = c.theirs.map_or_else(git2::Oid::zero, |(_, id)| id);
+            let h1 = c.ancestor.map_or(git2::Oid::ZERO_SHA1, |(_, id)| id);
+            let h2 = c.ours.map_or(git2::Oid::ZERO_SHA1, |(_, id)| id);
+            let h3 = c.theirs.map_or(git2::Oid::ZERO_SHA1, |(_, id)| id);
             (xy, m1, m2, m3, h1, h2, h3)
         },
     );
@@ -515,7 +513,7 @@ fn write_deleted_submodule(
         0o160_000_u32,
         0u32,
         0u32,
-        git2::Oid::zero(),
+        git2::Oid::ZERO_SHA1,
     )?;
     render_opts.rel.write_quoted(
         out,

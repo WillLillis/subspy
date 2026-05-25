@@ -418,7 +418,7 @@ fn write_branch_header(
 
     let branch_name = Some(&head)
         .filter(|h| h.is_branch())
-        .and_then(|h| h.shorthand());
+        .and_then(|h| h.shorthand().ok());
 
     let Some(name) = branch_name else {
         out.write_all(b"## ")?;
@@ -439,7 +439,7 @@ fn write_branch_header(
         out.write_all(b"\n")?;
         return Ok(());
     };
-    let Some(upstream_name) = upstream.get().shorthand() else {
+    let Ok(upstream_name) = upstream.get().shorthand() else {
         out.write_all(b"\n")?;
         return Ok(());
     };
