@@ -291,3 +291,14 @@ fn unborn_branch_name<'a>(head: &'a git2::Reference<'_>) -> Option<&'a str> {
         .flatten()
         .map(|t| t.strip_prefix("refs/heads/").unwrap_or(t))
 }
+
+/// Resolves the configured upstream short name (e.g. `origin/master`) for
+/// the branch whose full ref name is `local_ref_name`, without requiring
+/// the remote-tracking ref to exist. Used to distinguish "no upstream
+/// configured" from "configured but gone" once `Branch::upstream()` has
+/// already failed.
+fn configured_upstream_short_name(repo: &Repository, local_ref_name: &str) -> Option<String> {
+    let buf = repo.branch_upstream_name(local_ref_name).ok()?;
+    let full = buf.as_str().ok()?;
+    Some(full.strip_prefix("refs/remotes/").unwrap_or(full).to_string())
+}

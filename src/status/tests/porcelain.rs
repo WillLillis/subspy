@@ -27,7 +27,7 @@ use super::fixtures::{
     setup_clean, setup_deleted_staged, setup_deleted_workdir, setup_modified_workdir,
     setup_renamed_staged, setup_staged_modified, setup_staged_new, setup_untracked,
     setup_untracked_in_dir, setup_upstream_ahead, setup_upstream_behind, setup_upstream_diverged,
-    setup_upstream_up_to_date,
+    setup_upstream_gone, setup_upstream_up_to_date,
 };
 
 fn setup_empty_repo(root: &Path) {
@@ -215,6 +215,7 @@ const CASES: &[Case] = &[
     plain("upstream ahead", setup_upstream_ahead),
     plain("upstream behind", setup_upstream_behind),
     plain("upstream diverged", setup_upstream_diverged),
+    plain("upstream gone", setup_upstream_gone),
 ];
 
 const fn plain(name: &'static str, setup: fn(&Path)) -> Case {

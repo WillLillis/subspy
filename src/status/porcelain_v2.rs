@@ -20,7 +20,7 @@ use crate::StatusSummary;
 use super::{
     PorcelainOpts, StatusEntries, StatusResult,
     conflict::{ConflictEntry, build_conflict_map},
-    line_terminator,
+    configured_upstream_short_name, line_terminator,
     quote::QuoteMode,
     relativize::Relativizer,
     unborn_branch_name,
@@ -181,18 +181,32 @@ fn write_branch_headers(
 
     if let Some(name) = branch_name
         && let Ok(local) = repo.find_branch(name, git2::BranchType::Local)
-        && let Ok(upstream) = local.upstream()
-        && let Ok(upstream_name) = upstream.get().shorthand()
     {
-        writeln!(out, "# branch.upstream {upstream_name}")?;
-        let local_oid = local.get().peel_to_commit().map(|c| c.id());
-        let up_oid = upstream.get().peel_to_commit().map(|c| c.id());
-        if let (Ok(l), Ok(u)) = (local_oid, up_oid) {
-            if !ahead_behind && l != u {
-                // Skip the graph walk and report only divergence.
-                writeln!(out, "# branch.ab +? -?")?;
-            } else if let Ok((ahead, behind)) = repo.graph_ahead_behind(l, u) {
-                writeln!(out, "# branch.ab +{ahead} -{behind}")?;
+        match local.upstream() {
+            Ok(upstream) => {
+                let Ok(upstream_name) = upstream.get().shorthand() else {
+                    return Ok(());
+                };
+                writeln!(out, "# branch.upstream {upstream_name}")?;
+                let local_oid = local.get().peel_to_commit().map(|c| c.id());
+                let up_oid = upstream.get().peel_to_commit().map(|c| c.id());
+                if let (Ok(l), Ok(u)) = (local_oid, up_oid) {
+                    if !ahead_behind && l != u {
+                        // Skip the graph walk and report only divergence.
+                        writeln!(out, "# branch.ab +? -?")?;
+                    } else if let Ok((ahead, behind)) = repo.graph_ahead_behind(l, u) {
+                        writeln!(out, "# branch.ab +{ahead} -{behind}")?;
+                    }
+                }
+            }
+            Err(_) => {
+                // Configured but gone: emit `# branch.upstream` only;
+                // skip `# branch.ab` since there's nothing to compare.
+                if let Ok(local_ref_name) = head.name()
+                    && let Some(short) = configured_upstream_short_name(repo, local_ref_name)
+                {
+                    writeln!(out, "# branch.upstream {short}")?;
+                }
             }
         }
     }

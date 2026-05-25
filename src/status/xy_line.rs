@@ -23,7 +23,7 @@ use crate::{StatusSummary, paint::paint_into};
 use super::{
     PorcelainOpts, StatusEntries, StatusResult,
     conflict::{ConflictEntry, build_conflict_map},
-    line_terminator,
+    configured_upstream_short_name, line_terminator,
     quote::QuoteMode,
     relativize::Relativizer,
     unborn_branch_name,
@@ -436,7 +436,17 @@ fn write_branch_header(
     };
 
     let Ok(upstream) = local.upstream() else {
-        out.write_all(b"\n")?;
+        // Configured but gone? Emit `...origin/foo [gone]`; otherwise
+        // just close the line.
+        if let Ok(local_ref_name) = head.name()
+            && let Some(short) = configured_upstream_short_name(repo, local_ref_name)
+        {
+            out.write_all(b"...")?;
+            paint_str(out, &short, style.palette.map(|p| p.remote_branch))?;
+            out.write_all(b" [gone]\n")?;
+        } else {
+            out.write_all(b"\n")?;
+        }
         return Ok(());
     };
     let Ok(upstream_name) = upstream.get().shorthand() else {

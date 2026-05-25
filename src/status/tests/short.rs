@@ -157,6 +157,11 @@ const CASES: &[Case] = &[
         setup: Setup::Plain(setup_upstream_diverged),
         branch: true,
     },
+    Case {
+        name: "branch_upstream_gone",
+        setup: Setup::Plain(setup_upstream_gone),
+        branch: true,
+    },
 ];
 
 // -- Harness wiring --
