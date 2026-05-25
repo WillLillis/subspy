@@ -246,6 +246,18 @@ pub fn setup_upstream_up_to_date(root: &Path) {
     configure_master_tracks_origin(&repo);
 }
 
+pub fn setup_upstream_gone(root: &Path) {
+    let repo = Repo::init(root);
+    repo.write("file.txt", "initial\n")
+        .add_all()
+        .commit("initial");
+    repo.run_git(&["update-ref", "refs/remotes/origin/master", "HEAD"]);
+    configure_master_tracks_origin(&repo);
+    // Delete the tracking ref after wiring up config: simulates `git fetch
+    // --prune` removing a remote branch while local config still references it.
+    repo.run_git(&["update-ref", "-d", "refs/remotes/origin/master"]);
+}
+
 pub fn setup_upstream_ahead(root: &Path) {
     let repo = Repo::init(root);
     repo.write("file.txt", "initial\n")

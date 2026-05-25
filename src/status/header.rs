@@ -627,8 +627,27 @@ fn get_upstream_status(
         return Ok(None);
     }
 
+    // Captured before `Branch::wrap` consumes `head_ref`, for the
+    // upstream-gone lookup below.
+    let local_ref_name = head_ref.name().ok().map(str::to_owned);
+
     let local_branch = git2::Branch::wrap(head_ref);
     let Ok(upstream_branch) = local_branch.upstream() else {
+        // Distinguish "no upstream configured" from "configured but gone"
+        // (typical after `git fetch --prune` removes the remote branch):
+        // `branch_upstream_name` resolves from config alone, so it returns
+        // Ok when the remote-tracking ref has been deleted but the config
+        // keys remain.
+        if let Some(name) = local_ref_name
+            && let Ok(buf) = repo.branch_upstream_name(&name)
+            && let Ok(full) = buf.as_str()
+        {
+            let short = full.strip_prefix("refs/remotes/").unwrap_or(full);
+            return Ok(Some((
+                format!("Your branch is based on '{short}', but the upstream is gone."),
+                "(use \"git branch --unset-upstream\" to fixup)",
+            )));
+        }
         return Ok(None);
     };
 

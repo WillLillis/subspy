@@ -131,6 +131,10 @@ const CASES: &[Case] = &[
         setup: Setup::Plain(setup_upstream_up_to_date),
     },
     Case {
+        name: "upstream_gone",
+        setup: Setup::Plain(setup_upstream_gone),
+    },
+    Case {
         name: "upstream_ahead",
         setup: Setup::Plain(setup_upstream_ahead),
     },
