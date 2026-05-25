@@ -12,6 +12,7 @@ use std::{
     cmp::Ordering,
     fs,
     io::{self, Write},
+    path::Path,
 };
 
 use crate::paint::{Paint, RED, paint_into};
@@ -74,22 +75,9 @@ fn get_rebase_info(repo: &Repository) -> StatusResult<Option<RebaseInfo>> {
     }
 
     let rebase_merge = repo.path().join("rebase-merge");
-    if !rebase_merge.is_dir() {
+    let Some((onto_short, head_name)) = read_rebase_onto_and_head(&rebase_merge) else {
         return Ok(None);
-    }
-
-    let onto_raw = fs::read_to_string(rebase_merge.join("onto")).unwrap_or_default();
-    let onto_short: String = onto_raw.trim().chars().take(SHORT_OID_LEN).collect();
-    if onto_short.is_empty() {
-        return Ok(None);
-    }
-
-    let head_name_raw = fs::read_to_string(rebase_merge.join("head-name")).unwrap_or_default();
-    let head_name = head_name_raw
-        .trim()
-        .strip_prefix("refs/heads/")
-        .unwrap_or_else(|| head_name_raw.trim())
-        .to_string();
+    };
 
     let done_raw = fs::read_to_string(rebase_merge.join("done")).unwrap_or_default();
     let all_done = parse_rebase_lines(&done_raw);
@@ -129,7 +117,7 @@ fn print_rebase_header(info: &RebaseInfo, stdout: &mut impl Write) -> Result<(),
     writeln!(
         stdout,
         "{} {}",
-        Paint::new(RED, format_args!("{label} in progress?; onto")),
+        Paint::new(RED, format_args!("{label} in progress; onto")),
         info.onto_short
     )?;
 
@@ -227,6 +215,14 @@ pub fn print_unmerged_paths(
     }
 
     writeln!(stdout, "Unmerged paths:")?;
+    // During any rebase, git prepends an unstage hint before the resolve hint.
+    // Merge / cherry-pick / revert conflicts show only the resolve hint.
+    if is_rebasing(repo) {
+        writeln!(
+            stdout,
+            "  (use \"git restore --staged <file>...\" to unstage)"
+        )?;
+    }
     writeln!(stdout, "  (use \"git add <file>...\" to mark resolution)")?;
 
     for conflict in index.conflicts()? {
@@ -294,6 +290,8 @@ enum HeaderBody {
     /// Rebase using the apply backend (`git rebase --apply`), which uses
     /// the `rebase-apply/` directory instead of `rebase-merge/`.
     RebaseWithApplyBackend {
+        onto_short: String,
+        head_name: String,
         has_conflicts: bool,
     },
     Normal {
@@ -301,6 +299,39 @@ enum HeaderBody {
     },
     /// HEAD points at a branch that has no commits yet (fresh `git init`).
     Unborn,
+}
+
+/// Returns `true` if a rebase (any backend) is in progress. `ApplyMailboxOrRebase`
+/// is disambiguated by the presence of `rebase-apply/rebasing` (vs. `applying`
+/// for `git am`).
+fn is_rebasing(repo: &Repository) -> bool {
+    use git2::RepositoryState::{
+        ApplyMailboxOrRebase, Rebase, RebaseInteractive, RebaseMerge,
+    };
+    match repo.state() {
+        Rebase | RebaseInteractive | RebaseMerge => true,
+        ApplyMailboxOrRebase => repo.path().join("rebase-apply").join("rebasing").exists(),
+        _ => false,
+    }
+}
+
+/// Reads the `onto` and `head-name` files from a rebase state directory
+/// (`rebase-merge/` or `rebase-apply/`), returning the short onto-OID and
+/// the branch shorthand. Returns `None` if `onto` is missing or empty,
+/// which indicates a corrupt or incomplete rebase state.
+fn read_rebase_onto_and_head(dir: &Path) -> Option<(String, String)> {
+    let onto_raw = fs::read_to_string(dir.join("onto")).ok()?;
+    let onto_short: String = onto_raw.trim().chars().take(SHORT_OID_LEN).collect();
+    if onto_short.is_empty() {
+        return None;
+    }
+    let head_name_raw = fs::read_to_string(dir.join("head-name")).ok()?;
+    let head_name = head_name_raw
+        .trim()
+        .strip_prefix("refs/heads/")
+        .unwrap_or_else(|| head_name_raw.trim())
+        .to_string();
+    Some((onto_short, head_name))
 }
 
 /// Reads a `*_HEAD` file (e.g. `CHERRY_PICK_HEAD`, `REVERT_HEAD`) and returns
@@ -326,11 +357,18 @@ fn get_header_state(repo: &Repository, ahead_behind: bool) -> StatusResult<Heade
     // `git rebase --apply` uses `rebase-apply/` instead of `rebase-merge/`.
     // git2 reports this as `RepositoryState::Rebase`, which `get_rebase_info`
     // doesn't handle since it only reads from `rebase-merge/`.
-    if repo.path().join("rebase-apply").join("rebasing").exists() {
+    let rebase_apply = repo.path().join("rebase-apply");
+    if rebase_apply.join("rebasing").exists()
+        && let Some((onto_short, head_name)) = read_rebase_onto_and_head(&rebase_apply)
+    {
         let has_conflicts = repo.index()?.has_conflicts();
         return Ok(HeaderState {
             branch_display: None,
-            body: HeaderBody::RebaseWithApplyBackend { has_conflicts },
+            body: HeaderBody::RebaseWithApplyBackend {
+                onto_short,
+                head_name,
+                has_conflicts,
+            },
         });
     }
 
@@ -373,8 +411,14 @@ fn get_header_state(repo: &Repository, ahead_behind: bool) -> StatusResult<Heade
             // rebase-apply/rebasing exists for `git rebase --apply`,
             // rebase-apply/applying exists for `git am`.
             let rebase_apply = repo.path().join("rebase-apply");
-            if rebase_apply.join("rebasing").exists() {
-                HeaderBody::RebaseWithApplyBackend { has_conflicts }
+            if rebase_apply.join("rebasing").exists()
+                && let Some((onto_short, head_name)) = read_rebase_onto_and_head(&rebase_apply)
+            {
+                HeaderBody::RebaseWithApplyBackend {
+                    onto_short,
+                    head_name,
+                    has_conflicts,
+                }
             } else {
                 HeaderBody::ApplyMailbox { has_conflicts }
             }
@@ -498,8 +542,20 @@ fn print_header_state(state: &HeaderState, stdout: &mut impl Write) -> Result<()
             )?;
             writeln!(stdout)?;
         }
-        HeaderBody::RebaseWithApplyBackend { has_conflicts } => {
-            writeln!(stdout, "You are currently rebasing.")?;
+        HeaderBody::RebaseWithApplyBackend {
+            onto_short,
+            head_name,
+            has_conflicts,
+        } => {
+            writeln!(
+                stdout,
+                "{}",
+                Paint::new(RED, format_args!("rebase in progress; onto {onto_short}"))
+            )?;
+            writeln!(
+                stdout,
+                "You are currently rebasing branch '{head_name}' on '{onto_short}'."
+            )?;
             if *has_conflicts {
                 writeln!(
                     stdout,
@@ -947,7 +1003,8 @@ mod tests {
             matches!(
                 state.body,
                 HeaderBody::RebaseWithApplyBackend {
-                    has_conflicts: true
+                    has_conflicts: true,
+                    ..
                 }
             ),
             "expected RebaseWithApplyBackend with conflicts, got {state:?}"

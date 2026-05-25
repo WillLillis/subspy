@@ -1,0 +1,15 @@
+interactive rebase in progress; onto 7775b63
+Last command done (1 command done):
+   pick 2f7e5e7 # master commit
+No commands remaining.
+You are currently rebasing branch 'master' on '7775b63'.
+  (fix conflicts and then run "git rebase --continue")
+  (use "git rebase --skip" to skip this patch)
+  (use "git rebase --abort" to check out the original branch)
+
+Unmerged paths:
+  (use "git restore --staged <file>..." to unstage)
+  (use "git add <file>..." to mark resolution)
+	both modified:   file.txt
+
+no changes added to commit (use "git add" and/or "git commit -a")

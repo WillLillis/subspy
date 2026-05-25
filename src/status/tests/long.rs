@@ -98,6 +98,14 @@ const CASES: &[Case] = &[
         setup: Setup::Plain(setup_cherry_pick_with_conflict),
     },
     Case {
+        name: "rebase_interactive_with_conflict",
+        setup: Setup::Plain(setup_rebase_interactive_with_conflict),
+    },
+    Case {
+        name: "rebase_apply_with_conflict",
+        setup: Setup::Plain(setup_rebase_apply_with_conflict),
+    },
+    Case {
         name: "submodule_modified",
         setup: Setup::WithSubmodules {
             names: &["sub"],

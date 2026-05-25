@@ -147,6 +147,43 @@ pub fn setup_merge_with_conflict_in_subdir(root: &Path) {
     repo.try_git(&["merge", "feature"]);
 }
 
+pub fn setup_rebase_apply_with_conflict(root: &Path) {
+    let repo = Repo::init(root);
+    repo.write("file.txt", "base\n")
+        .add_all()
+        .commit("base")
+        .branch("feature")
+        .write("file.txt", "from feature\n")
+        .add_all()
+        .commit("feature commit")
+        .checkout("master")
+        .write("file.txt", "from master\n")
+        .add_all()
+        .commit("master commit");
+    // `--apply` selects the legacy apply backend (rebase-apply/ directory),
+    // exercising the `HeaderBody::RebaseWithApplyBackend` code path.
+    repo.try_git(&["rebase", "--apply", "feature"]);
+}
+
+pub fn setup_rebase_interactive_with_conflict(root: &Path) {
+    let repo = Repo::init(root);
+    repo.write("file.txt", "base\n")
+        .add_all()
+        .commit("base")
+        .branch("feature")
+        .write("file.txt", "from feature\n")
+        .add_all()
+        .commit("feature commit")
+        .checkout("master")
+        .write("file.txt", "from master\n")
+        .add_all()
+        .commit("master commit");
+    // `-i` forces the rebase-merge backend (interactive). `GIT_SEQUENCE_EDITOR=true`
+    // (set by `git_may_fail`) accepts the default todo: one `pick` that conflicts
+    // on file.txt and stops the rebase mid-flight.
+    repo.try_git(&["rebase", "-i", "feature"]);
+}
+
 pub fn setup_cherry_pick_with_conflict(root: &Path) {
     let repo = Repo::init(root);
     repo.write("file.txt", "base\n")
