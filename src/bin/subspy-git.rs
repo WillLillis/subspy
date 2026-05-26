@@ -8,6 +8,7 @@
 use std::{
     env,
     ffi::{OsStr, OsString},
+    io,
     iter::Peekable,
     path::{Path, PathBuf},
     process::{Command, ExitCode},
@@ -30,14 +31,17 @@ fn main() -> ExitCode {
         return subspy_entry(env::args_os());
     }
 
-    // If the command is a status request that subspy can service, intercept it.
-    #[expect(clippy::option_if_let_else, reason = "comment readability")]
-    if let Some(intercept) = dispatch(rest) {
-        shim_entry(intercept.into())
-    } else {
-        // Otherwise forward the command to git
-        forward_entry(env::args_os().skip(1))
+    // If the command is a status request that subspy can service, try
+    // intercepting. On any runtime failure (daemon unreachable, repo
+    // discovery, IPC error, etc.) `shim_entry` returns `None` and we
+    // fall through to real `git` so the consumer sees git's native
+    // output and exit code instead of a `subspy-git: ...` error.
+    if let Some(intercept) = dispatch(rest)
+        && let Some(exit) = shim_entry(intercept.into())
+    {
+        return exit;
     }
+    forward_entry(env::args_os().skip(1))
 }
 
 /// Parsed result of an intercepted `git status` invocation.
@@ -460,13 +464,20 @@ fn parse_untracked(s: &str) -> Option<UntrackedFiles> {
     }
 }
 
-fn shim_entry(status_args: Status) -> ExitCode {
-    match status_args.run() {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(err) => {
-            eprintln!("subspy-git: {err}");
-            ExitCode::FAILURE
+/// Tries to serve the intercepted status request from subspy. Returns
+/// `Some(SUCCESS)` only when output was produced cleanly; on any error
+/// returns `None` so `main` can forward to real `git` with the original
+/// argv. Output is buffered to a `Vec` and only flushed on success to
+/// avoid double-printing if we error mid-stream.
+fn shim_entry(status_args: Status) -> Option<ExitCode> {
+    let mut buf: Vec<u8> = Vec::with_capacity(4 * 1024);
+    match status_args.run(&mut buf) {
+        Ok(()) => {
+            use std::io::Write as _;
+            io::stdout().lock().write_all(&buf).ok();
+            Some(ExitCode::SUCCESS)
         }
+        Err(_) => None,
     }
 }
 

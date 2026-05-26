@@ -7,7 +7,7 @@
 //! to `subspy` or the shim. Whichever binary is running can serve the
 //! daemon role.
 
-use std::{ffi::OsString, process::ExitCode};
+use std::{ffi::OsString, io, process::ExitCode};
 
 use clap::{Command, FromArgMatches as _, Subcommand as _};
 use etcetera::BaseStrategy as _;
@@ -84,7 +84,10 @@ where
 
     let result = match command {
         Commands::Start(watch_options) => watch_options.run(),
-        Commands::Status(status_options) => status_options.run(),
+        Commands::Status(status_options) => {
+            let mut out = io::BufWriter::with_capacity(64 * 1024, io::stdout().lock());
+            status_options.run(&mut out)
+        }
         Commands::Stop(shutdown_options) => shutdown_options.run(),
         Commands::Reindex(reindex_options) => reindex_options.run(),
         Commands::Debug(debug_options) => debug_options.run(),

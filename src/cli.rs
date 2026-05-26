@@ -374,12 +374,15 @@ impl Status {
         }
     }
 
-    /// Resolves the project path and executes the `status` subcommand.
+    /// Resolves the project path and executes the `status` subcommand,
+    /// writing output to `out`. CLI `main` passes a buffered stdout; the
+    /// shim passes a `Vec<u8>` so it can discard partial output and fall
+    /// back to real `git` if anything fails.
     ///
     /// # Errors
     ///
     /// Returns `Err` if the project path is invalid or the operation fails.
-    pub fn run(self) -> RunResult<()> {
+    pub fn run(self, out: &mut impl io::Write) -> RunResult<()> {
         // `effective_cwd` is the canonicalized --dir argument (or the
         // process cwd if --dir was absent), reused as the baseline for
         // path-formatting in status output. Mirrors `git -C <path>`'s
@@ -407,6 +410,7 @@ impl Status {
                 ahead_behind,
                 quote_path: self.quote_path,
             },
+            out,
         )?)
     }
 }

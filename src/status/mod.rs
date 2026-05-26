@@ -151,6 +151,7 @@ pub fn status(
     display_progress: bool,
     use_server: bool,
     opts: OutputOpts,
+    out: &mut impl io::Write,
 ) -> StatusResult<()> {
     let OutputOpts {
         format,
@@ -238,19 +239,18 @@ pub fn status(
         quote_path,
     };
 
-    let mut out = io::BufWriter::with_capacity(64 * 1024, io::stdout().lock());
     match format {
         OutputFormat::Long => {
-            display::display_status(&mut out, &repo, &entries, &rel, ahead_behind)?;
+            display::display_status(out, &repo, &entries, &rel, ahead_behind)?;
         }
         OutputFormat::Short => {
-            short::display_short(&mut out, &repo, &entries, &rel, porcelain_opts)?;
+            short::display_short(out, &repo, &entries, &rel, porcelain_opts)?;
         }
         OutputFormat::Porcelain(PorcelainVersion::V1) => {
-            porcelain_v1::display_porcelain_v1(&mut out, &repo, &entries, porcelain_opts)?;
+            porcelain_v1::display_porcelain_v1(out, &repo, &entries, porcelain_opts)?;
         }
         OutputFormat::Porcelain(PorcelainVersion::V2) => {
-            porcelain_v2::display_porcelain_v2(&mut out, &repo, &entries, &rel, porcelain_opts)?;
+            porcelain_v2::display_porcelain_v2(out, &repo, &entries, &rel, porcelain_opts)?;
         }
     }
 
