@@ -106,6 +106,14 @@ const CASES: &[Case] = &[
         setup: Setup::Plain(setup_rebase_apply_with_conflict),
     },
     Case {
+        name: "detached_at_tag",
+        setup: Setup::Plain(setup_detached_at_tag),
+    },
+    Case {
+        name: "detached_from_tag",
+        setup: Setup::Plain(setup_detached_from_tag),
+    },
+    Case {
         name: "submodule_modified",
         setup: Setup::WithSubmodules {
             names: &["sub"],

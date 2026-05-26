@@ -389,7 +389,7 @@ fn get_header_state(repo: &Repository, ahead_behind: bool) -> StatusResult<Heade
         }
         Err(e) => return Err(e.into()),
     };
-    let branch_display = current_branch_display(&head_ref);
+    let branch_display = current_branch_display(repo, &head_ref);
     let has_conflicts = repo.index()?.has_conflicts();
 
     let body = match repo.state() {
@@ -589,27 +589,69 @@ fn print_header_state(state: &HeaderState, stdout: &mut impl Write) -> Result<()
     Ok(())
 }
 
-/// Returns the "On branch <name>" or "HEAD detached at <oid>" display string.
-fn current_branch_display(head_ref: &git2::Reference<'_>) -> String {
+/// Returns the "On branch <name>" or "HEAD detached {at|from} <name>"
+/// display string. The detached form mirrors git's reflog-driven naming:
+/// the most recent `checkout: moving from X to Y` entry gives `Y` (often
+/// a tag), and `at` switches to `from` once HEAD has moved past where
+/// that checkout landed.
+fn current_branch_display(repo: &Repository, head_ref: &git2::Reference<'_>) -> String {
     if !head_ref.is_branch() {
+        let (preposition, target) = detached_target(repo, head_ref);
         return format!(
-            "{} {}",
-            Paint::new(RED, "HEAD detached at"),
-            head_ref.target().map_or_else(
-                || "unknown".to_string(),
-                |oid| {
-                    // git2's `Oid::Display` writes 40 hex chars and does
-                    // not honor format precision, so we materialize then
-                    // truncate. One alloc instead of two.
-                    let mut s = oid.to_string();
-                    s.truncate(SHORT_OID_LEN);
-                    s
-                }
-            ),
+            "{} {target}",
+            Paint::new(RED, format_args!("HEAD detached {preposition}")),
         );
     }
     let branch_name = head_ref.shorthand().unwrap();
     format!("On branch {branch_name}")
+}
+
+/// Returns `(preposition, display)` for a detached HEAD, matching git's
+/// behavior: scan the HEAD reflog newest-first for the most recent
+/// `checkout: moving from X to Y` entry and report `Y` as the target.
+/// `at` if HEAD still points where that checkout landed, `from` if it
+/// has moved (committed, reset, etc.). Falls back to the short OID when
+/// no usable reflog entry exists (e.g. fresh clone of a detached HEAD).
+fn detached_target(repo: &Repository, head_ref: &git2::Reference<'_>) -> (&'static str, String) {
+    let head_oid = head_ref.target();
+    let short_oid = || {
+        head_oid.map_or_else(
+            || "unknown".to_string(),
+            |oid| format!("{oid:.SHORT_OID_LEN$}"),
+        )
+    };
+
+    let Ok(reflog) = repo.reflog("HEAD") else {
+        return ("at", short_oid());
+    };
+
+    for entry in reflog.iter() {
+        let Some(target) = entry
+            .message()
+            .ok()
+            .flatten()
+            .and_then(|m| m.strip_prefix("checkout: moving from "))
+            .and_then(|rest| rest.split_once(" to "))
+            .map(|(_, to)| to)
+        else {
+            continue;
+        };
+        let preposition = if head_oid == Some(entry.id_new()) {
+            "at"
+        } else {
+            "from"
+        };
+        // If `target` is a raw 40-char OID, abbreviate to short form to
+        // match git's display.
+        let display = if target.len() == 40 && target.chars().all(|c| c.is_ascii_hexdigit()) {
+            target[..SHORT_OID_LEN].to_string()
+        } else {
+            target.to_string()
+        };
+        return (preposition, display);
+    }
+
+    ("at", short_oid())
 }
 
 /// Returns the upstream tracking status (e.g. "ahead 3", "behind 1") and a hint

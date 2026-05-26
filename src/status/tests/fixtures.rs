@@ -115,6 +115,31 @@ pub fn setup_untracked_high_byte_filename(root: &Path) {
     Repo::new(root).write("caf\u{00e9}.txt", "x\n");
 }
 
+pub fn setup_detached_at_tag(root: &Path) {
+    let repo = Repo::init(root);
+    repo.write("file.txt", "one\n")
+        .add_all()
+        .commit("one");
+    // Use `update-ref` to create the tag: `git tag` honors local
+    // `tag.gpgSign` / `tag.forceSignAnnotated` config that some
+    // developer environments set, which would fail here.
+    repo.run_git(&["update-ref", "refs/tags/v1.0", "HEAD"]);
+    repo.write("file.txt", "two\n")
+        .add_all()
+        .commit("two");
+    repo.checkout("v1.0");
+}
+
+pub fn setup_detached_from_tag(root: &Path) {
+    setup_detached_at_tag(root);
+    // Make a new commit while detached: HEAD moves past where the
+    // `checkout v1.0` reflog entry landed, so git switches `at` to `from`.
+    Repo::new(root)
+        .write("extra.txt", "extra\n")
+        .add_all()
+        .commit("extra commit while detached");
+}
+
 pub fn setup_merge_with_conflict(root: &Path) {
     let repo = Repo::init(root);
     repo.write("file.txt", "base\n")
