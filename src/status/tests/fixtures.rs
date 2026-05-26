@@ -115,6 +115,16 @@ pub fn setup_untracked_high_byte_filename(root: &Path) {
     Repo::new(root).write("caf\u{00e9}.txt", "x\n");
 }
 
+pub fn setup_bisect(root: &Path) {
+    let repo = Repo::init(root);
+    repo.write("a.txt", "one\n").add_all().commit("one");
+    repo.write("b.txt", "two\n").add_all().commit("two");
+    repo.write("c.txt", "three\n").add_all().commit("three");
+    repo.run_git(&["bisect", "start"]);
+    repo.run_git(&["bisect", "bad", "HEAD"]);
+    repo.run_git(&["bisect", "good", "HEAD~2"]);
+}
+
 pub fn setup_detached_at_tag(root: &Path) {
     let repo = Repo::init(root);
     repo.write("file.txt", "one\n")

@@ -283,7 +283,12 @@ enum HeaderBody {
         short_oid: String,
         has_conflicts: bool,
     },
-    Bisect,
+    Bisect {
+        /// Contents of `.git/BISECT_START` -- the branch name git was on
+        /// when `git bisect start` ran, or the short OID if the user
+        /// was detached at the time.
+        started_from: String,
+    },
     ApplyMailbox {
         has_conflicts: bool,
     },
@@ -332,6 +337,23 @@ fn read_rebase_onto_and_head(dir: &Path) -> Option<(String, String)> {
         .unwrap_or_else(|| head_name_raw.trim())
         .to_string();
     Some((onto_short, head_name))
+}
+
+/// Reads `.git/BISECT_START` and returns the branch name git was on
+/// when bisect started, or the abbreviated OID if bisect was started
+/// from a detached HEAD. Matches `wt-status.c::get_branch` in upstream
+/// git: strip `refs/heads/` if present, abbreviate raw 40-char OIDs.
+/// Falls back to an empty string when the file is missing or empty.
+fn read_bisect_start(repo: &Repository) -> String {
+    let raw = fs::read_to_string(repo.path().join("BISECT_START")).unwrap_or_default();
+    let trimmed = raw.trim();
+    if let Some(name) = trimmed.strip_prefix("refs/heads/") {
+        return name.to_string();
+    }
+    if trimmed.len() == 40 && trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
+        return trimmed[..SHORT_OID_LEN].to_string();
+    }
+    trimmed.to_string()
 }
 
 /// Reads a `*_HEAD` file (e.g. `CHERRY_PICK_HEAD`, `REVERT_HEAD`) and returns
@@ -406,7 +428,9 @@ fn get_header_state(repo: &Repository, ahead_behind: bool) -> StatusResult<Heade
                 has_conflicts,
             }
         }
-        git2::RepositoryState::Bisect => HeaderBody::Bisect,
+        git2::RepositoryState::Bisect => HeaderBody::Bisect {
+            started_from: read_bisect_start(repo),
+        },
         git2::RepositoryState::ApplyMailbox | git2::RepositoryState::ApplyMailboxOrRebase => {
             // rebase-apply/rebasing exists for `git rebase --apply`,
             // rebase-apply/applying exists for `git am`.
@@ -517,8 +541,18 @@ fn print_header_state(state: &HeaderState, stdout: &mut impl Write) -> Result<()
             )?;
             writeln!(stdout)?;
         }
-        HeaderBody::Bisect => {
-            writeln!(stdout, "You are currently bisecting.")?;
+        HeaderBody::Bisect { started_from } => {
+            if started_from.is_empty() {
+                writeln!(stdout, "You are currently bisecting.")?;
+            } else {
+                // Upstream git always says "branch 'X'" here even when X is
+                // an OID (bisect started from detached HEAD). Reproduced
+                // verbatim for byte-for-byte parity.
+                writeln!(
+                    stdout,
+                    "You are currently bisecting, started from branch '{started_from}'."
+                )?;
+            }
             writeln!(
                 stdout,
                 "  (use \"git bisect reset\" to get back to the original branch)"
@@ -995,7 +1029,12 @@ mod tests {
 
         let repo = Repository::open(tmp.path()).unwrap();
         let state = get_header_state(&repo, true).unwrap();
-        assert_eq!(state.body, HeaderBody::Bisect);
+        // `init_repo` runs `git init` (defaults to master/main depending on
+        // git's `init.defaultBranch`), so any non-empty value is fine.
+        assert!(
+            matches!(&state.body, HeaderBody::Bisect { started_from } if !started_from.is_empty()),
+            "expected Bisect with started_from set, got {state:?}"
+        );
     }
 
     #[test]

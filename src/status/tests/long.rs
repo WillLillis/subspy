@@ -106,6 +106,10 @@ const CASES: &[Case] = &[
         setup: Setup::Plain(setup_rebase_apply_with_conflict),
     },
     Case {
+        name: "bisect",
+        setup: Setup::Plain(setup_bisect),
+    },
+    Case {
         name: "detached_at_tag",
         setup: Setup::Plain(setup_detached_at_tag),
     },
