@@ -128,12 +128,19 @@ pub fn request_shutdown(root_path: &Path) -> IpcResult<()> {
     Ok(())
 }
 
+/// How long [`connect_to_server`] waits for a freshly-spawned daemon to
+/// accept connections before giving up. Empirically matches `prompt`'s
+/// per-call budget and is long enough for normal cold starts (sub-100ms
+/// in practice) with headroom for slow disks.
+const COLD_START_DEADLINE: Duration = Duration::from_secs(1);
+
 /// Connects to the watch server for `root_path`, starting one if necessary.
 ///
 /// On the happy path (server already running), this is a single connect
-/// call with no overhead. If the connection fails with `ConnectionRefused` or
-/// `NotFound`, a new server is spawned and the connection is retried until
-/// it succeeds, the user terminates the program, or 10 seconds pass.
+/// call with no overhead. If the connection fails with `ConnectionRefused`
+/// or `NotFound`, a new server is spawned and the connection is retried
+/// until it succeeds, the user terminates the program, or
+/// [`COLD_START_DEADLINE`] passes.
 fn connect_to_server(root_path: &Path) -> IpcResult<BufReader<IpcStream>> {
     let sock_path = ipc_socket_path(root_path);
     match ipc_connect(&sock_path) {
@@ -150,7 +157,7 @@ fn connect_to_server(root_path: &Path) -> IpcResult<BufReader<IpcStream>> {
     spinner.set_message("Starting watch server...");
     spinner.enable_steady_tick(Duration::from_millis(80));
 
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + COLD_START_DEADLINE;
     loop {
         match ipc_connect(&sock_path) {
             Ok(conn) => {
@@ -159,9 +166,10 @@ fn connect_to_server(root_path: &Path) -> IpcResult<BufReader<IpcStream>> {
             }
             Err(e) if server_not_started(&e) => {
                 if Instant::now() >= deadline {
-                    spinner.abandon_with_message(
-                        "Watch server failed to start within 10s".to_string(),
-                    );
+                    spinner.abandon_with_message(format!(
+                        "Watch server failed to start within {}s",
+                        COLD_START_DEADLINE.as_secs(),
+                    ));
                     Err(e)?;
                 }
             }
