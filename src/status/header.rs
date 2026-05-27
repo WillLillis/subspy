@@ -636,7 +636,7 @@ fn current_branch_display(repo: &Repository, head_ref: &git2::Reference<'_>) -> 
             Paint::new(RED, format_args!("HEAD detached {preposition}")),
         );
     }
-    let branch_name = head_ref.shorthand().unwrap();
+    let branch_name = String::from_utf8_lossy(head_ref.shorthand_bytes());
     format!("On branch {branch_name}")
 }
 
@@ -722,11 +722,7 @@ fn get_upstream_status(
         return Ok(None);
     };
 
-    let name = upstream_branch
-        .get()
-        .shorthand()
-        .unwrap_or("unknown")
-        .to_string();
+    let name = String::from_utf8_lossy(upstream_branch.get().shorthand_bytes());
 
     // Get local and upstream commit OIDs
     let local_oid = local_branch.get().peel_to_commit()?.id();

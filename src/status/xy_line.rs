@@ -416,20 +416,24 @@ fn write_branch_header(
         return Ok(());
     };
 
-    let branch_name = Some(&head)
-        .filter(|h| h.is_branch())
-        .and_then(|h| h.shorthand().ok());
-
-    let Some(name) = branch_name else {
+    if !head.is_branch() {
         out.write_all(b"## ")?;
         paint_str(out, "HEAD (no branch)", style.palette.map(|p| p.nobranch))?;
         out.write_all(b"\n")?;
         return Ok(());
-    };
+    }
 
+    // Display path is lossy so a non-UTF-8 ref still renders something.
+    // `find_branch` below needs the strict `&str` form -- if the shorthand
+    // isn't valid UTF-8 we'll skip the upstream suffix instead.
+    let branch_display = String::from_utf8_lossy(head.shorthand_bytes());
     out.write_all(b"## ")?;
-    paint_str(out, name, style.palette.map(|p| p.local_branch))?;
+    paint_str(out, &branch_display, style.palette.map(|p| p.local_branch))?;
 
+    let Ok(name) = head.shorthand() else {
+        out.write_all(b"\n")?;
+        return Ok(());
+    };
     let Ok(local) = repo.find_branch(name, git2::BranchType::Local) else {
         out.write_all(b"\n")?;
         return Ok(());
@@ -449,13 +453,10 @@ fn write_branch_header(
         }
         return Ok(());
     };
-    let Ok(upstream_name) = upstream.get().shorthand() else {
-        out.write_all(b"\n")?;
-        return Ok(());
-    };
+    let upstream_name = String::from_utf8_lossy(upstream.get().shorthand_bytes());
 
     out.write_all(b"...")?;
-    paint_str(out, upstream_name, style.palette.map(|p| p.remote_branch))?;
+    paint_str(out, &upstream_name, style.palette.map(|p| p.remote_branch))?;
 
     let local_oid = local.get().peel_to_commit().ok().map(|c| c.id());
     let upstream_oid = upstream.get().peel_to_commit().ok().map(|c| c.id());

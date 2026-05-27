@@ -94,6 +94,60 @@ fn status_in_clean_repo_matches_git() {
     assert_outputs_match(tmp.path(), &["status"]);
 }
 
+/// Ref names with non-UTF-8 bytes are legal per git. Subspy must not
+/// panic on them. Our output substitutes U+FFFD for invalid sequences
+/// (`from_utf8_lossy`) where git emits the raw bytes, so byte-for-byte
+/// parity isn't expected here -- we just assert no crash and that the
+/// surrounding text is present.
+#[test]
+fn status_on_non_utf8_branch_name_does_not_panic() {
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let tmp = TempDir::new().unwrap();
+    run("git", tmp.path(), &["init", "-q", "-b", "master"]);
+    std::fs::write(tmp.path().join("file.txt"), "hello\n").unwrap();
+    run("git", tmp.path(), &["add", "-A"]);
+    run("git", tmp.path(), &[
+        "-c", "user.name=Test",
+        "-c", "user.email=test@test.com",
+        "commit", "-qm", "initial",
+    ]);
+
+    // Build a branch ref with invalid UTF-8 bytes (0xFF 0xFE) by writing
+    // directly to .git/refs/heads/, then point HEAD at it. `git branch`
+    // and `update-ref` won't accept invalid bytes via the CLI.
+    let oid = std::process::Command::new("git")
+        .args(["rev-parse", "master"])
+        .current_dir(tmp.path())
+        .output()
+        .expect("rev-parse failed");
+    let oid_str = String::from_utf8(oid.stdout).expect("oid is ascii");
+
+    let refs_heads = tmp.path().join(".git/refs/heads");
+    let bad_ref_name = std::ffi::OsStr::from_bytes(b"bad\xff\xfename");
+    let bad_ref_path = refs_heads.join(bad_ref_name);
+    std::fs::write(&bad_ref_path, &oid_str).expect("write ref");
+    std::fs::write(
+        tmp.path().join(".git/HEAD"),
+        b"ref: refs/heads/bad\xff\xfename\n",
+    )
+    .expect("write HEAD");
+
+    let shim = run(shim_path(), tmp.path(), &["status"]);
+    assert!(
+        shim.status.success(),
+        "shim exited {:?}\nstderr: {}",
+        shim.status.code(),
+        String::from_utf8_lossy(&shim.stderr),
+    );
+    // Either matches git verbatim or substitutes U+FFFD -- accept both.
+    let stdout = String::from_utf8_lossy(&shim.stdout);
+    assert!(
+        stdout.contains("On branch bad") && stdout.contains("name"),
+        "unexpected stdout: {stdout:?}",
+    );
+}
+
 /// A non-`status` subcommand has to forward to real git verbatim
 /// regardless of any shim logic.
 #[test]

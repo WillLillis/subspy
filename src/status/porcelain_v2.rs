@@ -174,19 +174,25 @@ fn write_branch_headers(
         .map_or(git2::Oid::ZERO_SHA1, |c| c.id());
     writeln!(out, "# branch.oid {oid}")?;
 
+    // Display via lossy bytes so a non-UTF-8 ref still renders something
+    // sensible. `find_branch` below needs the strict `&str` form (git2
+    // config keys are ASCII-only), so resolve that separately.
+    let branch_display = if head.is_branch() {
+        String::from_utf8_lossy(head.shorthand_bytes())
+    } else {
+        Cow::Borrowed("(detached)")
+    };
+    writeln!(out, "# branch.head {branch_display}")?;
+
     let branch_name = Some(&head)
         .filter(|h| h.is_branch())
         .and_then(|h| h.shorthand().ok());
-    writeln!(out, "# branch.head {}", branch_name.unwrap_or("(detached)"))?;
-
     if let Some(name) = branch_name
         && let Ok(local) = repo.find_branch(name, git2::BranchType::Local)
     {
         match local.upstream() {
             Ok(upstream) => {
-                let Ok(upstream_name) = upstream.get().shorthand() else {
-                    return Ok(());
-                };
+                let upstream_name = String::from_utf8_lossy(upstream.get().shorthand_bytes());
                 writeln!(out, "# branch.upstream {upstream_name}")?;
                 let local_oid = local.get().peel_to_commit().map(|c| c.id());
                 let up_oid = upstream.get().peel_to_commit().map(|c| c.id());
