@@ -489,7 +489,9 @@ where
 {
     use std::os::unix::process::CommandExt as _;
     let Some(target) = git_target() else {
-        eprintln!("subspy-git: cannot find real `git` on PATH (shim is named `git`)");
+        eprintln!(
+            "subspy-git: cannot find another `{GIT_EXE}` on PATH (shim is named `git`)"
+        );
         return ExitCode::FAILURE;
     };
     let err = Command::new(target).args(argv).exec();
@@ -505,7 +507,9 @@ where
 {
     use std::io::IsTerminal as _;
     let Some(target) = git_target() else {
-        eprintln!("subspy-git: cannot find real `git` on PATH (shim is named `git`)");
+        eprintln!(
+            "subspy-git: cannot find another `{GIT_EXE}` on PATH (shim is named `git`)"
+        );
         return ExitCode::FAILURE;
     };
     let mut cmd = Command::new(target);
@@ -558,9 +562,10 @@ const GIT_EXE: &str = "git";
 const GIT_EXE: &str = "git.exe";
 
 /// Walks `path_var` for a `git`/`git.exe` whose canonical path differs
-/// from `me`. Standard installations of Git on Windows use `git.exe`.
-/// Non-standard wrappers (`.cmd`, `.bat`, ...) aren't supported until
-/// proven otherwise.
+/// from `me`. Only `GIT_EXE` is considered -- `PATHEXT` is not honored,
+/// so Windows installations that ship a `git.cmd`/`git.bat` wrapper
+/// (e.g. some non-standard layouts) won't be found and the caller
+/// surfaces a clear diagnostic.
 fn find_real_git(me: Option<&Path>, path_var: &OsStr) -> Option<PathBuf> {
     let me_canonical = me.and_then(|p| std::fs::canonicalize(p).ok());
     for dir in env::split_paths(path_var) {
