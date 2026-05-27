@@ -488,7 +488,11 @@ where
     S: AsRef<OsStr>,
 {
     use std::os::unix::process::CommandExt as _;
-    let err = Command::new(git_target()).args(argv).exec();
+    let Some(target) = git_target() else {
+        eprintln!("subspy-git: cannot find real `git` on PATH (shim is named `git`)");
+        return ExitCode::FAILURE;
+    };
+    let err = Command::new(target).args(argv).exec();
     eprintln!("subspy-git: failed to exec `git`: {err}");
     ExitCode::FAILURE
 }
@@ -500,7 +504,11 @@ where
     S: AsRef<OsStr>,
 {
     use std::io::IsTerminal as _;
-    let mut cmd = Command::new(git_target());
+    let Some(target) = git_target() else {
+        eprintln!("subspy-git: cannot find real `git` on PATH (shim is named `git`)");
+        return ExitCode::FAILURE;
+    };
+    let mut cmd = Command::new(target);
     cmd.args(argv);
     if !std::io::stdout().is_terminal() {
         subspy::proc::configure_hidden_console(&mut cmd);
@@ -517,24 +525,31 @@ where
     }
 }
 
-/// Resolves the binary to invoke for forwarded git commands. Normally this
-/// is just `"git"`, letting the OS do PATH resolution. However, when the shim
-/// itself is renamed to `git`/`git.exe` (as `Sourcetree` requires), the OS will
-/// resolve `"git"` back to us.
-///
-/// To avoid infinite recursion, walk `PATH` ourselves and pick the first match
+/// Resolves the binary to invoke for forwarded git commands. Normally
+/// this is just `"git"`, letting the OS do PATH resolution. When the
+/// shim is renamed to `git`/`git.exe` (as `Sourcetree` requires), `"git"`
+/// would resolve back to us, so we walk `PATH` ourselves for a binary
 /// that isn't us.
-fn git_target() -> OsString {
-    let me = env::current_exe().ok();
+///
+/// Returns `None` only in the renamed-as-git case when no other `git` is
+/// findable -- callers must error out rather than retry, otherwise the
+/// shim would fork-bomb itself.
+fn git_target() -> Option<OsString> {
+    git_target_inner(
+        env::current_exe().ok().as_deref(),
+        env::var_os("PATH").as_deref(),
+    )
+}
+
+fn git_target_inner(me: Option<&Path>, path_var: Option<&OsStr>) -> Option<OsString> {
     let is_named_git = me
-        .as_ref()
         .and_then(|p| p.file_stem())
         .and_then(|n| n.to_str())
         .is_some_and(|n| n.eq_ignore_ascii_case("git"));
     if !is_named_git {
-        return "git".into();
+        return Some("git".into());
     }
-    find_real_git(me.as_deref()).map_or_else(|| "git".into(), OsString::from)
+    find_real_git(me, path_var?).map(OsString::from)
 }
 
 #[cfg(unix)]
@@ -542,13 +557,13 @@ const GIT_EXE: &str = "git";
 #[cfg(windows)]
 const GIT_EXE: &str = "git.exe";
 
-/// Walks `PATH` for a `git`/`git.exe` whose canonical path differs from
-/// `me`. Standard installations of Git on Windows use `git.exe`. Non-standard
-/// wrappers (`.cmd`, `.bat`, ...) aren't supported until proven otherwise.
-fn find_real_git(me: Option<&Path>) -> Option<PathBuf> {
+/// Walks `path_var` for a `git`/`git.exe` whose canonical path differs
+/// from `me`. Standard installations of Git on Windows use `git.exe`.
+/// Non-standard wrappers (`.cmd`, `.bat`, ...) aren't supported until
+/// proven otherwise.
+fn find_real_git(me: Option<&Path>, path_var: &OsStr) -> Option<PathBuf> {
     let me_canonical = me.and_then(|p| std::fs::canonicalize(p).ok());
-    let path_var = env::var_os("PATH")?;
-    for dir in env::split_paths(&path_var) {
+    for dir in env::split_paths(path_var) {
         let candidate = dir.join(GIT_EXE);
         if !candidate.is_file() {
             continue;
@@ -1047,6 +1062,43 @@ mod tests {
     #[test]
     fn internal_flag_is_not_intercepted_by_dispatch() {
         assert!(dispatch(&os(&[INTERNAL_FLAG, "start", "/path", "--foreground"])).is_none());
+    }
+
+    // -- git_target_inner --
+
+    #[test]
+    fn git_target_not_named_git_returns_literal_git() {
+        let me = Path::new("/opt/subspy/subspy-git");
+        // path_var doesn't matter -- we short-circuit before consulting it.
+        let got = git_target_inner(Some(me), Some(OsStr::new("")));
+        assert_eq!(got, Some(OsString::from("git")));
+    }
+
+    #[test]
+    fn git_target_named_git_with_no_real_git_returns_none() {
+        // Simulate a Sourcetree-style rename. PATH contains only us, so
+        // `find_real_git` returns None. The result must NOT fall back to
+        // `"git"`, which would resolve back to us and recurse.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let me = tmp.path().join("git");
+        std::fs::write(&me, "").unwrap();
+        let got = git_target_inner(Some(&me), Some(tmp.path().as_os_str()));
+        assert_eq!(got, None);
+    }
+
+    #[test]
+    fn git_target_named_git_with_other_git_returns_it() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let me = tmp.path().join("a/git");
+        let real = tmp.path().join("b/git");
+        std::fs::create_dir_all(me.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(real.parent().unwrap()).unwrap();
+        std::fs::write(&me, "").unwrap();
+        std::fs::write(&real, "").unwrap();
+        let path_var = std::env::join_paths([me.parent().unwrap(), real.parent().unwrap()])
+            .unwrap();
+        let got = git_target_inner(Some(&me), Some(path_var.as_os_str()));
+        assert_eq!(got, Some(OsString::from(real)));
     }
 
     /// `GitExtensions`'s no-locks variant of the commit dialog invocation.
