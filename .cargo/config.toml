@@ -4,10 +4,6 @@
 # ~4x speedup over serial execution.
 [env]
 RUST_TEST_THREADS = "4"
-# Disable ANSI styling in `paint::color_enabled()` so test output is
-# deterministic regardless of TTY detection in the test runner. Required
-# for the snapshot comparisons in `status::human_tests`.
-NO_COLOR = "1"
 
 [alias]
 xtask = "run --package xtask --"

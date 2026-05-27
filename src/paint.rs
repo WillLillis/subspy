@@ -16,17 +16,65 @@
 use std::{
     fmt::{self, Display},
     io::{self, Write},
-    sync::OnceLock,
+    sync::atomic::{AtomicU8, Ordering},
 };
 
 use anstyle::{AnsiColor, Color, Style};
 
+#[repr(u8)]
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum ColorState {
+    Disabled = 0,
+    Enabled = 1,
+    Unset = 2,
+}
+
+impl From<u8> for ColorState {
+    fn from(v: u8) -> Self {
+        match v {
+            0 => Self::Disabled,
+            1 => Self::Enabled,
+            _ => Self::Unset,
+        }
+    }
+}
+
+static COLOR_STATE: AtomicU8 = AtomicU8::new(ColorState::Unset as u8);
+
 /// `NO_COLOR` (per <https://no-color.org>): any non-empty value disables
-/// styling. We read the environment once at first call and cache the
-/// answer for the rest of the process.
+/// styling. The answer is cached after the first call so paint emissions
+/// don't pay an env-var read each time.
+///
+/// Tests can force the cache to `Disabled` via [`force_disable`]; the
+/// atomic store overwrites whatever the env-based init resolved to, so
+/// snapshot tests are deterministic even if some other test populated
+/// the cache first.
 fn color_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var_os("NO_COLOR").is_none_or(|v| v.is_empty()))
+    match ColorState::from(COLOR_STATE.load(Ordering::Relaxed)) {
+        ColorState::Enabled => true,
+        ColorState::Disabled => false,
+        ColorState::Unset => {
+            let enabled = std::env::var_os("NO_COLOR").is_none_or(|v| v.is_empty());
+            let state = if enabled {
+                ColorState::Enabled
+            } else {
+                ColorState::Disabled
+            };
+            COLOR_STATE.store(state as u8, Ordering::Relaxed);
+            enabled
+        }
+    }
+}
+
+/// Test hook: force [`color_enabled`] to return `false` for the rest of
+/// the process.
+///
+/// Overwrites whatever value the env-based init cached. Used by snapshot
+/// tests so paint output is deterministic regardless of the test
+/// runner's environment.
+#[cfg(test)]
+pub fn force_disable() {
+    COLOR_STATE.store(ColorState::Disabled as u8, Ordering::Relaxed);
 }
 
 /// Bright red foreground - used for unstaged changes, conflicts, error

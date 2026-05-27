@@ -209,6 +209,7 @@ fn build_status_options(opts: OutputOpts, repo_kind: RepoKind) -> git2::StatusOp
 }
 
 fn run_subspy_short(project: &ProjectPath, opts: OutputOpts) -> Vec<u8> {
+    crate::paint::force_disable();
     let repo = Repository::open(&project.repo_root).unwrap();
     let mut so = build_status_options(opts, project.kind);
     let non_submod = repo.statuses(Some(&mut so)).unwrap();
