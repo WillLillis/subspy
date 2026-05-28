@@ -6,7 +6,6 @@
 //! stability-promised format - if real git ever drifts, we want to know
 //! immediately rather than rubber-stamping a stale snapshot.
 
-use git2::Repository;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use tempfile::TempDir;
@@ -16,10 +15,9 @@ use crate::{
     RepoKind,
     cli::ProjectPath,
     status::{
-        IgnoreSubmodules, OutputFormat, OutputOpts, PorcelainOpts, PorcelainVersion, StatusEntries,
-        SubmoduleChanges, UntrackedFiles, compute_local_statuses, cwd_relative_to_repo,
+        IgnoreSubmodules, OutputFormat, OutputOpts, PorcelainOpts, PorcelainVersion,
+        UntrackedFiles, assemble_status, compute_local_statuses,
         porcelain_v1::display_porcelain_v1, porcelain_v2::display_porcelain_v2,
-        relativize::Relativizer, submodule::apply_ignore_submodules, submodule_changes,
     },
 };
 
@@ -308,31 +306,6 @@ fn git_status_args(opts: OutputOpts) -> Vec<String> {
     a
 }
 
-/// Mirrors `status::status`'s `StatusOptions` setup. Kept in sync by
-/// constructing from the same `OutputOpts` shape.
-fn build_status_options(opts: OutputOpts, repo_kind: RepoKind) -> git2::StatusOptions {
-    let mut so = git2::StatusOptions::new();
-    match opts.untracked_files {
-        UntrackedFiles::Normal => {
-            so.include_untracked(true).recurse_untracked_dirs(false);
-        }
-        UntrackedFiles::All => {
-            so.include_untracked(true).recurse_untracked_dirs(true);
-        }
-        UntrackedFiles::No => {
-            so.include_untracked(false);
-        }
-    }
-    so.include_ignored(opts.show_ignored).no_refresh(true);
-    so.renames_head_to_index(true)
-        .renames_index_to_workdir(true)
-        .renames_from_rewrites(true);
-    if repo_kind == RepoKind::WithSubmodules {
-        so.exclude_submodules(true);
-    }
-    so
-}
-
 /// Runs `case` with `opts` against both real git and subspy, asserts equal.
 fn run_case(case: &Case, opts: OutputOpts) {
     match &case.setup {
@@ -385,52 +358,41 @@ fn assert_outputs_match(project: &ProjectPath, case_name: &str, opts: OutputOpts
     let expected = go.stdout;
 
     // Capture subspy's output into a Vec<u8>.
-    let repo = Repository::open(&project.repo_root).unwrap();
-    let mut so = build_status_options(opts, project.kind);
-    let non_submod = repo.statuses(Some(&mut so)).unwrap();
-    let changes = if opts.ignore_submodules == IgnoreSubmodules::All {
-        SubmoduleChanges::default()
-    } else {
-        submodule_changes(&repo).unwrap()
-    };
-    let submodules = if project.kind == RepoKind::WithSubmodules {
-        compute_local_statuses(&project.repo_root, &repo).unwrap()
-    } else {
-        Vec::new()
-    };
-    let mut submodules = apply_ignore_submodules(submodules, opts.ignore_submodules);
-    crate::status::submodule::filter_rename_new_paths(&mut submodules, &changes.renamed);
-
-    // Same Relativizer plumbing as production: v2 uses it (cwd-relative
-    // output); v1 doesn't take one (always repo-root-relative).
-    let cwd_rel = cwd_relative_to_repo(&project.repo_root, &project.effective_cwd);
-    let rel = Relativizer::new(&cwd_rel, true);
-
-    let entries = StatusEntries {
-        non_submod: &non_submod,
-        submodules: &submodules,
-        deleted_submodules: &changes.deleted,
-        renamed_submodules: &changes.renamed,
-    };
     let porcelain_opts = PorcelainOpts {
         null_terminate: opts.null_terminate,
         branch: opts.branch,
         ahead_behind: opts.ahead_behind,
         quote_path: opts.quote_path,
     };
-
-    let mut got: Vec<u8> = Vec::new();
-    match opts.format {
-        OutputFormat::Porcelain(PorcelainVersion::V1) => {
-            display_porcelain_v1(&mut got, &repo, &entries, porcelain_opts).unwrap();
-        }
-        OutputFormat::Porcelain(PorcelainVersion::V2) => {
-            display_porcelain_v2(&mut got, &repo, &entries, &rel, porcelain_opts).unwrap();
-        }
-        OutputFormat::Long | OutputFormat::Short => {
-            panic!("porcelain test runner doesn't support non-porcelain output")
-        }
-    }
+    let format = opts.format;
+    let with_submodules = project.kind == RepoKind::WithSubmodules;
+    let got: Vec<u8> = assemble_status(
+        project,
+        opts,
+        |repo| {
+            Ok(if with_submodules {
+                compute_local_statuses(&project.repo_root, repo)?
+            } else {
+                Vec::new()
+            })
+        },
+        |repo, entries, rel| {
+            let mut got: Vec<u8> = Vec::new();
+            match format {
+                OutputFormat::Porcelain(PorcelainVersion::V1) => {
+                    display_porcelain_v1(&mut got, repo, entries, porcelain_opts)?;
+                }
+                OutputFormat::Porcelain(PorcelainVersion::V2) => {
+                    display_porcelain_v2(&mut got, repo, entries, rel, porcelain_opts)?;
+                }
+                OutputFormat::Long | OutputFormat::Short => {
+                    panic!("porcelain test runner doesn't support non-porcelain output")
+                }
+            }
+            Ok(got)
+        },
+    )
+    .unwrap();
 
     assert_eq!(
         got,

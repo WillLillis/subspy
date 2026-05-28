@@ -42,6 +42,7 @@ use crate::{
     watch::LockFileError,
 };
 
+pub use relativize::Relativizer;
 pub use submodule::{
     SubmoduleChanges, SubmoduleRename, compute_local_statuses, submodule_changes,
 };
@@ -142,6 +143,92 @@ pub struct StatusEntries<'a> {
     pub renamed_submodules: &'a [SubmoduleRename],
 }
 
+/// Builds the `git2::StatusOptions` used by production and tests. Kept
+/// in one place so the two stay in sync.
+#[must_use]
+pub fn build_status_options(opts: OutputOpts, repo_kind: RepoKind) -> git2::StatusOptions {
+    let mut so = git2::StatusOptions::new();
+    match opts.untracked_files {
+        UntrackedFiles::Normal => {
+            so.include_untracked(true).recurse_untracked_dirs(false);
+        }
+        UntrackedFiles::All => {
+            so.include_untracked(true).recurse_untracked_dirs(true);
+        }
+        UntrackedFiles::No => {
+            so.include_untracked(false);
+        }
+    }
+    // The repo was just opened, so the index is already fresh from disk.
+    // Skip the redundant stat-cache refresh pass.
+    so.include_ignored(opts.show_ignored).no_refresh(true);
+
+    // Match git's default `diff.renames=true` so renames render as
+    // `R old -> new` rather than separate `D old`/`A new` entries.
+    so.renames_head_to_index(true)
+        .renames_index_to_workdir(true)
+        .renames_from_rewrites(true);
+
+    // Ignore submodules _only_ if we are the top level, in which case
+    // submodule statuses are provided by the watch server or computed
+    // locally outside `repo.statuses`.
+    if repo_kind == RepoKind::WithSubmodules {
+        so.exclude_submodules(true);
+    }
+    so
+}
+
+/// Opens the repository, runs the shared status-assembly pipeline, and
+/// hands the result to `render`.
+///
+/// Pipeline: `git2::statuses`, `submodule_changes`, ignore-submodules
+/// masking, rename-new filter, relativizer, `StatusEntries`. The
+/// `submodule_statuses` closure is the caller's hook for supplying
+/// submodule-level statuses -- production receives them over IPC,
+/// tests fall back to `compute_local_statuses`.
+///
+/// # Errors
+///
+/// Propagates `StatusError` from the closures and from intermediate
+/// libgit2 calls.
+pub fn assemble_status<R>(
+    project: &ProjectPath,
+    opts: OutputOpts,
+    submodule_statuses: impl FnOnce(&Repository) -> StatusResult<Vec<(String, StatusSummary)>>,
+    render: impl FnOnce(&Repository, &StatusEntries<'_>, &Relativizer<'_>) -> StatusResult<R>,
+) -> StatusResult<R> {
+    let repo = Repository::open(&project.repo_root)?;
+    let mut so = build_status_options(opts, project.kind);
+    let non_submod = repo.statuses(Some(&mut so))?;
+
+    let submod_changes = if opts.ignore_submodules == IgnoreSubmodules::All {
+        SubmoduleChanges::default()
+    } else {
+        submodule_changes(&repo)?
+    };
+
+    let raw_submods = submodule_statuses(&repo)?;
+    let mut submods = submodule::apply_ignore_submodules(raw_submods, opts.ignore_submodules);
+    submodule::filter_rename_new_paths(&mut submods, &submod_changes.renamed);
+
+    // Path-formatting policy by output mode:
+    // - Porcelain v1: repo-root-relative regardless of cwd.
+    // - Porcelain v2: cwd-relative without `-z`, repo-root-relative
+    //   with `-z` (where paths are stable identifiers).
+    // - Short and long: cwd-relative.
+    let cwd_rel = cwd_relative_to_repo(&project.repo_root, &project.effective_cwd);
+    let rel = relativize::Relativizer::new(&cwd_rel, opts.quote_path);
+
+    let entries = StatusEntries {
+        non_submod: &non_submod,
+        submodules: &submods,
+        deleted_submodules: &submod_changes.deleted,
+        renamed_submodules: &submod_changes.renamed,
+    };
+
+    render(&repo, &entries, &rel)
+}
+
 /// Retrieves and displays the statuses for the repository described by
 /// `project`. Paths in the output are reported relative to
 /// [`ProjectPath::effective_cwd`], matching `git -C <path> status`.
@@ -156,110 +243,55 @@ pub fn status(
     opts: OutputOpts,
     out: &mut impl io::Write,
 ) -> StatusResult<()> {
-    let OutputOpts {
-        format,
-        null_terminate,
-        ignore_submodules,
-        untracked_files,
-        show_ignored,
-        branch,
-        ahead_behind,
-        quote_path,
-    } = opts;
-    // Send IPC request early so the server starts processing while we do local work.
+    // Send IPC request early so the server starts processing while we
+    // do local work.
     let mut conn = if use_server {
         Some(send_status_request(&project.repo_root)?)
     } else {
         None
     };
 
-    let repo = Repository::open(&project.repo_root)?;
-
-    let mut opts = git2::StatusOptions::new();
-    match untracked_files {
-        UntrackedFiles::Normal => {
-            opts.include_untracked(true).recurse_untracked_dirs(false);
-        }
-        UntrackedFiles::All => {
-            opts.include_untracked(true).recurse_untracked_dirs(true);
-        }
-        UntrackedFiles::No => {
-            opts.include_untracked(false);
-        }
-    }
-    // The repo was just opened, so the index is already fresh from disk.
-    // Skip the redundant stat-cache refresh pass.
-    opts.include_ignored(show_ignored).no_refresh(true);
-
-    // Match git's default `diff.renames=true` so renames render as
-    // `R old -> new` rather than separate `D old`/`A new` entries.
-    opts.renames_head_to_index(true)
-        .renames_index_to_workdir(true)
-        .renames_from_rewrites(true);
-
-    // Ignore submodules _only_ if we are the top level, in which case submodule statuses
-    // are provided by the watch server or computed locally below.
-    if project.kind == RepoKind::WithSubmodules {
-        opts.exclude_submodules(true);
-    }
-
-    let non_submodule_statuses = repo.statuses(Some(&mut opts))?;
-    let submod_changes = if ignore_submodules == IgnoreSubmodules::All {
-        SubmoduleChanges::default()
-    } else {
-        submodule_changes(&repo)?
-    };
-
-    let submodule_statuses = match conn {
-        Some(ref mut c) => recv_status_response(c, display_progress)?.0,
-        None if project.kind == RepoKind::WithSubmodules
-            && ignore_submodules != IgnoreSubmodules::All =>
-        {
-            compute_local_statuses(&project.repo_root, &repo)?
-        }
-        None => Vec::new(),
-    };
-    let mut submodule_statuses =
-        submodule::apply_ignore_submodules(submodule_statuses, ignore_submodules);
-    submodule::filter_rename_new_paths(&mut submodule_statuses, &submod_changes.renamed);
-
-    // Path-formatting policy by output mode:
-    // - Porcelain v1: repo-root-relative regardless of cwd.
-    // - Porcelain v2: cwd-relative without `-z`, repo-root-relative
-    //   with `-z` (where paths are stable identifiers).
-    // - Short and long: cwd-relative.
-    let cwd_rel = cwd_relative_to_repo(&project.repo_root, &project.effective_cwd);
-    let rel = relativize::Relativizer::new(&cwd_rel, quote_path);
-
-    let entries = StatusEntries {
-        non_submod: &non_submodule_statuses,
-        submodules: &submodule_statuses,
-        deleted_submodules: &submod_changes.deleted,
-        renamed_submodules: &submod_changes.renamed,
-    };
     let porcelain_opts = PorcelainOpts {
-        null_terminate,
-        branch,
-        ahead_behind,
-        quote_path,
+        null_terminate: opts.null_terminate,
+        branch: opts.branch,
+        ahead_behind: opts.ahead_behind,
+        quote_path: opts.quote_path,
     };
+    let format = opts.format;
+    let ahead_behind = opts.ahead_behind;
+    let ignore_submodules = opts.ignore_submodules;
+    let kind = project.kind;
 
-    match format {
-        OutputFormat::Long => {
-            display::display_status(out, &repo, &entries, &rel, ahead_behind)?;
-        }
-        OutputFormat::Short => {
-            short::display_short(out, &repo, &entries, &rel, porcelain_opts)?;
-        }
-        OutputFormat::Porcelain(PorcelainVersion::V1) => {
-            porcelain_v1::display_porcelain_v1(out, &repo, &entries, porcelain_opts)?;
-        }
-        OutputFormat::Porcelain(PorcelainVersion::V2) => {
-            porcelain_v2::display_porcelain_v2(out, &repo, &entries, &rel, porcelain_opts)?;
-        }
-    }
-
-    Ok(())
+    assemble_status(
+        project,
+        opts,
+        |repo| match conn {
+            Some(ref mut c) => Ok(recv_status_response(c, display_progress)?.0),
+            None if kind == RepoKind::WithSubmodules
+                && ignore_submodules != IgnoreSubmodules::All =>
+            {
+                compute_local_statuses(&project.repo_root, repo)
+            }
+            None => Ok(Vec::new()),
+        },
+        |repo, entries, rel| {
+            match format {
+                OutputFormat::Long => {
+                    display::display_status(out, repo, entries, rel, ahead_behind)?;
+                }
+                OutputFormat::Short => {
+                    short::display_short(out, repo, entries, rel, porcelain_opts)?;
+                }
+                OutputFormat::Porcelain(PorcelainVersion::V1) => {
+                    porcelain_v1::display_porcelain_v1(out, repo, entries, porcelain_opts)?;
+                }
+                OutputFormat::Porcelain(PorcelainVersion::V2) => {
+                    porcelain_v2::display_porcelain_v2(out, repo, entries, rel, porcelain_opts)?;
+                }
+            }
+            Ok(())
+        },
+    )
 }
 
 /// Returns `effective_cwd` expressed relative to `repo_root`, as a

@@ -4,7 +4,6 @@
 //! Regenerate with `UPDATE_SHORT_SNAPSHOTS=1`. See CONTRIBUTING.md for
 //! workflow details.
 
-use git2::Repository;
 use pretty_assertions::assert_eq;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
@@ -14,10 +13,8 @@ use crate::{
     RepoKind,
     cli::ProjectPath,
     status::{
-        IgnoreSubmodules, OutputFormat, OutputOpts, PorcelainOpts, StatusEntries,
-        SubmoduleChanges, UntrackedFiles, compute_local_statuses, cwd_relative_to_repo,
-        relativize::Relativizer, short::display_short, submodule::apply_ignore_submodules,
-        submodule_changes,
+        IgnoreSubmodules, OutputFormat, OutputOpts, PorcelainOpts, UntrackedFiles,
+        assemble_status, compute_local_statuses, short::display_short,
     },
 };
 
@@ -186,66 +183,32 @@ fn snapshot_path(case_name: &str) -> PathBuf {
         .join(format!("{case_name}.snapshot"))
 }
 
-fn build_status_options(opts: OutputOpts, repo_kind: RepoKind) -> git2::StatusOptions {
-    let mut so = git2::StatusOptions::new();
-    match opts.untracked_files {
-        UntrackedFiles::Normal => {
-            so.include_untracked(true).recurse_untracked_dirs(false);
-        }
-        UntrackedFiles::All => {
-            so.include_untracked(true).recurse_untracked_dirs(true);
-        }
-        UntrackedFiles::No => {
-            so.include_untracked(false);
-        }
-    }
-    so.include_ignored(opts.show_ignored).no_refresh(true);
-    so.renames_head_to_index(true)
-        .renames_index_to_workdir(true)
-        .renames_from_rewrites(true);
-    if repo_kind == RepoKind::WithSubmodules {
-        so.exclude_submodules(true);
-    }
-    so
-}
-
 fn run_subspy_short(project: &ProjectPath, opts: OutputOpts) -> Vec<u8> {
     crate::paint::force_disable();
-    let repo = Repository::open(&project.repo_root).unwrap();
-    let mut so = build_status_options(opts, project.kind);
-    let non_submod = repo.statuses(Some(&mut so)).unwrap();
-    let changes = if opts.ignore_submodules == IgnoreSubmodules::All {
-        SubmoduleChanges::default()
-    } else {
-        submodule_changes(&repo).unwrap()
-    };
-    let submodules = if project.kind == RepoKind::WithSubmodules {
-        compute_local_statuses(&project.repo_root, &repo).unwrap()
-    } else {
-        Vec::new()
-    };
-    let mut submodules = apply_ignore_submodules(submodules, opts.ignore_submodules);
-    crate::status::submodule::filter_rename_new_paths(&mut submodules, &changes.renamed);
-
-    let cwd_rel = cwd_relative_to_repo(&project.repo_root, &project.effective_cwd);
-    let rel = Relativizer::new(&cwd_rel, true);
-
-    let entries = StatusEntries {
-        non_submod: &non_submod,
-        submodules: &submodules,
-        deleted_submodules: &changes.deleted,
-        renamed_submodules: &changes.renamed,
-    };
     let porcelain_opts = PorcelainOpts {
         null_terminate: opts.null_terminate,
         branch: opts.branch,
         ahead_behind: opts.ahead_behind,
         quote_path: opts.quote_path,
     };
-
-    let mut got: Vec<u8> = Vec::new();
-    display_short(&mut got, &repo, &entries, &rel, porcelain_opts).unwrap();
-    got
+    let with_submodules = project.kind == RepoKind::WithSubmodules;
+    assemble_status(
+        project,
+        opts,
+        |repo| {
+            Ok(if with_submodules {
+                compute_local_statuses(&project.repo_root, repo)?
+            } else {
+                Vec::new()
+            })
+        },
+        |repo, entries, rel| {
+            let mut got: Vec<u8> = Vec::new();
+            display_short(&mut got, repo, entries, rel, porcelain_opts)?;
+            Ok(got)
+        },
+    )
+    .unwrap()
 }
 
 fn assert_snapshot(case_name: &str, got: &[u8]) {
