@@ -42,7 +42,9 @@ use crate::{
     watch::LockFileError,
 };
 
-pub use submodule::{compute_local_statuses, deleted_submodule_paths};
+pub use submodule::{
+    SubmoduleChanges, SubmoduleRename, compute_local_statuses, submodule_changes,
+};
 
 pub type StatusResult<T> = Result<T, StatusError>;
 
@@ -137,6 +139,7 @@ pub struct StatusEntries<'a> {
     pub non_submod: &'a git2::Statuses<'a>,
     pub submodules: &'a [(String, StatusSummary)],
     pub deleted_submodules: &'a [String],
+    pub renamed_submodules: &'a [SubmoduleRename],
 }
 
 /// Retrieves and displays the statuses for the repository described by
@@ -201,10 +204,10 @@ pub fn status(
     }
 
     let non_submodule_statuses = repo.statuses(Some(&mut opts))?;
-    let deleted_submodule_paths = if ignore_submodules == IgnoreSubmodules::All {
-        Vec::new()
+    let submod_changes = if ignore_submodules == IgnoreSubmodules::All {
+        SubmoduleChanges::default()
     } else {
-        deleted_submodule_paths(&repo)?
+        submodule_changes(&repo)?
     };
 
     let submodule_statuses = match conn {
@@ -216,8 +219,9 @@ pub fn status(
         }
         None => Vec::new(),
     };
-    let submodule_statuses =
+    let mut submodule_statuses =
         submodule::apply_ignore_submodules(submodule_statuses, ignore_submodules);
+    submodule::filter_rename_new_paths(&mut submodule_statuses, &submod_changes.renamed);
 
     // Path-formatting policy by output mode:
     // - Porcelain v1: repo-root-relative regardless of cwd.
@@ -230,7 +234,8 @@ pub fn status(
     let entries = StatusEntries {
         non_submod: &non_submodule_statuses,
         submodules: &submodule_statuses,
-        deleted_submodules: &deleted_submodule_paths,
+        deleted_submodules: &submod_changes.deleted,
+        renamed_submodules: &submod_changes.renamed,
     };
     let porcelain_opts = PorcelainOpts {
         null_terminate,

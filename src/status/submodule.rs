@@ -8,21 +8,50 @@ use crate::{StatusSummary, git::parse_gitmodules, watch::LockFileGuard};
 
 use super::{IgnoreSubmodules, StatusResult};
 
-/// Returns the relative paths of submodules staged for deletion.
+/// A submodule that was renamed (`git mv old new`) since HEAD: same
+/// gitlink OID, different path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubmoduleRename {
+    pub old: String,
+    pub new: String,
+}
+
+/// HEAD-to-index submodule changes that don't show up in
+/// `git status`'s submodule status: deletions (HEAD path missing from
+/// the index) and renames (same gitlink OID at a different path).
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct SubmoduleChanges {
+    pub deleted: Vec<String>,
+    pub renamed: Vec<SubmoduleRename>,
+}
+
+/// Returns submodules that are deleted or renamed in the index relative
+/// to the HEAD commit.
 ///
-/// These are submodules whose gitlink is in the HEAD commit but has been removed
-/// from the index (via `git rm`).
+/// Renames are detected by matching gitlink OIDs: if a HEAD-tracked
+/// submodule path is missing from the index but its gitlink OID appears
+/// at a different path, it's classified as renamed. The OID match is
+/// the only signal -- gitlinks don't carry similarity-scoreable
+/// content, so a submodule advance + rename in the same commit will
+/// register as a deletion plus a new entry.
+///
+/// Fast path: if no HEAD gitlink is missing from the index, we never
+/// scan the full index -- iteration cost is proportional to the number
+/// of submodules in HEAD, not the size of the index.
 ///
 /// # Errors
 ///
 /// Returns `Err` if the HEAD tree cannot be walked or the index cannot be read.
-pub fn deleted_submodule_paths(repo: &Repository) -> StatusResult<Vec<String>> {
+pub fn submodule_changes(repo: &Repository) -> StatusResult<SubmoduleChanges> {
     let Some(head_tree) = repo.head().ok().and_then(|h| h.peel_to_tree().ok()) else {
-        return Ok(Vec::new());
+        return Ok(SubmoduleChanges::default());
     };
     let index = repo.index()?;
 
-    let mut deleted = Vec::new();
+    // Collect HEAD gitlinks that are no longer at the same path in the
+    // index. Submodules still at the same path show up in normal status
+    // output via the watch server and aren't our concern here.
+    let mut missing: Vec<(String, git2::Oid)> = Vec::new();
     head_tree.walk(git2::TreeWalkMode::PreOrder, |root, entry| {
         if entry.filemode() == i32::from(git2::FileMode::Commit) {
             let Ok(name) = entry.name() else {
@@ -34,7 +63,7 @@ pub fn deleted_submodule_paths(repo: &Repository) -> StatusResult<Vec<String>> {
                 format!("{root}{name}")
             };
             if index.get_path(Path::new(&path), 0).is_none() {
-                deleted.push(path);
+                missing.push((path, entry.id()));
             }
             git2::TreeWalkResult::Skip
         } else {
@@ -42,7 +71,56 @@ pub fn deleted_submodule_paths(repo: &Repository) -> StatusResult<Vec<String>> {
         }
     })?;
 
-    Ok(deleted)
+    if missing.is_empty() {
+        return Ok(SubmoduleChanges::default());
+    }
+
+    // Walk the index once for gitlinks. Whenever an OID matches one of
+    // the missing-from-HEAD entries we drain that entry from the list:
+    // a different path means a rename, same path means it actually IS
+    // in the index (shouldn't happen given the `get_path` check above,
+    // but harmless if it does). Anything left in `missing` afterwards
+    // is genuinely deleted. Linear scan over `missing` per index entry
+    // is cheap because `missing` is typically 0-2 entries.
+    let mut changes = SubmoduleChanges::default();
+    let gitlink_mode = u32::from(git2::FileMode::Commit);
+    for entry in index.iter() {
+        if entry.mode != gitlink_mode {
+            continue;
+        }
+        let Some(pos) = missing.iter().position(|(_, oid)| *oid == entry.id) else {
+            continue;
+        };
+        let (old_path, _) = missing.remove(pos);
+        let new_path = String::from_utf8_lossy(&entry.path).into_owned();
+        if new_path != old_path {
+            changes.renamed.push(SubmoduleRename {
+                old: old_path,
+                new: new_path,
+            });
+        }
+    }
+    changes.deleted = missing.into_iter().map(|(path, _)| path).collect();
+
+    Ok(changes)
+}
+
+/// Drops submodule statuses whose path is the new side of a rename.
+/// The watch server reports the rename's new path as `STAGED_NEW` (a
+/// fresh gitlink relative to HEAD); that row is already covered by the
+/// rename's `old -> new` line, so we drop it here to match git's output.
+///
+/// In-place; no allocation. Early-exits when `renames` is empty (the
+/// common case). The inner linear scan is fine since rename counts are
+/// 0-2 in any realistic workflow.
+pub fn filter_rename_new_paths(
+    statuses: &mut Vec<(String, StatusSummary)>,
+    renames: &[SubmoduleRename],
+) {
+    if renames.is_empty() {
+        return;
+    }
+    statuses.retain(|(path, _)| !renames.iter().any(|r| r.new == *path));
 }
 
 /// Masks submodule statuses according to `--ignore-submodules` mode.

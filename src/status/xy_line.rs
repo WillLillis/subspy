@@ -112,6 +112,22 @@ pub(super) fn display_xy_lines(
         write_xy_path(out, x, y, path, rel, null_terminate, style)?;
     }
 
+    for rename in entries.renamed_submodules {
+        // `R ` (staged submodule rename). With -z the new and old paths
+        // are NUL-separated; otherwise rendered as `old -> new`.
+        let x = XyChar::new('R', style.palette.map(|p| p.updated));
+        let y = XyChar::new(' ', None);
+        write_xy_prefix(out, x, y)?;
+        if null_terminate {
+            write!(out, "{new}\0{old}\0", new = rename.new, old = rename.old)?;
+        } else {
+            write_path(out, &rename.old, rel, false, style)?;
+            out.write_all(b" -> ")?;
+            write_path(out, &rename.new, rel, false, style)?;
+            out.write_all(b"\n")?;
+        }
+    }
+
     for entry in entries
         .non_submod
         .iter()

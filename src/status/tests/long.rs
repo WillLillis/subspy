@@ -14,9 +14,10 @@ use crate::{
     RepoKind,
     cli::ProjectPath,
     status::{
-        IgnoreSubmodules, OutputFormat, OutputOpts, StatusEntries, UntrackedFiles,
-        compute_local_statuses, cwd_relative_to_repo, deleted_submodule_paths,
+        IgnoreSubmodules, OutputFormat, OutputOpts, StatusEntries, SubmoduleChanges,
+        UntrackedFiles, compute_local_statuses, cwd_relative_to_repo,
         display::display_status, relativize::Relativizer, submodule::apply_ignore_submodules,
+        submodule_changes,
     },
 };
 
@@ -139,6 +140,13 @@ const CASES: &[Case] = &[
         },
     },
     Case {
+        name: "submodule_renamed",
+        setup: Setup::WithSubmodules {
+            names: &["sub"],
+            setup: setup_submodule_renamed,
+        },
+    },
+    Case {
         name: "upstream_up_to_date",
         setup: Setup::Plain(setup_upstream_up_to_date),
     },
@@ -211,17 +219,18 @@ fn run_subspy_long(project: &ProjectPath, opts: OutputOpts) -> Vec<u8> {
     let repo = Repository::open(&project.repo_root).unwrap();
     let mut so = build_status_options(opts, project.kind);
     let non_submod = repo.statuses(Some(&mut so)).unwrap();
-    let deleted = if opts.ignore_submodules == IgnoreSubmodules::All {
-        Vec::new()
+    let changes = if opts.ignore_submodules == IgnoreSubmodules::All {
+        SubmoduleChanges::default()
     } else {
-        deleted_submodule_paths(&repo).unwrap()
+        submodule_changes(&repo).unwrap()
     };
     let submodules = if project.kind == RepoKind::WithSubmodules {
         compute_local_statuses(&project.repo_root, &repo).unwrap()
     } else {
         Vec::new()
     };
-    let submodules = apply_ignore_submodules(submodules, opts.ignore_submodules);
+    let mut submodules = apply_ignore_submodules(submodules, opts.ignore_submodules);
+    crate::status::submodule::filter_rename_new_paths(&mut submodules, &changes.renamed);
 
     let cwd_rel = cwd_relative_to_repo(&project.repo_root, &project.effective_cwd);
     let rel = Relativizer::new(&cwd_rel, true);
@@ -229,7 +238,8 @@ fn run_subspy_long(project: &ProjectPath, opts: OutputOpts) -> Vec<u8> {
     let entries = StatusEntries {
         non_submod: &non_submod,
         submodules: &submodules,
-        deleted_submodules: &deleted,
+        deleted_submodules: &changes.deleted,
+        renamed_submodules: &changes.renamed,
     };
 
     let mut got: Vec<u8> = Vec::new();

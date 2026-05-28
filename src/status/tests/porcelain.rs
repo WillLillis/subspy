@@ -17,9 +17,9 @@ use crate::{
     cli::ProjectPath,
     status::{
         IgnoreSubmodules, OutputFormat, OutputOpts, PorcelainOpts, PorcelainVersion, StatusEntries,
-        UntrackedFiles, compute_local_statuses, cwd_relative_to_repo, deleted_submodule_paths,
+        SubmoduleChanges, UntrackedFiles, compute_local_statuses, cwd_relative_to_repo,
         porcelain_v1::display_porcelain_v1, porcelain_v2::display_porcelain_v2,
-        relativize::Relativizer, submodule::apply_ignore_submodules,
+        relativize::Relativizer, submodule::apply_ignore_submodules, submodule_changes,
     },
 };
 
@@ -388,17 +388,18 @@ fn assert_outputs_match(project: &ProjectPath, case_name: &str, opts: OutputOpts
     let repo = Repository::open(&project.repo_root).unwrap();
     let mut so = build_status_options(opts, project.kind);
     let non_submod = repo.statuses(Some(&mut so)).unwrap();
-    let deleted = if opts.ignore_submodules == IgnoreSubmodules::All {
-        Vec::new()
+    let changes = if opts.ignore_submodules == IgnoreSubmodules::All {
+        SubmoduleChanges::default()
     } else {
-        deleted_submodule_paths(&repo).unwrap()
+        submodule_changes(&repo).unwrap()
     };
     let submodules = if project.kind == RepoKind::WithSubmodules {
         compute_local_statuses(&project.repo_root, &repo).unwrap()
     } else {
         Vec::new()
     };
-    let submodules = apply_ignore_submodules(submodules, opts.ignore_submodules);
+    let mut submodules = apply_ignore_submodules(submodules, opts.ignore_submodules);
+    crate::status::submodule::filter_rename_new_paths(&mut submodules, &changes.renamed);
 
     // Same Relativizer plumbing as production: v2 uses it (cwd-relative
     // output); v1 doesn't take one (always repo-root-relative).
@@ -408,7 +409,8 @@ fn assert_outputs_match(project: &ProjectPath, case_name: &str, opts: OutputOpts
     let entries = StatusEntries {
         non_submod: &non_submod,
         submodules: &submodules,
-        deleted_submodules: &deleted,
+        deleted_submodules: &changes.deleted,
+        renamed_submodules: &changes.renamed,
     };
     let porcelain_opts = PorcelainOpts {
         null_terminate: opts.null_terminate,

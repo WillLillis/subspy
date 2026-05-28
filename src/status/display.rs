@@ -108,11 +108,12 @@ const fn has_status_info(st: StatusSummary) -> bool {
 }
 
 /// Prints the "Changes to be committed:" section for staged files, submodules,
-/// and deleted submodule paths. Returns `true` if anything was printed.
+/// renames, and deleted submodule paths. Returns `true` if anything was printed.
 fn print_staged_changes(
     non_submod: &Statuses<'_>,
     submodule_statuses: &[(String, StatusSummary)],
     deleted_submodule_paths: &[String],
+    renamed_submodules: &[super::SubmoduleRename],
     rel: &Relativizer<'_>,
     is_unborn: bool,
     stdout: &mut impl Write,
@@ -176,6 +177,20 @@ fn print_staged_changes(
         paint_into(stdout, GREEN, |out| {
             write!(out, "\tdeleted:    ")?;
             rel.write_to(out, path)
+        })?;
+        writeln!(stdout)?;
+    }
+
+    for rename in renamed_submodules {
+        if !header {
+            writeln!(stdout, "{staged_header}")?;
+            header = true;
+        }
+        paint_into(stdout, GREEN, |out| {
+            write!(out, "\trenamed:    ")?;
+            rel.write_to(out, &rename.old)?;
+            out.write_all(b" -> ")?;
+            rel.write_to(out, &rename.new)
         })?;
         writeln!(stdout)?;
     }
@@ -410,6 +425,7 @@ pub fn display_status(
         non_submod,
         submodules,
         deleted_submodules,
+        renamed_submodules,
     } = *entries;
 
     let is_unborn = repo
@@ -418,7 +434,11 @@ pub fn display_status(
         .is_some_and(|e| e.code() == git2::ErrorCode::UnbornBranch);
 
     // Fast path: nothing dirty
-    if non_submod.is_empty() && submodules.is_empty() && deleted_submodules.is_empty() {
+    if non_submod.is_empty()
+        && submodules.is_empty()
+        && deleted_submodules.is_empty()
+        && renamed_submodules.is_empty()
+    {
         print_header(repo, out, ahead_behind)?;
         if is_unborn {
             writeln!(
@@ -444,6 +464,7 @@ pub fn display_status(
         non_submod,
         submodules,
         deleted_submodules,
+        renamed_submodules,
         rel,
         is_unborn,
         out,

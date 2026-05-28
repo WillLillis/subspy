@@ -113,6 +113,17 @@ pub fn display_porcelain_v2(
         write_deleted_submodule(path, h_head, out, &render_opts)?;
     }
 
+    for rename in entries.renamed_submodules {
+        let h_head = head_tree
+            .as_ref()
+            .and_then(|t| t.get_path(Path::new(&rename.old)).ok())
+            .map_or(git2::Oid::ZERO_SHA1, |e| e.id());
+        let h_index = index
+            .get_path(Path::new(&rename.new), 0)
+            .map_or(git2::Oid::ZERO_SHA1, |e| e.id);
+        write_renamed_submodule(rename, h_head, h_index, out, &render_opts)?;
+    }
+
     for entry in entries
         .non_submod
         .iter()
@@ -538,6 +549,42 @@ fn write_deleted_submodule(
     render_opts.rel.write_quoted(
         out,
         path,
+        render_opts.null_terminate,
+        render_opts.quote_mode,
+    )?;
+    out.write_all(line_terminator(render_opts.null_terminate).as_bytes())
+}
+
+/// Writes a submodule rename as a porcelain v2 `2 R. S<C><M><U>` line:
+/// gitlink mode at all three positions, same OID at head/index (it's a
+/// pure rename), score 100, then `<new>\t<old>` (or NUL-separated with
+/// `-z`).
+fn write_renamed_submodule(
+    rename: &super::SubmoduleRename,
+    h_head: git2::Oid,
+    h_index: git2::Oid,
+    out: &mut impl Write,
+    render_opts: &RenderOpts<'_>,
+) -> Result<(), io::Error> {
+    let gitlink = 0o160_000_u32;
+    write!(
+        out,
+        "2 R. S... {gitlink:06o} {gitlink:06o} {gitlink:06o} {h_head} {h_index} R100 ",
+    )?;
+    render_opts.rel.write_quoted(
+        out,
+        &rename.new,
+        render_opts.null_terminate,
+        render_opts.quote_mode,
+    )?;
+    out.write_all(if render_opts.null_terminate {
+        b"\0"
+    } else {
+        b"\t"
+    })?;
+    render_opts.rel.write_quoted(
+        out,
+        &rename.old,
         render_opts.null_terminate,
         render_opts.quote_mode,
     )?;

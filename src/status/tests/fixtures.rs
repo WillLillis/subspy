@@ -253,6 +253,14 @@ pub fn setup_submodule_new_commits(h: &TestHarness) {
         .commit("submodule advances");
 }
 
+pub fn setup_submodule_renamed(h: &TestHarness) {
+    // `git mv old new` on a submodule updates .gitmodules in place and
+    // moves the gitlink in the index. HEAD still has the gitlink at the
+    // old path, so subspy's submodule_changes should classify this as a
+    // rename (same OID, different path) rather than a deletion.
+    h.root().run_git(&["mv", "sub", "renamed_sub"]);
+}
+
 // -- Upstream-tracking setups --
 //
 // We fake an upstream without a real remote: `update-ref` positions
