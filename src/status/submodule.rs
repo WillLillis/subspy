@@ -48,10 +48,10 @@ pub fn submodule_changes(repo: &Repository) -> StatusResult<SubmoduleChanges> {
     };
     let index = repo.index()?;
 
-    // Collect HEAD gitlinks that are no longer at the same path in the
-    // index. Submodules still at the same path show up in normal status
-    // output via the watch server and aren't our concern here.
-    let mut missing: Vec<(String, git2::Oid)> = Vec::new();
+    // Collect every HEAD gitlink so we can later distinguish "this
+    // index entry is a fresh path" (rename candidate) from "this index
+    // entry is just HEAD's own submodule at the same path" (no rename).
+    let mut head_gitlinks: Vec<(String, git2::Oid)> = Vec::new();
     head_tree.walk(git2::TreeWalkMode::PreOrder, |root, entry| {
         if entry.filemode() == i32::from(git2::FileMode::Commit) {
             let Ok(name) = entry.name() else {
@@ -62,43 +62,56 @@ pub fn submodule_changes(repo: &Repository) -> StatusResult<SubmoduleChanges> {
             } else {
                 format!("{root}{name}")
             };
-            if index.get_path(Path::new(&path), 0).is_none() {
-                missing.push((path, entry.id()));
-            }
+            head_gitlinks.push((path, entry.id()));
             git2::TreeWalkResult::Skip
         } else {
             git2::TreeWalkResult::Ok
         }
     })?;
 
+    // Subset of `head_gitlinks` whose path no longer exists in the
+    // index (`git rm` or `git mv` on a submodule).
+    let mut missing: Vec<(String, git2::Oid)> = head_gitlinks
+        .iter()
+        .filter(|(path, _)| index.get_path(Path::new(path), 0).is_none())
+        .cloned()
+        .collect();
+
     if missing.is_empty() {
         return Ok(SubmoduleChanges::default());
     }
 
-    // Walk the index once for gitlinks. Whenever an OID matches one of
-    // the missing-from-HEAD entries we drain that entry from the list:
-    // a different path means a rename, same path means it actually IS
-    // in the index (shouldn't happen given the `get_path` check above,
-    // but harmless if it does). Anything left in `missing` afterwards
-    // is genuinely deleted. Linear scan over `missing` per index entry
-    // is cheap because `missing` is typically 0-2 entries.
+    // Walk the index once for gitlinks. An index entry counts as the
+    // new side of a rename when:
+    //   - its path is NOT in HEAD (otherwise it's an existing submodule
+    //     that just happens to share an OID with the missing one), and
+    //   - its OID matches one of the missing entries.
+    // Anything left in `missing` after the walk is genuinely deleted.
+    // Linear scans here stay cheap because `missing` is typically 0-2
+    // entries and submodule counts top out in the low thousands even
+    // for chromium-scale repos.
     let mut changes = SubmoduleChanges::default();
     let gitlink_mode = u32::from(git2::FileMode::Commit);
     for entry in index.iter() {
         if entry.mode != gitlink_mode {
             continue;
         }
+        let new_path_bytes: &[u8] = &entry.path;
+        let in_head = head_gitlinks
+            .iter()
+            .any(|(p, _)| p.as_bytes() == new_path_bytes);
+        if in_head {
+            continue;
+        }
         let Some(pos) = missing.iter().position(|(_, oid)| *oid == entry.id) else {
             continue;
         };
         let (old_path, _) = missing.remove(pos);
-        let new_path = String::from_utf8_lossy(&entry.path).into_owned();
-        if new_path != old_path {
-            changes.renamed.push(SubmoduleRename {
-                old: old_path,
-                new: new_path,
-            });
-        }
+        let new_path = String::from_utf8_lossy(new_path_bytes).into_owned();
+        changes.renamed.push(SubmoduleRename {
+            old: old_path,
+            new: new_path,
+        });
     }
     changes.deleted = missing.into_iter().map(|(path, _)| path).collect();
 
@@ -275,5 +288,54 @@ mod tests {
         assert_eq!(statuses.len(), 1);
         assert_eq!(statuses[0].0, "my_sub");
         assert!(statuses[0].1.contains(StatusSummary::UNTRACKED_CONTENT));
+    }
+
+    /// Two submodules cloned from the same source repo share a gitlink
+    /// OID. Removing one of them must not be misclassified as a rename
+    /// onto the surviving one.
+    #[test]
+    fn submodule_changes_same_oid_deletion_not_rename() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().join("root");
+        let sub_src = tmp.path().join("sub_src");
+
+        // Seed the source repo.
+        let sub_src_str = sub_src.display().to_string();
+        git(&["-C", &tmp.path().display().to_string(), "init", "sub_src"]);
+        std::fs::write(sub_src.join("README.md"), "sub\n").unwrap();
+        git(&["-C", &sub_src_str, "add", "-A"]);
+        git(&["-C", &sub_src_str, "commit", "-m", "init sub"]);
+
+        // Root repo with two submodules both pointing at the same OID.
+        let root_str = root.display().to_string();
+        git(&["-C", &tmp.path().display().to_string(), "init", "root"]);
+        std::fs::write(root.join("file.txt"), "root\n").unwrap();
+        git(&["-C", &root_str, "add", "-A"]);
+        git(&["-C", &root_str, "commit", "-m", "init root"]);
+        for name in ["sub_a", "sub_b"] {
+            git(&[
+                "-C",
+                &root_str,
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                &sub_src_str,
+                name,
+            ]);
+        }
+        git(&["-C", &root_str, "commit", "-m", "add submodules"]);
+
+        // Stage removal of one of them.
+        git(&["-C", &root_str, "rm", "-f", "sub_b"]);
+
+        let repo = Repository::open(&root).unwrap();
+        let changes = submodule_changes(&repo).unwrap();
+        assert_eq!(changes.deleted, vec!["sub_b".to_string()]);
+        assert!(
+            changes.renamed.is_empty(),
+            "expected no renames, got {:?}",
+            changes.renamed
+        );
     }
 }
