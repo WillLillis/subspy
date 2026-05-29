@@ -420,6 +420,7 @@ pub fn display_status(
     entries: &StatusEntries<'_>,
     rel: &Relativizer<'_>,
     ahead_behind: bool,
+    show_stash: bool,
 ) -> StatusResult<()> {
     let StatusEntries {
         non_submod,
@@ -447,6 +448,9 @@ pub fn display_status(
             )?;
         } else {
             writeln!(out, "nothing to commit, working tree clean")?;
+        }
+        if show_stash {
+            print_stash_trailer(repo, out)?;
         }
         return Ok(());
     }
@@ -486,7 +490,23 @@ pub fn display_status(
 
     print_lock_file_errors(submodules, out)?;
 
+    if show_stash {
+        print_stash_trailer(repo, out)?;
+    }
+
     Ok(())
+}
+
+/// Emits git's `--show-stash` trailer line (`Your stash currently has
+/// N entry/entries`), or nothing when the repo has no stashes. Stashes
+/// are tracked via the `refs/stash` reflog; missing reflog means 0.
+fn print_stash_trailer(repo: &Repository, stdout: &mut impl Write) -> Result<(), io::Error> {
+    let count = repo.reflog("refs/stash").map_or(0, |r| r.len());
+    if count == 0 {
+        return Ok(());
+    }
+    let noun = if count == 1 { "entry" } else { "entries" };
+    writeln!(stdout, "Your stash currently has {count} {noun}")
 }
 
 #[cfg(test)]

@@ -69,6 +69,7 @@ struct StatusArgs {
     /// `--ahead-behind` / `--no-ahead-behind`. `None` = git's default (on);
     /// only affects formats that emit upstream ahead/behind info.
     ahead_behind: Option<bool>,
+    show_stash: bool,
 }
 
 /// User's explicit choice of `git status` output format. `None` in
@@ -115,6 +116,7 @@ impl From<Intercept> for Status {
             // Set by parsing `-c core.quotepath=<bool>`; defaults to true
             // (git's default).
             quote_path: value.quote_path.unwrap_or(true),
+            show_stash: value.args.show_stash,
         }
     }
 }
@@ -429,6 +431,13 @@ fn classify_status_arg(
     // --branch | -b: emit `# branch.*` headers in porcelain modes.
     if arg == "--branch" || arg == "-b" {
         out.branch = true;
+        return Ok(());
+    }
+
+    // --show-stash: append stash-count info (long: trailer line;
+    // porcelain v2 with --branch: `# stash N`).
+    if arg == "--show-stash" {
+        out.show_stash = true;
         return Ok(());
     }
 
@@ -955,6 +964,12 @@ mod tests {
         // git treats `core.quotepath=` (empty) as a false boolean.
         let got = dispatch(&os(&["-c", "core.quotepath=", "status"])).unwrap();
         assert_eq!(got.quote_path, Some(false));
+    }
+
+    #[test]
+    fn show_stash_intercepts() {
+        let got = dispatch(&os(&["status", "--show-stash"])).unwrap();
+        assert!(got.args.show_stash);
     }
 
     #[test]

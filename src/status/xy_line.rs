@@ -74,6 +74,8 @@ pub(super) fn display_xy_lines(
         ahead_behind,
         // `quote_path` already baked into `style.quote_mode`.
         quote_path: _,
+        // Short / porcelain v1 don't emit a stash line.
+        show_stash: _,
     } = opts;
 
     if branch {

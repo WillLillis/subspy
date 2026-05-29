@@ -57,6 +57,7 @@ pub fn display_porcelain_v2(
         branch,
         ahead_behind,
         quote_path,
+        show_stash,
     } = opts;
     let render_opts = RenderOpts {
         rel,
@@ -69,6 +70,13 @@ pub fn display_porcelain_v2(
 
     if branch {
         write_branch_headers(repo, out, ahead_behind)?;
+        if show_stash {
+            // Stashes are tracked via the `refs/stash` reflog: count
+            // entries to get the stash count. Missing reflog (no stashes
+            // ever made) means 0.
+            let count = repo.reflog("refs/stash").map_or(0, |r| r.len());
+            writeln!(out, "# stash {count}")?;
+        }
     }
 
     let index = repo.index()?;

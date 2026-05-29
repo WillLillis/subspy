@@ -126,6 +126,18 @@ pub fn setup_modified_high_byte_filename(root: &Path) {
     repo.write("caf\u{00e9}.txt", "modified\n");
 }
 
+pub fn setup_with_stashes(root: &Path) {
+    let repo = Repo::init(root);
+    repo.write("file.txt", "initial\n")
+        .add_all()
+        .commit("initial");
+    // Create two stashes by modifying then stashing twice.
+    repo.write("file.txt", "first\n");
+    repo.run_git(&["stash"]);
+    repo.write("file.txt", "second\n");
+    repo.run_git(&["stash"]);
+}
+
 pub fn setup_assume_unchanged_suppresses(root: &Path) {
     let repo = Repo::init(root);
     repo.write("a.txt", "a\n")

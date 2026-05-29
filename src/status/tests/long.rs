@@ -185,6 +185,7 @@ const fn default_opts() -> OutputOpts {
         branch: false,
         ahead_behind: true,
         quote_path: true,
+        show_stash: false,
     }
 }
 
@@ -197,6 +198,7 @@ fn snapshot_path(case_name: &str) -> PathBuf {
 fn run_subspy_long(project: &ProjectPath, opts: OutputOpts) -> Vec<u8> {
     crate::paint::force_disable();
     let ahead_behind = opts.ahead_behind;
+    let show_stash = opts.show_stash;
     let with_submodules = project.kind == RepoKind::WithSubmodules;
     assemble_status(
         project,
@@ -210,7 +212,7 @@ fn run_subspy_long(project: &ProjectPath, opts: OutputOpts) -> Vec<u8> {
         },
         |repo, entries, rel| {
             let mut got: Vec<u8> = Vec::new();
-            display_status(&mut got, repo, entries, rel, ahead_behind)?;
+            display_status(&mut got, repo, entries, rel, ahead_behind, show_stash)?;
             Ok(got)
         },
     )
@@ -295,6 +297,19 @@ fn long_snapshots() {
     for case in CASES {
         run_case(case, default_opts());
     }
+}
+
+#[test]
+fn long_show_stash_snapshot() {
+    let case = Case {
+        name: "show_stash_trailer",
+        setup: Setup::Plain(setup_with_stashes),
+    };
+    let opts = OutputOpts {
+        show_stash: true,
+        ..default_opts()
+    };
+    run_case(&case, opts);
 }
 
 #[test]

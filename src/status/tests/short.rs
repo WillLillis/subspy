@@ -174,6 +174,7 @@ fn opts_for(branch: bool) -> OutputOpts {
         branch,
         ahead_behind: true,
         quote_path: true,
+        show_stash: false,
     }
 }
 
@@ -190,6 +191,7 @@ fn run_subspy_short(project: &ProjectPath, opts: OutputOpts) -> Vec<u8> {
         branch: opts.branch,
         ahead_behind: opts.ahead_behind,
         quote_path: opts.quote_path,
+        show_stash: opts.show_stash,
     };
     let with_submodules = project.kind == RepoKind::WithSubmodules;
     assemble_status(

@@ -364,6 +364,7 @@ fn assert_outputs_match(project: &ProjectPath, case_name: &str, opts: OutputOpts
         branch: opts.branch,
         ahead_behind: opts.ahead_behind,
         quote_path: opts.quote_path,
+        show_stash: opts.show_stash,
     };
     let format = opts.format;
     let with_submodules = project.kind == RepoKind::WithSubmodules;
@@ -424,6 +425,7 @@ const fn opts_with(
         branch,
         ahead_behind: true,
         quote_path: true,
+        show_stash: false,
     }
 }
 
@@ -580,6 +582,7 @@ fn v1_quotepath_false() {
         branch: false,
         ahead_behind: true,
         quote_path: false,
+        show_stash: false,
     };
     for c in CASES {
         run_case(c, opts);
@@ -597,6 +600,7 @@ fn v2_quotepath_false() {
         branch: false,
         ahead_behind: true,
         quote_path: false,
+        show_stash: false,
     };
     for c in CASES {
         run_case(c, opts);
@@ -615,6 +619,7 @@ fn v1_branch_no_ahead_behind() {
         branch: true,
         ahead_behind: false,
         quote_path: true,
+        show_stash: false,
     };
     for c in CASES {
         run_case(c, opts);
@@ -633,6 +638,7 @@ fn v2_branch_no_ahead_behind() {
         branch: true,
         ahead_behind: false,
         quote_path: true,
+        show_stash: false,
     };
     for c in CASES {
         run_case(c, opts);

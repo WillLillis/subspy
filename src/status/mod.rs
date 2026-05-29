@@ -141,6 +141,10 @@ pub struct OutputOpts {
     /// `core.quotepath` (default `true`). When `false`, bytes `>= 0x80`
     /// in paths are emitted verbatim instead of as octal escapes.
     pub quote_path: bool,
+    /// `--show-stash`. Long format appends `Your stash currently has
+    /// N entr...`; porcelain v2 with `--branch` emits `# stash N`.
+    /// Short / porcelain v1 are unaffected.
+    pub show_stash: bool,
 }
 
 /// Porcelain-specific format flags (`-z`, `--branch`, `--ahead-behind`,
@@ -152,6 +156,7 @@ pub struct PorcelainOpts {
     pub branch: bool,
     pub ahead_behind: bool,
     pub quote_path: bool,
+    pub show_stash: bool,
 }
 
 /// The set of status entries to render.
@@ -286,9 +291,11 @@ pub fn status(
         branch: opts.branch,
         ahead_behind: opts.ahead_behind,
         quote_path: opts.quote_path,
+        show_stash: opts.show_stash,
     };
     let format = opts.format;
     let ahead_behind = opts.ahead_behind;
+    let show_stash = opts.show_stash;
     let ignore_submodules = opts.ignore_submodules;
     let kind = project.kind;
 
@@ -307,7 +314,7 @@ pub fn status(
         |repo, entries, rel| {
             match format {
                 OutputFormat::Long => {
-                    display::display_status(out, repo, entries, rel, ahead_behind)?;
+                    display::display_status(out, repo, entries, rel, ahead_behind, show_stash)?;
                 }
                 OutputFormat::Short => {
                     short::display_short(out, repo, entries, rel, porcelain_opts)?;

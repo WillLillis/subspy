@@ -134,6 +134,10 @@ pub struct Status {
     #[arg(long = "quote-path", default_value_t = true,
           action = clap::ArgAction::Set)]
     pub quote_path: bool,
+    /// Append stash-count info: long format gets a `Your stash currently
+    /// has N entr...` line; porcelain v2 with `--branch` gets `# stash N`.
+    #[arg(long = "show-stash")]
+    pub show_stash: bool,
 }
 
 #[derive(Args, Debug)]
@@ -414,6 +418,7 @@ impl Status {
                 branch: self.branch,
                 ahead_behind,
                 quote_path: self.quote_path,
+                show_stash: self.show_stash,
             },
             out,
         )?)
