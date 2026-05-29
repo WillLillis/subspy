@@ -321,6 +321,8 @@ where
     let mut seen_double_dash = false;
 
     for os_arg in rest.by_ref() {
+        // Non-UTF-8 bytes in an arg can't match any of our literal flag
+        // names, so signal Forward (None) and let real git handle them.
         let arg = os_arg.to_str()?;
         classify_status_arg(arg, &mut out, &mut seen_double_dash).ok()?;
     }
@@ -953,6 +955,16 @@ mod tests {
         // git treats `core.quotepath=` (empty) as a false boolean.
         let got = dispatch(&os(&["-c", "core.quotepath=", "status"])).unwrap();
         assert_eq!(got.quote_path, Some(false));
+    }
+
+    #[test]
+    fn non_utf8_arg_forwards() {
+        // Non-UTF-8 bytes can't match any literal flag, so dispatch must
+        // forward to real git rather than mis-route or panic.
+        use std::os::unix::ffi::OsStringExt as _;
+        let bad = OsString::from_vec(vec![b'-', b'-', b'p', 0xff, 0xfe, b's']);
+        let got = dispatch_iter(vec![bad, OsString::from("status")].into_iter().peekable());
+        assert_eq!(got, None);
     }
 
     #[test]
