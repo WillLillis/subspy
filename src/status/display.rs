@@ -27,6 +27,9 @@ const STAGED_HEADER_UNBORN: &str = "Changes to be committed:
 const UNTRACKED_HEADER: &str = "Untracked files:
   (use \"git add <file>...\" to include in what will be committed)";
 
+const IGNORED_HEADER: &str = "Ignored files:
+  (use \"git add -f <file>...\" to include in what will be committed)";
+
 const LOCK_FILE_ERROR_FOOTER: &str =
     "Another git/subspy process seems to be running in this repository, e.g.
 an editor opened by 'git commit'. Please make sure all processes
@@ -336,6 +339,38 @@ fn print_untracked_files(
     Ok(header)
 }
 
+/// Prints the "Ignored files:" section.
+fn print_ignored_files(
+    non_submod: &Statuses<'_>,
+    rel: &Relativizer<'_>,
+    stdout: &mut impl Write,
+) -> Result<(), io::Error> {
+    let mut header = false;
+    for entry in non_submod
+        .iter()
+        .filter(|e| e.status() == git2::Status::IGNORED)
+    {
+        let Some(file) = entry
+            .index_to_workdir()
+            .and_then(|idx| idx.old_file().path())
+        else {
+            continue;
+        };
+        if !header {
+            writeln!(stdout, "{IGNORED_HEADER}")?;
+            header = true;
+        }
+        let file_str = file.to_string_lossy();
+        stdout.write_all(b"\t")?;
+        paint_into(stdout, RED, |out| rel.write_to(out, &file_str))?;
+        writeln!(stdout)?;
+    }
+    if header {
+        writeln!(stdout)?;
+    }
+    Ok(())
+}
+
 /// What the working tree looks like, for the footer-summary decision.
 #[expect(
     clippy::struct_excessive_bools,
@@ -477,6 +512,7 @@ pub fn display_status(
     let changed_in_workdir =
         print_unstaged_changes(non_submod, submodules, rm_in_workdir, rel, out)?;
     let has_untracked = print_untracked_files(non_submod, rel, out)?;
+    print_ignored_files(non_submod, rel, out)?;
 
     print_summary(
         &SummaryState {

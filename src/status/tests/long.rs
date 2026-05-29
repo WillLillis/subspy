@@ -343,6 +343,27 @@ fn long_untracked_all_snapshot() {
 }
 
 #[test]
+fn long_ignored_snapshots() {
+    const CASES: &[Case] = &[
+        Case {
+            name: "ignored_files",
+            setup: Setup::Plain(setup_ignored),
+        },
+        Case {
+            name: "ignored_with_untracked",
+            setup: Setup::Plain(setup_ignored_with_untracked),
+        },
+    ];
+    let opts = OutputOpts {
+        ignored_files: IgnoredFiles::Traditional,
+        ..default_opts()
+    };
+    for case in CASES {
+        run_case(case, opts);
+    }
+}
+
+#[test]
 fn long_no_ahead_behind_snapshots() {
     // `--no-ahead-behind` only changes output when the upstream is
     // diverged from local; matched-OID cases short-circuit identically

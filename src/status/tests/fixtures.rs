@@ -126,6 +126,21 @@ pub fn setup_modified_high_byte_filename(root: &Path) {
     repo.write("caf\u{00e9}.txt", "modified\n");
 }
 
+pub fn setup_ignored(root: &Path) {
+    let repo = Repo::init(root);
+    repo.write(".gitignore", "ignored_dir/\nignored.log\n")
+        .add(".gitignore")
+        .commit("initial");
+    repo.mkdir("ignored_dir")
+        .write("ignored_dir/a.txt", "x\n")
+        .write("ignored.log", "log\n");
+}
+
+pub fn setup_ignored_with_untracked(root: &Path) {
+    setup_ignored(root);
+    Repo::new(root).write("untracked.txt", "x\n");
+}
+
 pub fn setup_with_stashes(root: &Path) {
     let repo = Repo::init(root);
     repo.write("file.txt", "initial\n")
