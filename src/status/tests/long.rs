@@ -30,6 +30,14 @@ const CASES: &[Case] = &[
         setup: Setup::Plain(setup_modified_workdir),
     },
     Case {
+        name: "assume_unchanged_suppresses",
+        setup: Setup::Plain(setup_assume_unchanged_suppresses),
+    },
+    Case {
+        name: "skip_worktree_suppresses",
+        setup: Setup::Plain(setup_skip_worktree_suppresses),
+    },
+    Case {
         name: "staged_modified",
         setup: Setup::Plain(setup_staged_modified),
     },
@@ -287,6 +295,36 @@ fn long_snapshots() {
     for case in CASES {
         run_case(case, default_opts());
     }
+}
+
+#[test]
+fn long_quote_path_false_snapshot() {
+    // `core.quotePath=false` writes high bytes verbatim instead of
+    // C-escaped (`café.txt` rather than `"caf\303\251.txt"`).
+    let case = Case {
+        name: "quote_path_false_high_byte",
+        setup: Setup::Plain(setup_modified_high_byte_filename),
+    };
+    let opts = OutputOpts {
+        quote_path: false,
+        ..default_opts()
+    };
+    run_case(&case, opts);
+}
+
+#[test]
+fn long_untracked_all_snapshot() {
+    // `--untracked-files=all` recurses into untracked directories
+    // (in contrast to `normal` which collapses them to one entry).
+    let case = Case {
+        name: "untracked_all_in_dir",
+        setup: Setup::Plain(setup_untracked_in_dir),
+    };
+    let opts = OutputOpts {
+        untracked_files: UntrackedFiles::All,
+        ..default_opts()
+    };
+    run_case(&case, opts);
 }
 
 #[test]

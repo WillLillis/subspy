@@ -115,6 +115,40 @@ pub fn setup_untracked_high_byte_filename(root: &Path) {
     Repo::new(root).write("caf\u{00e9}.txt", "x\n");
 }
 
+pub fn setup_modified_high_byte_filename(root: &Path) {
+    // Commit a file whose name contains a high-byte (U+00E9 -> 0xC3 0xA9),
+    // then modify it. Used to verify `core.quotePath` handling on a path
+    // that's tracked (rather than untracked).
+    let repo = Repo::init(root);
+    repo.write("caf\u{00e9}.txt", "initial\n")
+        .add_all()
+        .commit("initial");
+    repo.write("caf\u{00e9}.txt", "modified\n");
+}
+
+pub fn setup_assume_unchanged_suppresses(root: &Path) {
+    let repo = Repo::init(root);
+    repo.write("a.txt", "a\n")
+        .write("b.txt", "b\n")
+        .add_all()
+        .commit("initial");
+    repo.run_git(&["update-index", "--assume-unchanged", "a.txt"]);
+    // Modify both files; only b.txt should show up.
+    repo.write("a.txt", "modified\n")
+        .write("b.txt", "modified\n");
+}
+
+pub fn setup_skip_worktree_suppresses(root: &Path) {
+    let repo = Repo::init(root);
+    repo.write("a.txt", "a\n")
+        .write("b.txt", "b\n")
+        .add_all()
+        .commit("initial");
+    repo.run_git(&["update-index", "--skip-worktree", "a.txt"]);
+    repo.write("a.txt", "modified\n")
+        .write("b.txt", "modified\n");
+}
+
 pub fn setup_bisect(root: &Path) {
     let repo = Repo::init(root);
     repo.write("a.txt", "one\n").add_all().commit("one");
