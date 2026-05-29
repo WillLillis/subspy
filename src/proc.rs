@@ -20,33 +20,38 @@ mod windows_flags {
 
 /// Configures `cmd` to run as a fully detached background daemon.
 ///
-/// On Windows, sets `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP` so the
-/// child has no console and survives the parent / Ctrl+C in the parent
-/// shell. On other platforms this is a no-op.
-#[allow(clippy::missing_const_for_fn, reason = "non-const on Windows")]
+/// On other platforms this is a no-op (and `const`); the Windows
+/// implementation sets `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP`.
+#[cfg(not(target_os = "windows"))]
+pub const fn configure_detached_daemon(_cmd: &mut Command) {}
+
+/// Configures `cmd` to run as a fully detached background daemon.
+///
+/// Sets `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP` so the child has
+/// no console and survives the parent / Ctrl+C in the parent shell.
+#[cfg(target_os = "windows")]
 pub fn configure_detached_daemon(cmd: &mut Command) {
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt as _;
-        use windows_flags::{CREATE_NEW_PROCESS_GROUP, DETACHED_PROCESS};
-        cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
-    }
-    let _ = cmd;
+    use std::os::windows::process::CommandExt as _;
+    use windows_flags::{CREATE_NEW_PROCESS_GROUP, DETACHED_PROCESS};
+    cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
 }
 
 /// Configures `cmd` to run synchronously without popping a console window
 /// when the parent is a GUI process (e.g. `GitExtensions` launching the shim).
 ///
-/// On Windows, sets `CREATE_NO_WINDOW` so a console-subsystem child does
-/// not allocate a fresh console while still inheriting any pipes the parent
-/// set up. On other platforms this is a no-op.
-#[allow(clippy::missing_const_for_fn, reason = "non-const on Windows")]
+/// On other platforms this is a no-op (and `const`); the Windows
+/// implementation sets `CREATE_NO_WINDOW`.
+#[cfg(not(target_os = "windows"))]
+pub const fn configure_hidden_console(_cmd: &mut Command) {}
+
+/// Configures `cmd` to run synchronously without popping a console window
+/// when the parent is a GUI process (e.g. `GitExtensions` launching the shim).
+///
+/// Sets `CREATE_NO_WINDOW` so a console-subsystem child does not allocate
+/// a fresh console while still inheriting any pipes the parent set up.
+#[cfg(target_os = "windows")]
 pub fn configure_hidden_console(cmd: &mut Command) {
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt as _;
-        use windows_flags::CREATE_NO_WINDOW;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
-    let _ = cmd;
+    use std::os::windows::process::CommandExt as _;
+    use windows_flags::CREATE_NO_WINDOW;
+    cmd.creation_flags(CREATE_NO_WINDOW);
 }
