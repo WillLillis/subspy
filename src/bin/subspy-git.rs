@@ -217,10 +217,10 @@ fn consume_global(
     if let Some(rest) = arg.strip_prefix("-c") {
         if rest.is_empty() {
             let value = next.ok_or(Forward)?;
-            apply_minus_c(value, intercept);
+            apply_minus_c(value, intercept)?;
             return Ok(GlobalAction::SkipWithValue);
         }
-        apply_minus_c(rest, intercept);
+        apply_minus_c(rest, intercept)?;
         return Ok(GlobalAction::Skip);
     }
 
@@ -243,13 +243,19 @@ fn consume_global(
 /// honor at render time. Currently only `core.quotepath` is plumbed
 /// through; other config values are ignored at the shim level (they go
 /// to git unchanged when we forward).
-fn apply_minus_c(payload: &str, intercept: &mut Intercept) {
+///
+/// Returns `Err(Forward)` when a recognized boolean key has an invalid
+/// value (e.g. `core.quotepath=garbage`), so git emits its native
+/// `fatal: bad boolean config value` instead of subspy silently
+/// falling back to the default.
+fn apply_minus_c(payload: &str, intercept: &mut Intercept) -> Result<(), Forward> {
     let Some((key, value)) = payload.split_once('=') else {
-        return;
+        return Ok(());
     };
     if key.eq_ignore_ascii_case("core.quotepath") {
-        intercept.quote_path = parse_git_bool(value);
+        intercept.quote_path = Some(parse_git_bool(value).ok_or(Forward)?);
     }
+    Ok(())
 }
 
 /// Parses a git-style boolean literal (case-insensitive `true`/`false`,
@@ -940,6 +946,22 @@ mod tests {
         // We don't care about `diff.mnemonicprefix`; just consume it.
         let got = dispatch(&os(&["-c", "diff.mnemonicprefix=false", "status"])).unwrap();
         assert_eq!(got.quote_path, None);
+    }
+
+    #[test]
+    fn core_quotepath_empty_is_false() {
+        // git treats `core.quotepath=` (empty) as a false boolean.
+        let got = dispatch(&os(&["-c", "core.quotepath=", "status"])).unwrap();
+        assert_eq!(got.quote_path, Some(false));
+    }
+
+    #[test]
+    fn core_quotepath_invalid_value_forwards() {
+        // git errors on `core.quotepath=garbage`; we forward so the
+        // user sees git's native `fatal: bad boolean config value`
+        // instead of subspy silently using the default.
+        let got = dispatch(&os(&["-c", "core.quotepath=garbage", "status"]));
+        assert_eq!(got, None);
     }
 
     #[test]
