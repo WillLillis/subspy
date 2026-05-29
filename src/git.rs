@@ -1,6 +1,11 @@
 //! Lightweight git helpers that bypass expensive libgit2 machinery.
 
+use git2::{Config, Repository};
+use rustc_hash::FxHashMap;
+
 use std::path::Path;
+
+use crate::status::IgnoreSubmodules;
 
 /// Configures global libgit2 options for subspy's read-only, local-only use case.
 ///
@@ -18,6 +23,93 @@ pub fn configure_git2() {
         // filesystem and don't need to detect repository corruption.
         git2::opts::strict_hash_verification(false);
     }
+}
+
+fn parse_ignore_mode(s: &str) -> Option<IgnoreSubmodules> {
+    match s {
+        "none" => Some(IgnoreSubmodules::None),
+        "untracked" => Some(IgnoreSubmodules::Untracked),
+        "dirty" => Some(IgnoreSubmodules::Dirty),
+        "all" => Some(IgnoreSubmodules::All),
+        _ => None,
+    }
+}
+
+/// Scans `config` for `submodule.<name>.path` and `submodule.<name>.ignore`
+/// entries, accumulating into the supplied maps. Used by
+/// [`parse_per_submodule_ignore`] to combine `.gitmodules` (always read) with
+/// `.git/config` (overrides per key).
+fn scan_submodule_props(
+    config: &Config,
+    name_to_path: &mut FxHashMap<String, String>,
+    name_to_ignore: &mut FxHashMap<String, IgnoreSubmodules>,
+) {
+    let Ok(mut iter) = config.entries(Some("submodule\\..*\\.(path|ignore)")) else {
+        return;
+    };
+    while let Some(Ok(entry)) = iter.next() {
+        let Ok(key) = entry.name() else { continue };
+        let Some(rest) = key.strip_prefix("submodule.") else {
+            continue;
+        };
+        if let Some(name) = rest.strip_suffix(".path") {
+            if let Ok(val) = entry.value() {
+                name_to_path.insert(name.to_string(), val.to_string());
+            }
+        } else if let Some(name) = rest.strip_suffix(".ignore")
+            && let Some(mode) = entry.value().ok().and_then(parse_ignore_mode)
+        {
+            name_to_ignore.insert(name.to_string(), mode);
+        }
+    }
+}
+
+/// Cheap byte-scan: returns `true` if `path` is readable and contains the
+/// sub-slice `ignore`. Most repos never set per-submodule ignore, so a
+/// negative answer here lets [`parse_per_submodule_ignore`] short-circuit
+/// without paying the cost of opening a git config.
+fn file_mentions_ignore(path: &Path) -> bool {
+    let Ok(bytes) = std::fs::read(path) else {
+        return false;
+    };
+    memchr::memmem::find(&bytes, b"ignore").is_some()
+}
+
+/// Returns per-submodule `ignore` settings keyed by submodule path.
+///
+/// Merges `.gitmodules` (read first) with `.git/config` (read second so it
+/// overrides per key). Submodules with no explicit `ignore` entry are
+/// absent from the result.
+///
+/// Fast path: if neither config file even mentions the substring `ignore`,
+/// returns an empty map without opening either as a git config (full parse
+/// costs hundreds of microseconds on submodule-heavy repos).
+#[must_use]
+pub fn parse_per_submodule_ignore(
+    repo: &Repository,
+    root_path: &Path,
+) -> FxHashMap<String, IgnoreSubmodules> {
+    let gitmodules_path = root_path.join(".gitmodules");
+    let repo_config_path = repo.path().join("config");
+    if !file_mentions_ignore(&gitmodules_path) && !file_mentions_ignore(&repo_config_path) {
+        return FxHashMap::default();
+    }
+
+    let mut name_to_path: FxHashMap<String, String> = FxHashMap::default();
+    let mut name_to_ignore: FxHashMap<String, IgnoreSubmodules> = FxHashMap::default();
+
+    if let Ok(gm) = Config::open(&gitmodules_path) {
+        scan_submodule_props(&gm, &mut name_to_path, &mut name_to_ignore);
+    }
+    if let Ok(repo_cfg) = repo.config() {
+        // Only the ignore side: `.git/config` doesn't redefine paths.
+        scan_submodule_props(&repo_cfg, &mut FxHashMap::default(), &mut name_to_ignore);
+    }
+
+    name_to_ignore
+        .into_iter()
+        .filter_map(|(name, mode)| name_to_path.get(&name).map(|p| (p.clone(), mode)))
+        .collect()
 }
 
 /// Parses `.gitmodules` to extract submodule name, path, and branch without
@@ -179,5 +271,58 @@ mod tests {
                 .iter()
                 .any(|(n, p, _)| n == "math" && p == "libs/math")
         );
+    }
+
+    #[test]
+    fn per_submodule_ignore_fast_path_returns_empty() {
+        // No "ignore" string anywhere -> short-circuit, empty map.
+        let tmp = TempDir::new().unwrap();
+        write_gitmodules(
+            tmp.path(),
+            "[submodule \"sub\"]\n\tpath = sub\n\turl = u\n",
+        );
+        let repo = git2::Repository::init(tmp.path()).unwrap();
+        let map = parse_per_submodule_ignore(&repo, tmp.path());
+        assert!(map.is_empty());
+    }
+
+    #[test]
+    fn per_submodule_ignore_from_gitmodules() {
+        let tmp = TempDir::new().unwrap();
+        write_gitmodules(
+            tmp.path(),
+            "[submodule \"vendor/foo\"]\n\
+             \tpath = vendor/foo\n\
+             \turl = u\n\
+             \tignore = dirty\n\
+             [submodule \"vendor/bar\"]\n\
+             \tpath = vendor/bar\n\
+             \turl = u\n",
+        );
+        let repo = git2::Repository::init(tmp.path()).unwrap();
+        let map = parse_per_submodule_ignore(&repo, tmp.path());
+        assert_eq!(map.len(), 1);
+        assert_eq!(map.get("vendor/foo"), Some(&IgnoreSubmodules::Dirty));
+        assert_eq!(map.get("vendor/bar"), None);
+    }
+
+    #[test]
+    fn per_submodule_ignore_repo_config_overrides_gitmodules() {
+        let tmp = TempDir::new().unwrap();
+        write_gitmodules(
+            tmp.path(),
+            "[submodule \"vendor/foo\"]\n\
+             \tpath = vendor/foo\n\
+             \turl = u\n\
+             \tignore = dirty\n",
+        );
+        let repo = git2::Repository::init(tmp.path()).unwrap();
+        // Override in .git/config to `untracked`.
+        repo.config()
+            .unwrap()
+            .set_str("submodule.vendor/foo.ignore", "untracked")
+            .unwrap();
+        let map = parse_per_submodule_ignore(&repo, tmp.path());
+        assert_eq!(map.get("vendor/foo"), Some(&IgnoreSubmodules::Untracked));
     }
 }

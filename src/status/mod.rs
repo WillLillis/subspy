@@ -243,7 +243,19 @@ pub fn assemble_status<R>(
     };
 
     let raw_submods = submodule_statuses(&repo)?;
-    let mut submods = submodule::apply_ignore_submodules(raw_submods, opts.ignore_submodules);
+    // Per-submodule `submodule.<name>.ignore` only matters when the global
+    // flag is unset (or `--ignore-submodules=none`). Any other global value
+    // overrides everything, so skip the config scan.
+    let per_submodule_ignore = if opts.ignore_submodules == IgnoreSubmodules::None {
+        crate::git::parse_per_submodule_ignore(&repo, &project.repo_root)
+    } else {
+        rustc_hash::FxHashMap::default()
+    };
+    let mut submods = submodule::apply_ignore_submodules(
+        raw_submods,
+        opts.ignore_submodules,
+        &per_submodule_ignore,
+    );
     submodule::filter_rename_new_paths(&mut submods, &submod_changes.renamed);
 
     // Path-formatting policy by output mode:

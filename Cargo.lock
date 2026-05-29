@@ -1021,6 +1021,7 @@ dependencies = [
  "indicatif",
  "interprocess",
  "log",
+ "memchr",
  "notify",
  "pretty_assertions",
  "rayon",

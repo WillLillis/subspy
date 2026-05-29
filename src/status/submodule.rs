@@ -136,23 +136,48 @@ pub fn filter_rename_new_paths(
     statuses.retain(|(path, _)| !renames.iter().any(|r| r.new == *path));
 }
 
-/// Masks submodule statuses according to `--ignore-submodules` mode.
-pub fn apply_ignore_submodules(
-    statuses: Vec<(String, StatusSummary)>,
-    mode: IgnoreSubmodules,
-) -> Vec<(String, StatusSummary)> {
-    let mask = match mode {
-        IgnoreSubmodules::None => return statuses,
-        IgnoreSubmodules::All => return Vec::new(),
+/// Returns the bit-mask to AND each status against to honor `mode`. `None`
+/// is unmasked; `All` returns `clean()` so any subsequent test filters out
+/// the entry entirely.
+fn mode_mask(mode: IgnoreSubmodules) -> StatusSummary {
+    match mode {
+        IgnoreSubmodules::None => StatusSummary::all(),
+        IgnoreSubmodules::All => StatusSummary::clean(),
         IgnoreSubmodules::Untracked => !StatusSummary::UNTRACKED_CONTENT,
         IgnoreSubmodules::Dirty => {
             !(StatusSummary::UNTRACKED_CONTENT | StatusSummary::MODIFIED_CONTENT)
         }
-    };
+    }
+}
+
+/// Masks submodule statuses according to `--ignore-submodules` mode plus any
+/// per-submodule `submodule.<name>.ignore` config. The global mode takes
+/// priority: only when it's `None` do we consult `per_submodule`.
+pub fn apply_ignore_submodules(
+    statuses: Vec<(String, StatusSummary)>,
+    mode: IgnoreSubmodules,
+    per_submodule: &rustc_hash::FxHashMap<String, IgnoreSubmodules>,
+) -> Vec<(String, StatusSummary)> {
+    if mode == IgnoreSubmodules::All {
+        return Vec::new();
+    }
+    if mode == IgnoreSubmodules::None && per_submodule.is_empty() {
+        return statuses;
+    }
     statuses
         .into_iter()
-        .map(|(path, st)| (path, st & mask))
-        .filter(|(_, st)| !st.is_empty())
+        .filter_map(|(path, st)| {
+            let effective = if mode == IgnoreSubmodules::None {
+                per_submodule
+                    .get(&path)
+                    .copied()
+                    .unwrap_or(IgnoreSubmodules::None)
+            } else {
+                mode
+            };
+            let masked = st & mode_mask(effective);
+            (!masked.is_empty()).then_some((path, masked))
+        })
         .collect()
 }
 
