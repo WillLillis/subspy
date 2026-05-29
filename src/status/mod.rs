@@ -11,6 +11,8 @@
 //! - [`header`]: branch/upstream/operation-state header rendering (long format)
 //! - [`conflict`]: shared conflict-index parsing
 //! - [`submodule`]: submodule status computation and filtering
+//! - [`relativize`]: cwd-relative path rewriting at write time
+//! - [`quote`]: C-style path quoting (the `core.quotePath` semantics)
 
 mod conflict;
 mod display;
