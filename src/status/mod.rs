@@ -43,9 +43,7 @@ use crate::{
 };
 
 pub use relativize::Relativizer;
-pub use submodule::{
-    SubmoduleChanges, SubmoduleRename, compute_local_statuses, submodule_changes,
-};
+pub use submodule::{SubmoduleChanges, SubmoduleRename, compute_local_statuses, submodule_changes};
 
 pub type StatusResult<T> = Result<T, StatusError>;
 
@@ -105,6 +103,25 @@ pub enum UntrackedFiles {
     All,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Default)]
+pub enum IgnoredFiles {
+    /// Don't show ignored entries (git's default when `--ignored` is absent).
+    #[default]
+    #[value(name = "no")]
+    No,
+    /// Show ignored files and directory names (git's default for bare
+    /// `--ignored` or `--ignored=traditional`).
+    #[value(name = "traditional")]
+    Traditional,
+    // git's `--ignored=matching` mode is intentionally absent: it shows
+    // paths that directly match an ignore pattern, while libgit2's
+    // `recurse_ignored_dirs(true)` enumerates contents of ignored
+    // directories regardless of pattern. The two diverge on common
+    // cases (e.g. a `dir/` gitignore line), so the shim forwards
+    // `--ignored=matching` to real git, and the subspy CLI rejects it
+    // rather than producing approximate output.
+}
+
 /// Output format and filtering options passed through from git-status-compatible flags.
 #[derive(Debug, Clone, Copy)]
 #[expect(clippy::struct_excessive_bools, reason = "matches git")]
@@ -113,7 +130,7 @@ pub struct OutputOpts {
     pub null_terminate: bool,
     pub ignore_submodules: IgnoreSubmodules,
     pub untracked_files: UntrackedFiles,
-    pub show_ignored: bool,
+    pub ignored_files: IgnoredFiles,
     pub branch: bool,
     /// Compute and display detailed upstream ahead/behind counts. When
     /// false, long format reports only divergence (no specific counts)
@@ -147,25 +164,36 @@ pub struct StatusEntries<'a> {
 /// in one place so the two stay in sync.
 #[must_use]
 pub fn build_status_options(opts: OutputOpts, repo_kind: RepoKind) -> git2::StatusOptions {
-    let mut so = git2::StatusOptions::new();
+    let mut st_opts = git2::StatusOptions::new();
     match opts.untracked_files {
         UntrackedFiles::Normal => {
-            so.include_untracked(true).recurse_untracked_dirs(false);
+            st_opts
+                .include_untracked(true)
+                .recurse_untracked_dirs(false);
         }
         UntrackedFiles::All => {
-            so.include_untracked(true).recurse_untracked_dirs(true);
+            st_opts.include_untracked(true).recurse_untracked_dirs(true);
         }
         UntrackedFiles::No => {
-            so.include_untracked(false);
+            st_opts.include_untracked(false);
+        }
+    }
+    match opts.ignored_files {
+        IgnoredFiles::No => {
+            st_opts.include_ignored(false);
+        }
+        IgnoredFiles::Traditional => {
+            st_opts.include_ignored(true).recurse_ignored_dirs(false);
         }
     }
     // The repo was just opened, so the index is already fresh from disk.
     // Skip the redundant stat-cache refresh pass.
-    so.include_ignored(opts.show_ignored).no_refresh(true);
+    st_opts.no_refresh(true);
 
     // Match git's default `diff.renames=true` so renames render as
     // `R old -> new` rather than separate `D old`/`A new` entries.
-    so.renames_head_to_index(true)
+    st_opts
+        .renames_head_to_index(true)
         .renames_index_to_workdir(true)
         .renames_from_rewrites(true);
 
@@ -173,9 +201,9 @@ pub fn build_status_options(opts: OutputOpts, repo_kind: RepoKind) -> git2::Stat
     // submodule statuses are provided by the watch server or computed
     // locally outside `repo.statuses`.
     if repo_kind == RepoKind::WithSubmodules {
-        so.exclude_submodules(true);
+        st_opts.exclude_submodules(true);
     }
-    so
+    st_opts
 }
 
 /// Opens the repository, runs the shared status-assembly pipeline, and
@@ -337,5 +365,9 @@ fn unborn_branch_name<'a>(head: &'a git2::Reference<'_>) -> Option<&'a str> {
 fn configured_upstream_short_name(repo: &Repository, local_ref_name: &str) -> Option<String> {
     let buf = repo.branch_upstream_name(local_ref_name).ok()?;
     let full = buf.as_str().ok()?;
-    Some(full.strip_prefix("refs/remotes/").unwrap_or(full).to_string())
+    Some(
+        full.strip_prefix("refs/remotes/")
+            .unwrap_or(full)
+            .to_string(),
+    )
 }

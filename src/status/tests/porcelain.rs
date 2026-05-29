@@ -15,8 +15,8 @@ use crate::{
     RepoKind,
     cli::ProjectPath,
     status::{
-        IgnoreSubmodules, OutputFormat, OutputOpts, PorcelainOpts, PorcelainVersion,
-        UntrackedFiles, assemble_status, compute_local_statuses,
+        IgnoreSubmodules, IgnoredFiles, OutputFormat, OutputOpts, PorcelainOpts,
+        PorcelainVersion, UntrackedFiles, assemble_status, compute_local_statuses,
         porcelain_v1::display_porcelain_v1, porcelain_v2::display_porcelain_v2,
     },
 };
@@ -294,8 +294,9 @@ fn git_status_args(opts: OutputOpts) -> Vec<String> {
         UntrackedFiles::All => a.push("--untracked-files=all".into()),
         UntrackedFiles::No => a.push("--untracked-files=no".into()),
     }
-    if opts.show_ignored {
-        a.push("--ignored".into());
+    match opts.ignored_files {
+        IgnoredFiles::No => {} // git's default
+        IgnoredFiles::Traditional => a.push("--ignored=traditional".into()),
     }
     match opts.ignore_submodules {
         IgnoreSubmodules::None => {} // default: show submodule changes (same in subspy and git)
@@ -412,14 +413,14 @@ const fn opts_with(
     null_terminate: bool,
     branch: bool,
     untracked_files: UntrackedFiles,
-    show_ignored: bool,
+    ignored_files: IgnoredFiles,
 ) -> OutputOpts {
     OutputOpts {
         format: OutputFormat::Porcelain(version),
         null_terminate,
         ignore_submodules: IgnoreSubmodules::None,
         untracked_files,
-        show_ignored,
+        ignored_files,
         branch,
         ahead_behind: true,
         quote_path: true,
@@ -433,7 +434,7 @@ fn v1_default() {
         false,
         false,
         UntrackedFiles::Normal,
-        false,
+        IgnoredFiles::No,
     );
     for c in CASES {
         run_case(c, opts);
@@ -447,7 +448,7 @@ fn v1_z() {
         true,
         false,
         UntrackedFiles::Normal,
-        false,
+        IgnoredFiles::No,
     );
     for c in CASES {
         run_case(c, opts);
@@ -461,7 +462,7 @@ fn v1_branch() {
         false,
         true,
         UntrackedFiles::Normal,
-        false,
+        IgnoredFiles::No,
     );
     for c in CASES {
         run_case(c, opts);
@@ -475,7 +476,7 @@ fn v2_default() {
         false,
         false,
         UntrackedFiles::Normal,
-        false,
+        IgnoredFiles::No,
     );
     for c in CASES {
         run_case(c, opts);
@@ -489,7 +490,7 @@ fn v2_z() {
         true,
         false,
         UntrackedFiles::Normal,
-        false,
+        IgnoredFiles::No,
     );
     for c in CASES {
         run_case(c, opts);
@@ -503,7 +504,7 @@ fn v2_branch() {
         false,
         true,
         UntrackedFiles::Normal,
-        false,
+        IgnoredFiles::No,
     );
     for c in CASES {
         run_case(c, opts);
@@ -517,7 +518,7 @@ fn v1_untracked_all() {
         false,
         false,
         UntrackedFiles::All,
-        false,
+        IgnoredFiles::No,
     );
     for c in CASES {
         run_case(c, opts);
@@ -531,7 +532,7 @@ fn v2_untracked_all() {
         false,
         false,
         UntrackedFiles::All,
-        false,
+        IgnoredFiles::No,
     );
     for c in CASES {
         run_case(c, opts);
@@ -545,7 +546,7 @@ fn v1_ignored() {
         false,
         false,
         UntrackedFiles::Normal,
-        true,
+        IgnoredFiles::Traditional,
     );
     for c in CASES {
         run_case(c, opts);
@@ -559,7 +560,7 @@ fn v2_ignored() {
         false,
         false,
         UntrackedFiles::Normal,
-        true,
+        IgnoredFiles::Traditional,
     );
     for c in CASES {
         run_case(c, opts);
@@ -575,7 +576,7 @@ fn v1_quotepath_false() {
         null_terminate: false,
         ignore_submodules: IgnoreSubmodules::None,
         untracked_files: UntrackedFiles::Normal,
-        show_ignored: false,
+        ignored_files: IgnoredFiles::No,
         branch: false,
         ahead_behind: true,
         quote_path: false,
@@ -592,7 +593,7 @@ fn v2_quotepath_false() {
         null_terminate: false,
         ignore_submodules: IgnoreSubmodules::None,
         untracked_files: UntrackedFiles::Normal,
-        show_ignored: false,
+        ignored_files: IgnoredFiles::No,
         branch: false,
         ahead_behind: true,
         quote_path: false,
@@ -610,7 +611,7 @@ fn v1_branch_no_ahead_behind() {
         null_terminate: false,
         ignore_submodules: IgnoreSubmodules::None,
         untracked_files: UntrackedFiles::Normal,
-        show_ignored: false,
+        ignored_files: IgnoredFiles::No,
         branch: true,
         ahead_behind: false,
         quote_path: true,
@@ -628,7 +629,7 @@ fn v2_branch_no_ahead_behind() {
         null_terminate: false,
         ignore_submodules: IgnoreSubmodules::None,
         untracked_files: UntrackedFiles::Normal,
-        show_ignored: false,
+        ignored_files: IgnoredFiles::No,
         branch: true,
         ahead_behind: false,
         quote_path: true,
@@ -695,7 +696,7 @@ fn v1_from_subdir() {
         false,
         false,
         UntrackedFiles::Normal,
-        false,
+        IgnoredFiles::No,
     );
     assert_outputs_match(&project, "v1 from subdir", opts);
 }
@@ -710,7 +711,7 @@ fn v1_z_from_subdir() {
         true,
         false,
         UntrackedFiles::Normal,
-        false,
+        IgnoredFiles::No,
     );
     assert_outputs_match(&project, "v1 -z from subdir", opts);
 }
@@ -725,7 +726,7 @@ fn v2_from_subdir() {
         false,
         false,
         UntrackedFiles::Normal,
-        false,
+        IgnoredFiles::No,
     );
     assert_outputs_match(&project, "v2 from subdir", opts);
 }
@@ -740,7 +741,7 @@ fn v2_z_from_subdir() {
         true,
         false,
         UntrackedFiles::Normal,
-        false,
+        IgnoredFiles::No,
     );
     assert_outputs_match(&project, "v2 -z from subdir", opts);
 }

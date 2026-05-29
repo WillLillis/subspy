@@ -13,8 +13,8 @@ use crate::{
     RepoKind,
     cli::ProjectPath,
     status::{
-        IgnoreSubmodules, OutputFormat, OutputOpts, UntrackedFiles, assemble_status,
-        compute_local_statuses, display::display_status,
+        IgnoreSubmodules, IgnoredFiles, OutputFormat, OutputOpts, UntrackedFiles,
+        assemble_status, compute_local_statuses, display::display_status,
     },
 };
 
@@ -173,7 +173,7 @@ const fn default_opts() -> OutputOpts {
         null_terminate: false,
         ignore_submodules: IgnoreSubmodules::None,
         untracked_files: UntrackedFiles::Normal,
-        show_ignored: false,
+        ignored_files: IgnoredFiles::No,
         branch: false,
         ahead_behind: true,
         quote_path: true,

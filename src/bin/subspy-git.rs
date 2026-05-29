@@ -17,7 +17,7 @@ use std::{
 use subspy::{
     cli::Status,
     entry::{INTERNAL_FLAG, subspy_entry},
-    status::{IgnoreSubmodules, PorcelainVersion, UntrackedFiles},
+    status::{IgnoreSubmodules, IgnoredFiles, PorcelainVersion, UntrackedFiles},
 };
 
 fn main() -> ExitCode {
@@ -62,7 +62,9 @@ struct StatusArgs {
     null_terminate: bool,
     ignore_submodules: IgnoreSubmodules,
     untracked_files: Option<UntrackedFiles>,
-    show_ignored: bool,
+    /// `None` when the flag is absent (git's default: don't show ignored),
+    /// `Some(mode)` when the user passed `--ignored[=<mode>]`.
+    ignored_files: Option<IgnoredFiles>,
     branch: bool,
     /// `--ahead-behind` / `--no-ahead-behind`. `None` = git's default (on);
     /// only affects formats that emit upstream ahead/behind info.
@@ -106,7 +108,7 @@ impl From<Intercept> for Status {
             null_terminate: value.args.null_terminate,
             ignore_submodules: value.args.ignore_submodules,
             untracked_files: value.args.untracked_files,
-            ignored: value.args.show_ignored,
+            ignored: value.args.ignored_files,
             branch: value.args.branch,
             ahead_behind,
             no_ahead_behind,
@@ -403,9 +405,16 @@ fn classify_status_arg(
         return Ok(());
     }
 
-    // --ignored (no =MODE form supported; subspy doesn't expose ignored modes)
+    // `--ignored` (bare) is git's `--ignored=traditional` shorthand.
+    // `--ignored=<mode>` for `traditional` / `matching` / `no` parses
+    // the value through `parse_ignored`; an unrecognized mode falls
+    // through to forwarding so git's native error is emitted.
     if arg == "--ignored" {
-        out.show_ignored = true;
+        out.ignored_files = Some(IgnoredFiles::Traditional);
+        return Ok(());
+    }
+    if let Some(v) = arg.strip_prefix("--ignored=") {
+        out.ignored_files = Some(parse_ignored(v).ok_or(Forward)?);
         return Ok(());
     }
 
@@ -460,6 +469,20 @@ fn parse_untracked(s: &str) -> Option<UntrackedFiles> {
         "normal" => Some(UntrackedFiles::Normal),
         "no" => Some(UntrackedFiles::No),
         "all" => Some(UntrackedFiles::All),
+        _ => None,
+    }
+}
+
+fn parse_ignored(s: &str) -> Option<IgnoredFiles> {
+    match s {
+        "traditional" => Some(IgnoredFiles::Traditional),
+        "no" => Some(IgnoredFiles::No),
+        // `matching` is intentionally not intercepted: git shows paths
+        // that *directly match* an ignore pattern, while libgit2's
+        // `recurse_ignored_dirs(true)` enumerates the contents of any
+        // ignored directory regardless of pattern. The two diverge on
+        // common cases (e.g. a `dir/` gitignore line) -- forward to
+        // real git so its semantics apply.
         _ => None,
     }
 }
@@ -678,9 +701,29 @@ mod tests {
     }
 
     #[test]
-    fn status_ignored_flag() {
+    fn status_ignored_bare_is_traditional() {
         let got = dispatch(&os(&["status", "--ignored"])).unwrap();
-        assert!(got.args.show_ignored);
+        assert_eq!(got.args.ignored_files, Some(IgnoredFiles::Traditional));
+    }
+
+    #[test]
+    fn status_ignored_matching_forwards() {
+        // `matching` has different semantics in git vs libgit2; we
+        // forward so git's behavior wins.
+        let got = dispatch(&os(&["status", "--ignored=matching"]));
+        assert_eq!(got, None);
+    }
+
+    #[test]
+    fn status_ignored_no() {
+        let got = dispatch(&os(&["status", "--ignored=no"])).unwrap();
+        assert_eq!(got.args.ignored_files, Some(IgnoredFiles::No));
+    }
+
+    #[test]
+    fn status_ignored_unknown_mode_forwards() {
+        let got = dispatch(&os(&["status", "--ignored=bogus"]));
+        assert_eq!(got, None);
     }
 
     #[test]

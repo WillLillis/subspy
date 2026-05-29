@@ -15,8 +15,8 @@ use crate::{
     reindex::{ReindexError, reindex},
     shutdown::{ShutdownError, shutdown},
     status::{
-        IgnoreSubmodules, OutputFormat, OutputOpts, PorcelainVersion, StatusError, UntrackedFiles,
-        status,
+        IgnoreSubmodules, IgnoredFiles, OutputFormat, OutputOpts, PorcelainVersion, StatusError,
+        UntrackedFiles, status,
     },
     watch::{WatchError, spawn_daemon},
 };
@@ -109,9 +109,14 @@ pub struct Status {
         num_args = 0..=1
     )]
     pub untracked_files: Option<UntrackedFiles>,
-    /// Show ignored files in the output
-    #[arg(long)]
-    pub ignored: bool,
+    /// Show ignored files. Bare `--ignored` is `--ignored=traditional`.
+    #[arg(
+        long = "ignored",
+        value_name = "MODE",
+        default_missing_value = "traditional",
+        num_args = 0..=1
+    )]
+    pub ignored: Option<IgnoredFiles>,
     /// Show branch and tracking info (short / porcelain modes;
     /// long format always shows branch info)
     #[arg(short = 'b', long)]
@@ -405,7 +410,7 @@ impl Status {
                 null_terminate: self.null_terminate,
                 ignore_submodules: self.ignore_submodules,
                 untracked_files: self.untracked_files.unwrap_or_default(),
-                show_ignored: self.ignored,
+                ignored_files: self.ignored.unwrap_or_default(),
                 branch: self.branch,
                 ahead_behind,
                 quote_path: self.quote_path,
