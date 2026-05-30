@@ -21,7 +21,24 @@ file, and all submodule directories. The status for all submodules is cached by 
 any time a change is detected in one of these locations. For sufficiently many submodules, `subspy status` is typically
 100-1000x faster than `git status` on Windows and 67-360x faster on Linux, with the gap widening as working tree churn increases.
 
+### Installation
+
+Installing subspy requires the [Rust toolchain](https://rust-lang.org/tools/install/).
+Note that the project's current Minimum Supported Rust Version (MSRV) is 1.87.0.
+
+```sh
+> git clone https://github.com/WillLillis/subspy
+> cd subspy
+> cargo install --path . --locked
+```
+
+This installs two binaries: `subspy` (the standalone CLI) and `subspy-git` (the shim covered below).
+
 ### Usage
+
+#### Standalone (`subspy`)
+
+Use the `subspy` binary directly to gather statuses faster than git or to gather information about the submodules of a repo.
 
 ```sh
 ~/very_large_project/ > subspy --help
@@ -48,9 +65,9 @@ Options:
 
 #### Shell Prompt Integration
 
-The `prompt` subcommand outputs submodule status counts for use in shell prompts. It connects to a running watch server
-and returns immediately. If no server is running, it spawns one in the background and produces no output until the next
-invocation.
+The `subspy prompt` subcommand outputs submodule status counts for use in shell prompts. It connects to a running watch
+server and returns immediately. If no server is running, it spawns one in the background and produces no output until the
+next invocation.
 
 The default output is space-separated fields: `<dirty> <staged> <new_commits> <clean> <total>`. A custom format string can
 be provided with `-f`:
@@ -79,44 +96,34 @@ when = "subspy prompt -f '{dirty}!{staged}+{new_commits}↑'"
 format = "[$output]($style) "
 ```
 
-#### Git Extensions Integration (**Experimental**)
+#### Drop-in git replacement (`subspy-git`)
+
+The `subspy-git` binary is a git shim that can be used as a drop-in replacement for git. Any `git status` invocation the shim
+can fully service is handled by subspy; every other invocation (`fetch`, `log`, `diff`, etc.) and any `status` call with a flag
+we don't recognize is forwarded to the system `git` unchanged. This is especially useful in GUI git tools that regularly issue
+`git status` commands.
+
+##### Git Extensions
 
 [Git Extensions](https://gitextensions.github.io/) calls `git status --porcelain ...` before many operations (checkout,
 merge, opening the commit dialog) and on a background timer. In repositories with many submodules this check can take
 tens of seconds, blocking the UI.
 
-subspy ships a second binary, `subspy-git`, that acts as a drop-in replacement for `git`: it intercepts `git status`
-and routes it through subspy's machinery, while every other git invocation (`fetch`, `log`, `rev-parse`, `diff`, ...)
-is forwarded to the real `git` on `PATH` unchanged via `execvp` (Unix) or `Command::spawn` (Windows). After
-`cargo install --path . --locked` the binary lives next to `subspy` (e.g. `~/.cargo/bin/subspy-git`).
-
 To use it: open Git Extensions -> Settings -> Git -> Path to git, set the path to the absolute path of `subspy-git`
 (or `subspy-git.exe` on Windows), and click OK.
-
-To verify it's working from the command line:
-
-```sh
-> subspy-git status --porcelain=2 -z --untracked-files --ignore-submodules=none | head
-# Output should be byte-identical to `git status` with the same args, but much faster on submodule-heavy repos.
-```
 
 > **Linux / Mono caveat:** Git Extensions resets the "Path to git" setting on every startup on non-Windows builds
 > ([`CheckSettingsLogic.cs#L176-L177`](https://github.com/gitextensions/gitextensions/blob/1e95a8736a5e3b3ccb4054458f8e18c7c0eed7ef/src/app/GitUI/CommandsDialogs/SettingsDialog/CheckSettingsLogic.cs#L176-L177)
 > hardcodes `"git"`), so you'll need to re-enter it each time you launch the application. The Windows build persists
 > the value to the registry and is unaffected.
 
-### Installation
+##### SourceTree
 
-Installing subspy requires the [Rust toolchain](https://rust-lang.org/tools/install/).
-Note that the project's current Minimum Supported Rust Version (MSRV) is 1.87.0.
+[SourceTree](https://www.atlassian.com/software/sourcetree) also calls `git status` many times as part of its regular operation.
+It requires a path to a full git _install_ directory (it resolves `cmd/git.exe` and a number of supporting files at fixed relative
+paths within it), not to a single binary, so the shim can't be slotted in. SourceTree is not supported.
 
-```sh
-> git clone https://github.com/WillLillis/subspy
-> cd subspy
-> cargo install --path . --locked
-```
-
-#### Outrageous Anecdotal Performance Claims
+### Outrageous Anecdotal Performance Claims
 
 The first two `subspy` measurements show cold and warm performance: the first starts a new watch server and waits for
 initial indexing, the second connects to the already-running server.
@@ -187,7 +194,7 @@ git status  1.08s user 0.38s system 100% cpu 1.442 total
 subspy status  0.00s user 0.00s system 94% cpu 0.004 total
 ```
 
-#### Limitations
+### Limitations
 
 - Launching a watch server for a nested submodule (submodules which contain submodules of their own) is not supported.
 `subspy start` must be run from the top-level of the repository.
@@ -195,6 +202,6 @@ subspy status  0.00s user 0.00s system 94% cpu 0.004 total
 need to increase the system limit (e.g. `sudo sysctl fs.inotify.max_user_watches=<value>`).
 - On Windows, AF_UNIX sockets are used for IPC, which requires Windows 10 version 1809 (October 2018 Update) or Windows Server 2019 or later.
 
-#### Future Improvements
+### Future Improvements
 
 - [ ] crates.io releases if desired
