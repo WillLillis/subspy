@@ -1,0 +1,4 @@
+# Snapshot fixtures are compared byte-for-byte against captured program
+# output, which is always LF. Force LF on checkout so Windows runners
+# (which default to autocrlf=true) don't see CRLF in these files.
+*.snapshot text eol=lf

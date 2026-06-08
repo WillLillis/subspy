@@ -23,6 +23,7 @@ jobs:
   test:
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -38,4 +39,11 @@ jobs:
       - name: build
         run: cargo build --workspace --locked
       - name: test
+        # `.cargo/config.toml` sets RUST_TEST_THREADS=4 (sized to Linux's
+        # inotify limits). On Windows, the integration tests intermittently
+        # hang when many watchers run in parallel -- likely a similar
+        # resource pinch (ReadDirectoryChangesW buffer / IPC contention).
+        # Force serial execution there until we can investigate properly.
+        env:
+          RUST_TEST_THREADS: ${{ runner.os == 'Windows' && '1' || '4' }}
         run: cargo test --workspace --locked
