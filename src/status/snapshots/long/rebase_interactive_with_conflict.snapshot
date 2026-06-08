@@ -1,8 +1,8 @@
-interactive rebase in progress; onto 7775b63
+interactive rebase in progress; onto afee64b
 Last command done (1 command done):
-   pick 2f7e5e7 # master commit
+   pick 28a535d # master commit
 No commands remaining.
-You are currently rebasing branch 'master' on '7775b63'.
+You are currently rebasing branch 'master' on 'afee64b'.
   (fix conflicts and then run "git rebase --continue")
   (use "git rebase --skip" to skip this patch)
   (use "git rebase --abort" to check out the original branch)

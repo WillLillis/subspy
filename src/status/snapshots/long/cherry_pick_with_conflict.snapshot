@@ -1,5 +1,5 @@
 On branch master
-You are currently cherry-picking commit 7775b63.
+You are currently cherry-picking commit afee64b.
   (fix conflicts and run "git cherry-pick --continue")
   (use "git cherry-pick --skip" to skip this patch)
   (use "git cherry-pick --abort" to cancel the cherry-pick operation)

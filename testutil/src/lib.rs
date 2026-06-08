@@ -566,6 +566,10 @@ pub fn git_may_fail(args: &[&str]) -> std::process::Output {
             "user.email=test@test.com",
             "-c",
             "protocol.file.allow=always",
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "tag.gpgsign=false",
         ])
         .env("GIT_EDITOR", "true")
         .env("GIT_SEQUENCE_EDITOR", "true")
