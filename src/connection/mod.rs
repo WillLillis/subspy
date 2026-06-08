@@ -152,16 +152,17 @@ pub struct DebugState {
 }
 
 /// Returns `true` if IPC uses filesystem sockets that need manual cleanup.
+#[cfg(target_os = "windows")]
+#[must_use]
+pub const fn uses_filesystem_sockets() -> bool {
+    true // uds_windows always uses filesystem sockets
+}
+
+/// Returns `true` if IPC uses filesystem sockets that need manual cleanup.
+#[cfg(not(target_os = "windows"))]
 #[must_use]
 pub fn uses_filesystem_sockets() -> bool {
-    #[cfg(target_os = "windows")]
-    {
-        true // uds_windows always uses filesystem sockets
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        !GenericNamespaced::is_supported()
-    }
+    !GenericNamespaced::is_supported()
 }
 
 /// Sets the receive timeout on the IPC stream.
@@ -332,7 +333,7 @@ pub fn ipc_socket_path(path: &Path) -> String {
     #[cfg(target_os = "windows")]
     {
         let temp = std::env::temp_dir();
-        return format!("{}\\{hash}.sock", temp.display());
+        format!("{}\\{hash}.sock", temp.display())
     }
 
     #[cfg(not(target_os = "windows"))]
