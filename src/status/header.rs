@@ -783,17 +783,25 @@ mod tests {
     use tempfile::TempDir;
 
     fn git(args: &[&str]) {
-        let output = std::process::Command::new("git")
-            .args(["-c", "user.name=Test", "-c", "user.email=test@test.com"])
-            .args(args)
-            .output()
-            .expect("failed to run git");
+        let output = git_may_fail(args);
         assert!(
             output.status.success(),
             "git {} failed: {}",
             args.join(" "),
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    /// Like [`git()`] but returns the raw `Output` instead of asserting.
+    /// Use for commands that legitimately fail (e.g. a merge that conflicts).
+    /// Injects `-c user.name`/`user.email` so commits/merges work in
+    /// environments without a global git config (e.g. CI).
+    fn git_may_fail(args: &[&str]) -> std::process::Output {
+        std::process::Command::new("git")
+            .args(["-c", "user.name=Test", "-c", "user.email=test@test.com"])
+            .args(args)
+            .output()
+            .expect("failed to run git")
     }
 
     /// Creates a repo with an initial commit containing `file.txt`.
@@ -855,11 +863,7 @@ mod tests {
         let root = tmp.path().display().to_string();
         create_conflicting_branch(&root, tmp.path(), "pick-me");
 
-        let output = std::process::Command::new("git")
-            .args(["-c", "user.name=Test", "-c", "user.email=test@test.com"])
-            .args(["-C", &root, "cherry-pick", "pick-me"])
-            .output()
-            .unwrap();
+        let output = git_may_fail(&["-C", &root, "cherry-pick", "pick-me"]);
         assert!(!output.status.success(), "expected cherry-pick to conflict");
 
         let repo = Repository::open(tmp.path()).unwrap();
@@ -885,10 +889,7 @@ mod tests {
         let root = tmp.path().display().to_string();
         create_conflicting_branch(&root, tmp.path(), "feature");
 
-        let output = std::process::Command::new("git")
-            .args(["-C", &root, "merge", "feature"])
-            .output()
-            .unwrap();
+        let output = git_may_fail(&["-C", &root, "merge", "feature"]);
         assert!(!output.status.success(), "expected merge to conflict");
 
         let repo = Repository::open(tmp.path()).unwrap();
@@ -917,20 +918,7 @@ mod tests {
         git(&["-C", &root, "add", "-A"]);
         git(&["-C", &root, "commit", "-m", "commit B"]);
 
-        let output = std::process::Command::new("git")
-            .args([
-                "-c",
-                "user.name=Test",
-                "-c",
-                "user.email=test@test.com",
-                "-C",
-                &root,
-                "revert",
-                "HEAD~1",
-                "--no-edit",
-            ])
-            .output()
-            .unwrap();
+        let output = git_may_fail(&["-C", &root, "revert", "HEAD~1", "--no-edit"]);
         assert!(!output.status.success(), "expected revert to conflict");
 
         let repo = Repository::open(tmp.path()).unwrap();
@@ -956,11 +944,7 @@ mod tests {
         let root = tmp.path().display().to_string();
         create_conflicting_branch(&root, tmp.path(), "pick-me");
 
-        let output = std::process::Command::new("git")
-            .args(["-c", "user.name=Test", "-c", "user.email=test@test.com"])
-            .args(["-C", &root, "cherry-pick", "pick-me"])
-            .output()
-            .unwrap();
+        let output = git_may_fail(&["-C", &root, "cherry-pick", "pick-me"]);
         assert!(!output.status.success(), "expected cherry-pick to conflict");
 
         std::fs::write(tmp.path().join("file.txt"), "resolved\n").unwrap();
@@ -986,10 +970,7 @@ mod tests {
         let root = tmp.path().display().to_string();
         create_conflicting_branch(&root, tmp.path(), "feature");
 
-        let output = std::process::Command::new("git")
-            .args(["-C", &root, "merge", "feature"])
-            .output()
-            .unwrap();
+        let output = git_may_fail(&["-C", &root, "merge", "feature"]);
         assert!(!output.status.success(), "expected merge to conflict");
 
         std::fs::write(tmp.path().join("file.txt"), "resolved\n").unwrap();
@@ -1037,18 +1018,13 @@ mod tests {
         let root = tmp.path().display().to_string();
         create_conflicting_branch(&root, tmp.path(), "patch-src");
 
-        let patch_output = std::process::Command::new("git")
-            .args(["-C", &root, "format-patch", "master..patch-src", "--stdout"])
-            .output()
-            .unwrap();
+        let patch_output =
+            git_may_fail(&["-C", &root, "format-patch", "master..patch-src", "--stdout"]);
         assert!(patch_output.status.success());
         let patch_file = tmp.path().join("conflict.patch");
         std::fs::write(&patch_file, &patch_output.stdout).unwrap();
 
-        let output = std::process::Command::new("git")
-            .args(["-C", &root, "am", &patch_file.display().to_string()])
-            .output()
-            .unwrap();
+        let output = git_may_fail(&["-C", &root, "am", &patch_file.display().to_string()]);
         assert!(!output.status.success(), "expected git am to conflict");
 
         let repo = Repository::open(tmp.path()).unwrap();
@@ -1067,20 +1043,7 @@ mod tests {
         let root = tmp.path().display().to_string();
         create_conflicting_branch(&root, tmp.path(), "rebase-src");
 
-        let output = std::process::Command::new("git")
-            .args([
-                "-c",
-                "user.name=Test",
-                "-c",
-                "user.email=test@test.com",
-                "-C",
-                &root,
-                "rebase",
-                "--apply",
-                "rebase-src",
-            ])
-            .output()
-            .unwrap();
+        let output = git_may_fail(&["-C", &root, "rebase", "--apply", "rebase-src"]);
         assert!(
             !output.status.success(),
             "expected rebase --apply to conflict"
