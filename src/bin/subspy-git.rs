@@ -972,8 +972,24 @@ mod tests {
     fn non_utf8_arg_forwards() {
         // Non-UTF-8 bytes can't match any literal flag, so dispatch must
         // forward to real git rather than mis-route or panic.
-        use std::os::unix::ffi::OsStringExt as _;
-        let bad = OsString::from_vec(vec![b'-', b'-', b'p', 0xff, 0xfe, b's']);
+        #[cfg(unix)]
+        let bad = {
+            use std::os::unix::ffi::OsStringExt as _;
+            OsString::from_vec(vec![b'-', b'-', b'p', 0xff, 0xfe, b's'])
+        };
+        #[cfg(windows)]
+        let bad = {
+            // Unpaired surrogate (0xD800) is invalid UTF-16; `to_str()` returns
+            // None just like the Unix invalid-UTF-8 case.
+            use std::os::windows::ffi::OsStringExt as _;
+            OsString::from_wide(&[
+                u16::from(b'-'),
+                u16::from(b'-'),
+                u16::from(b'p'),
+                0xD800,
+                u16::from(b's'),
+            ])
+        };
         let got = dispatch_iter(vec![bad, OsString::from("status")].into_iter().peekable());
         assert_eq!(got, None);
     }
@@ -1173,7 +1189,7 @@ mod tests {
         // `find_real_git` returns None. The result must NOT fall back to
         // `"git"`, which would resolve back to us and recurse.
         let tmp = tempfile::TempDir::new().unwrap();
-        let me = tmp.path().join("git");
+        let me = tmp.path().join(GIT_EXE);
         std::fs::write(&me, "").unwrap();
         let got = git_target_inner(Some(&me), Some(tmp.path().as_os_str()));
         assert_eq!(got, None);
@@ -1182,8 +1198,8 @@ mod tests {
     #[test]
     fn git_target_named_git_with_other_git_returns_it() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let me = tmp.path().join("a/git");
-        let real = tmp.path().join("b/git");
+        let me = tmp.path().join("a").join(GIT_EXE);
+        let real = tmp.path().join("b").join(GIT_EXE);
         std::fs::create_dir_all(me.parent().unwrap()).unwrap();
         std::fs::create_dir_all(real.parent().unwrap()).unwrap();
         std::fs::write(&me, "").unwrap();
