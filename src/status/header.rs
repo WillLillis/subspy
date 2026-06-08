@@ -310,9 +310,7 @@ enum HeaderBody {
 /// is disambiguated by the presence of `rebase-apply/rebasing` (vs. `applying`
 /// for `git am`).
 fn is_rebasing(repo: &Repository) -> bool {
-    use git2::RepositoryState::{
-        ApplyMailboxOrRebase, Rebase, RebaseInteractive, RebaseMerge,
-    };
+    use git2::RepositoryState::{ApplyMailboxOrRebase, Rebase, RebaseInteractive, RebaseMerge};
     match repo.state() {
         Rebase | RebaseInteractive | RebaseMerge => true,
         ApplyMailboxOrRebase => repo.path().join("rebase-apply").join("rebasing").exists(),

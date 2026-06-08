@@ -18,9 +18,9 @@ use std::{
 use crate::StatusSummary;
 
 use super::{
-    PorcelainOpts, StatusEntries, StatusResult,
+    PorcelainOpts, StatusEntries, StatusResult, configured_upstream_short_name,
     conflict::{ConflictEntry, build_conflict_map},
-    configured_upstream_short_name, line_terminator,
+    line_terminator,
     quote::QuoteMode,
     relativize::Relativizer,
     unborn_branch_name,

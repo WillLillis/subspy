@@ -15,8 +15,8 @@ use crate::{
     RepoKind,
     cli::ProjectPath,
     status::{
-        IgnoreSubmodules, IgnoredFiles, OutputFormat, OutputOpts, PorcelainOpts,
-        PorcelainVersion, UntrackedFiles, assemble_status, compute_local_statuses,
+        IgnoreSubmodules, IgnoredFiles, OutputFormat, OutputOpts, PorcelainOpts, PorcelainVersion,
+        UntrackedFiles, assemble_status, compute_local_statuses,
         porcelain_v1::display_porcelain_v1, porcelain_v2::display_porcelain_v2,
     },
 };

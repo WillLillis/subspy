@@ -277,10 +277,7 @@ mod tests {
     fn per_submodule_ignore_fast_path_returns_empty() {
         // No "ignore" string anywhere -> short-circuit, empty map.
         let tmp = TempDir::new().unwrap();
-        write_gitmodules(
-            tmp.path(),
-            "[submodule \"sub\"]\n\tpath = sub\n\turl = u\n",
-        );
+        write_gitmodules(tmp.path(), "[submodule \"sub\"]\n\tpath = sub\n\turl = u\n");
         let repo = git2::Repository::init(tmp.path()).unwrap();
         let map = parse_per_submodule_ignore(&repo, tmp.path());
         assert!(map.is_empty());

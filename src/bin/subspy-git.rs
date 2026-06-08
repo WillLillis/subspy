@@ -529,9 +529,7 @@ where
 {
     use std::os::unix::process::CommandExt as _;
     let Some(target) = git_target() else {
-        eprintln!(
-            "subspy-git: cannot find another `{GIT_EXE}` on PATH (shim is named `git`)"
-        );
+        eprintln!("subspy-git: cannot find another `{GIT_EXE}` on PATH (shim is named `git`)");
         return ExitCode::FAILURE;
     };
     let err = Command::new(target).args(argv).exec();
@@ -547,9 +545,7 @@ where
 {
     use std::io::IsTerminal as _;
     let Some(target) = git_target() else {
-        eprintln!(
-            "subspy-git: cannot find another `{GIT_EXE}` on PATH (shim is named `git`)"
-        );
+        eprintln!("subspy-git: cannot find another `{GIT_EXE}` on PATH (shim is named `git`)");
         return ExitCode::FAILURE;
     };
     let mut cmd = Command::new(target);
@@ -1192,8 +1188,8 @@ mod tests {
         std::fs::create_dir_all(real.parent().unwrap()).unwrap();
         std::fs::write(&me, "").unwrap();
         std::fs::write(&real, "").unwrap();
-        let path_var = std::env::join_paths([me.parent().unwrap(), real.parent().unwrap()])
-            .unwrap();
+        let path_var =
+            std::env::join_paths([me.parent().unwrap(), real.parent().unwrap()]).unwrap();
         let got = git_target_inner(Some(&me), Some(path_var.as_os_str()));
         assert_eq!(got, Some(OsString::from(real)));
     }

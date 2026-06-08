@@ -13,8 +13,8 @@ use crate::{
     RepoKind,
     cli::ProjectPath,
     status::{
-        IgnoreSubmodules, IgnoredFiles, OutputFormat, OutputOpts, UntrackedFiles,
-        assemble_status, compute_local_statuses, display::display_status,
+        IgnoreSubmodules, IgnoredFiles, OutputFormat, OutputOpts, UntrackedFiles, assemble_status,
+        compute_local_statuses, display::display_status,
     },
 };
 
