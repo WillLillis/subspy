@@ -213,8 +213,7 @@ impl TestHarness {
     /// Assert that `submodule_changes` returns exactly the given paths as deletions.
     pub fn assert_deleted_submodule_paths(&self, expected: &[&str]) {
         let repo = Repository::open(self.root.path()).expect("Failed to open root repo");
-        let changes =
-            subspy::status::submodule_changes(&repo).expect("submodule_changes failed");
+        let changes = subspy::status::submodule_changes(&repo).expect("submodule_changes failed");
         let expected: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
         assert_eq!(changes.deleted, expected, "deleted submodules mismatch");
     }

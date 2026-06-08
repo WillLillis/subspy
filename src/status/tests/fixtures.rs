@@ -188,16 +188,12 @@ pub fn setup_bisect(root: &Path) {
 
 pub fn setup_detached_at_tag(root: &Path) {
     let repo = Repo::init(root);
-    repo.write("file.txt", "one\n")
-        .add_all()
-        .commit("one");
+    repo.write("file.txt", "one\n").add_all().commit("one");
     // Use `update-ref` to create the tag: `git tag` honors local
     // `tag.gpgSign` / `tag.forceSignAnnotated` config that some
     // developer environments set, which would fail here.
     repo.run_git(&["update-ref", "refs/tags/v1.0", "HEAD"]);
-    repo.write("file.txt", "two\n")
-        .add_all()
-        .commit("two");
+    repo.write("file.txt", "two\n").add_all().commit("two");
     repo.checkout("v1.0");
 }
 

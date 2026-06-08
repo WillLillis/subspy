@@ -85,11 +85,19 @@ fn status_in_clean_repo_matches_git() {
     run("git", tmp.path(), &["init", "-q", "-b", "master"]);
     std::fs::write(tmp.path().join("file.txt"), "hello\n").unwrap();
     run("git", tmp.path(), &["add", "-A"]);
-    run("git", tmp.path(), &[
-        "-c", "user.name=Test",
-        "-c", "user.email=test@test.com",
-        "commit", "-qm", "initial",
-    ]);
+    run(
+        "git",
+        tmp.path(),
+        &[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@test.com",
+            "commit",
+            "-qm",
+            "initial",
+        ],
+    );
 
     assert_outputs_match(tmp.path(), &["status"]);
 }
@@ -107,11 +115,19 @@ fn status_on_non_utf8_branch_name_does_not_panic() {
     run("git", tmp.path(), &["init", "-q", "-b", "master"]);
     std::fs::write(tmp.path().join("file.txt"), "hello\n").unwrap();
     run("git", tmp.path(), &["add", "-A"]);
-    run("git", tmp.path(), &[
-        "-c", "user.name=Test",
-        "-c", "user.email=test@test.com",
-        "commit", "-qm", "initial",
-    ]);
+    run(
+        "git",
+        tmp.path(),
+        &[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@test.com",
+            "commit",
+            "-qm",
+            "initial",
+        ],
+    );
 
     // Build a branch ref with invalid UTF-8 bytes (0xFF 0xFE) by writing
     // directly to .git/refs/heads/, then point HEAD at it. `git branch`
