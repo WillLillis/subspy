@@ -201,6 +201,7 @@ subspy status  0.00s user 0.00s system 94% cpu 0.004 total
 - On Linux, each watch server consumes inotify watches. For very large repositories or many concurrent servers, you may
 need to increase the system limit (e.g. `sudo sysctl fs.inotify.max_user_watches=<value>`).
 - On Windows, AF_UNIX sockets are used for IPC, which requires Windows 10 version 1809 (October 2018 Update) or Windows Server 2019 or later.
+- macOS is not currently covered by CI. The project builds and most tests pass, but submodule-amend events appear to be missed by the FSEvents-backed watcher, so submodule status updates may be stale after a `git commit --amend` inside a submodule. Investigation pending.
 
 ### Future Improvements
 
