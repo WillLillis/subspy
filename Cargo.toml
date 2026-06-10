@@ -26,21 +26,30 @@ cast_possible_truncation = "allow"
 multiple_crate_versions = "allow"
 redundant_closure_for_method_calls = "allow"
 
-[dependencies]
-anstyle = "1.0.13"
-bincode = "2.0.1"
-bitflags = "2.10.0"
+[workspace.dependencies]
 clap = { version = "4.5.53", features = ["derive"] }
-crossbeam-channel = "0.5.15"
 dunce = "1.0.5"
 etcetera = "0.11.0"
 flexi_logger = "0.31.7"
 git2 = { version = "0.21.0", default-features = false, features = [
     "vendored-libgit2",
 ] }
+log = "0.4.29"
+tempfile = "3"
+
+[dependencies]
+anstyle = "1.0.13"
+bincode = "2.0.1"
+bitflags = "2.10.0"
+clap.workspace = true
+crossbeam-channel = "0.5.15"
+dunce.workspace = true
+etcetera.workspace = true
+flexi_logger.workspace = true
+git2.workspace = true
 indicatif = "0.18.3"
 interprocess = "2.2.3"
-log = "0.4.29"
+log.workspace = true
 memchr = "2"
 notify = "8.2.0"
 rayon = "1.10"
@@ -55,7 +64,7 @@ uds_windows = "1.2.1"
 pretty_assertions = "1"
 rstest = "0.26.1"
 rstest_reuse = "0.7.0"
-tempfile = "3"
+tempfile.workspace = true
 testutil = { path = "testutil" }
 
 [profile.release]
