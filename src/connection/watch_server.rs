@@ -1450,7 +1450,9 @@ const fn event_is_relevant(event: &Event) -> bool {
     )
 }
 
-/// Runs the watch server for the repository at `root_dir`
+/// Runs the watch server for the repository at `root_dir`.
+///
+/// `root_dir` must be canonicalized.
 ///
 /// # Errors
 ///

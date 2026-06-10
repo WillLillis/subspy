@@ -82,6 +82,8 @@ impl HarnessBuilder {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let root_path = temp_dir.path().join("root_repo");
         std::fs::create_dir_all(&root_path).unwrap();
+        // Canonicalize like the CLI's `get_project_path`
+        let root_path = dunce::canonicalize(&root_path).unwrap();
 
         let submodule_paths =
             init_repo_with_submodules(temp_dir.path(), &root_path, &self.submodule_names);
