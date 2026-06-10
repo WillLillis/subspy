@@ -26,6 +26,11 @@ cast_possible_truncation = "allow"
 multiple_crate_versions = "allow"
 redundant_closure_for_method_calls = "allow"
 
+[lints.rust]
+# `trace_events` is a build-time switch for verbose watch-server tracing.
+# Declared here so `unexpected_cfgs` stays quiet under `-D warnings`.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(trace_events)'] }
+
 [workspace.dependencies]
 clap = { version = "4.5.53", features = ["derive"] }
 dunce = "1.0.5"

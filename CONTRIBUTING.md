@@ -375,7 +375,7 @@ the rename), and `SubmoduleLockRelease` safety net (for aborted git operations).
 
 `notify` delivers events differently per platform. On Linux (inotify), a `git add`
 inside a submodule may produce only a `MOVED_TO index` rename event, not a write event.
-The server's `get_event_type` has platform-specific carve-outs for these cases. When
+The server's `classify_event` has platform-specific carve-outs for these cases. When
 adding new event handling, test on both Linux and Windows -- an event pattern that works
 on one platform may be invisible on the other.
 
@@ -429,6 +429,23 @@ mismatch is: the server's cached state, the event pipeline, or the display logic
 5. **Check for pending events**: In `subspy debug` output, watchers with high pending
    event counts suggest the server is falling behind on processing, which can cause
    temporarily stale status.
+
+### Tracing watcher events (`--cfg trace_events`)
+
+When a bug comes down to *which* filesystem event the watch server received and how
+it classified it (step 3 above), build with the internal `trace_events` cfg. The
+`wtrace!` macro then prints, to stderr (prefixed `[subspy]`), every received event
+with its classification, the reindex / `.gitmodules`-tracker decisions, watcher
+placement, and each submodule status re-read:
+
+```sh
+# <file>:   an integration test under tests/ (e.g. amend, basic, ...)
+# <filter>: a libtest name filter -- a function or a single rstest case
+#           (e.g. some_test::_run_01_1) keeps the single-process trace
+#           readable, which is also why RUST_TEST_THREADS=1.
+RUSTFLAGS='--cfg trace_events' RUST_TEST_THREADS=1 \
+  cargo test --test <file> -- --nocapture <filter>
+```
 
 ### Fuzzer for reproducing race conditions
 

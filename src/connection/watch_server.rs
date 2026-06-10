@@ -53,6 +53,19 @@ const DEBUG_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
 /// without a follow-up `git commit`).
 const REINDEX_DEBOUNCE: Duration = Duration::from_millis(200);
 
+/// Emits a watch-server trace line to stderr, but only in builds made with
+/// `--cfg trace_events`.
+#[cfg(trace_events)]
+macro_rules! wtrace {
+    ($($arg:tt)*) => {{ eprintln!("[subspy] {}", format_args!($($arg)*)); }};
+}
+/// Emits a watch-server trace line to stderr, but only in builds made with
+/// `--cfg trace_events`.
+#[cfg(not(trace_events))]
+macro_rules! wtrace {
+    ($($arg:tt)*) => {};
+}
+
 /// Type alias for the submodule status map mutex
 pub(super) type StatusMap = Mutex<BTreeMap<String, StatusSummary>>;
 
@@ -145,7 +158,7 @@ struct WatchServer {
     modules_path_to_index: FxHashMap<PathBuf, usize>,
 }
 
-/// Summarizes an event received from a watcher. Create with `get_event_type`
+/// Summarizes an event received from a watcher. Create with [`WatchServer::classify_event`]
 #[derive(Debug, Copy, Clone)]
 enum EventType {
     /// Something changed in `.git/` or `.gitmodules` that may affect submodule statuses
@@ -526,6 +539,7 @@ impl WatchServer {
 
         info!("Indexing project at {}", self.root_path.display());
         let n_submodules = gitmodule_entries.len() as u32;
+        wtrace!("(re)indexing {n_submodules} submodules (place_watches={place_submod_watches})");
         let progress_bar = display_progress
             .then(|| create_progress_bar(u64::from(n_submodules), "Indexing submodules"));
 
@@ -641,6 +655,7 @@ impl WatchServer {
             if place_submod_watches {
                 let (rx, watcher) =
                     Self::place_watch(&full_path, notify::RecursiveMode::Recursive)?;
+                wtrace!("watch submod[{index}] {}", full_path.display());
                 self.watchers
                     .push(WatchListItem::new(relative_path, full_path, rx, watcher));
             }
@@ -903,7 +918,7 @@ impl WatchServer {
     }
 
     /// Converts a watcher event to a relevant `EventType`, if possible
-    fn get_event_type(&self, event: &Event, watcher_idx: usize) -> Option<EventType> {
+    fn classify_event(&self, event: &Event, watcher_idx: usize) -> Option<EventType> {
         if !event_is_relevant(event) {
             // File renames within submodule source trees are legitimate changes, but we
             // can't allow Modify(Name) events through globally because git's
@@ -1195,6 +1210,7 @@ impl WatchServer {
                     match repo.submodule_status(&relative_path, git2::SubmoduleIgnore::None) {
                         Ok(st) => {
                             let submod_status: StatusSummary = st.into();
+                            wtrace!("re-read {relative_path} -> {submod_status:?}");
                             if !cancel.load(Ordering::Relaxed) {
                                 let mut guard = statuses.lock().expect("StatusMap mutex poisoned");
                                 if let Some(entry) = guard.get_mut(relative_path.as_str()) {
@@ -1293,6 +1309,21 @@ impl WatchServer {
         HandleEventsExit::WatcherError { index }
     }
 
+    /// Classifies an event via [`Self::classify_event`] and, under
+    /// `--cfg trace_events`, prints the raw event (kind + paths) with its
+    /// resulting classification.
+    #[inline]
+    fn classify_and_trace_event(&self, event: &Event, index: usize) -> Option<EventType> {
+        let event_type = self.classify_event(event, index);
+        wtrace!(
+            "watcher[{index}] ({}) {:?} {:?} -> {event_type:?}",
+            self.watchers[index].relative_path,
+            event.kind,
+            event.paths,
+        );
+        event_type
+    }
+
     /// The "meat" of the logic for the watch server. Handles incoming watcher events and updates
     /// server state accordingly. This function will only exit if a reindex is required or
     /// requested, a shutdown is received via the control channel, or if a watcher error occurs.
@@ -1324,6 +1355,7 @@ impl WatchServer {
                     Err(_) => {
                         // No new events within the debounce window-> trigger
                         // the deferred reindex.
+                        wtrace!("reindex debounce expired -> reindexing");
                         wait_for_in_flight(&in_flight);
                         return Ok(HandleEventsExit::ReindexEvent);
                     }
@@ -1350,7 +1382,7 @@ impl WatchServer {
                 }
             }
             match oper.recv(&self.watchers[index].receiver)? {
-                Ok(event) => match self.get_event_type(&event, index) {
+                Ok(event) => match self.classify_and_trace_event(&event, index) {
                     Some(EventType::RootGitOperation) => {
                         if index == DOT_GITMODULES_WATCHER_IDX {
                             // .gitmodules changed, defer reindex. Don't
@@ -1361,8 +1393,13 @@ impl WatchServer {
                             // root events (index rename, etc.) that spawn
                             // tasks independently.
                             gitmodules.on_gitmodules_changed();
+                            wtrace!(".gitmodules changed -> deferring reindex");
                         } else {
                             gitmodules.on_root_event(&event);
+                            wtrace!(
+                                "root git op -> reindex deadline {:?}",
+                                gitmodules.deadline()
+                            );
                             for i in ROOT_WATCHER_COUNT..self.watchers.len() {
                                 if !self.skip_set.contains(i) {
                                     self.try_spawn_submod_update(
