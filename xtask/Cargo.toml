@@ -5,13 +5,11 @@ edition = "2024"
 publish = false
 
 [dependencies]
-clap = { version = "4.5.53", features = ["derive"] }
-etcetera = "0.11.0"
-flexi_logger = "0.31.7"
-git2 = { version = "0.21.0", default-features = false, features = [
-    "vendored-libgit2",
-] }
-log = "0.4.29"
+clap.workspace = true
+etcetera.workspace = true
+flexi_logger.workspace = true
+git2.workspace = true
+log.workspace = true
 rand = "0.9"
 subspy = { path = ".." }
 testutil = { path = "../testutil" }
