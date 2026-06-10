@@ -943,7 +943,14 @@ impl WatchServer {
                         || p.eq(&self.root_head_lock_path)
                         || p.starts_with(&self.root_refs_heads_path)
                 });
-            if !is_git_dir_rename {
+            // macOS/FSEvents reports git's atomic `.gitmodules` replace (write
+            // `.gitmodules.lock`, rename it over `.gitmodules`) as a rename
+            // rather than the Remove inotify delivers. The `.gitmodules` watcher
+            // only ever sees its own file, so any rename here is a real change
+            // that must trigger a reindex to pick up an added/removed submodule.
+            let is_gitmodules_rename = watcher_idx == DOT_GITMODULES_WATCHER_IDX
+                && matches!(event.kind, EventKind::Modify(ModifyKind::Name(_)));
+            if !is_git_dir_rename && !is_gitmodules_rename {
                 // Root watches are kept at indices 0 and 1
                 let is_root_watcher = watcher_idx < ROOT_WATCHER_COUNT;
                 if is_root_watcher || !matches!(event.kind, EventKind::Modify(ModifyKind::Name(_)))
