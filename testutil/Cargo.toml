@@ -5,8 +5,7 @@ edition = "2024"
 publish = false
 
 [dependencies]
-git2 = { version = "0.21.0", default-features = false, features = [
-    "vendored-libgit2",
-] }
+dunce.workspace = true
+git2.workspace = true
 subspy = { path = ".." }
-tempfile = "3"
+tempfile.workspace = true
