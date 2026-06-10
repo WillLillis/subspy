@@ -108,10 +108,11 @@ fn status_in_clean_repo_matches_git() {
 /// parity isn't expected here -- we just assert no crash and that the
 /// surrounding text is present.
 ///
-/// Unix-only: the test writes a filename containing 0xFF 0xFE into
-/// `.git/refs/heads/`, which isn't representable on Windows (NTFS
-/// filenames are UTF-16).
-#[cfg(unix)]
+/// Linux-only: the test writes a filename containing 0xFF 0xFE into
+/// `.git/refs/heads/`, which needs a filesystem that permits non-UTF-8
+/// names. Windows (NTFS is UTF-16) and macOS (rejects invalid UTF-8 with
+/// EILSEQ) both refuse it.
+#[cfg(target_os = "linux")]
 #[test]
 fn status_on_non_utf8_branch_name_does_not_panic() {
     use std::os::unix::ffi::OsStrExt as _;
