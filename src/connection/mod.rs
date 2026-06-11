@@ -149,6 +149,9 @@ pub struct DebugState {
     pub progress_queues: Option<Vec<(u32, Vec<(u32, u32)>)>>,
     /// The last watcher error that triggered a reindex, if any
     pub last_watcher_error: Option<String>,
+    /// Non-recursive tripwire watches on submodule ancestor directories:
+    /// `(watch_path, pending_event_count)`.
+    pub tripwires: Vec<(String, u32)>,
 }
 
 /// Returns `true` if IPC uses filesystem sockets that need manual cleanup.
