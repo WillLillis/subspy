@@ -33,7 +33,7 @@ use crate::{
     },
     create_progress_bar,
     git::parse_gitmodules,
-    watch::{LockFileGuard, WatchResult},
+    watch::{LockFileGuard, WatchError, WatchResult},
 };
 
 use super::{
@@ -668,15 +668,28 @@ impl WatchServer {
                 // TODO: This would be better as a `try` block if that's ever stabilized
                 // (https://github.com/rust-lang/rust/issues/31436)
                 // (`.git/modules/` path, status, is in rebase)
-                let inner: WatchResult<(PathBuf, StatusSummary, bool)> = (|| {
+                let inner: WatchResult<(Option<PathBuf>, StatusSummary, bool)> = (|| {
                     let repo = tl_repo.get_or_try(|| Repository::open(root_path))
                         .map_err(|e| {
                             error!("Failed to open repository while indexing {relative_path}: {e}");
                             e
                         })?;
 
+                    // `get_modules_path` reads the submodule's `.git` gitlink to
+                    // find its real `.git/modules/<name>` directory (which git does
+                    // NOT rename when the submodule is renamed). A `rm -rf`'d
+                    // workdir has no gitlink, so this fails with NotFound. Fall
+                    // through with `None`: the status is read lock-free below. We
+                    // can't recover the real modules directory without the gitlink,
+                    // so the submodule gets no `modules_path_to_index` entry; a restoring
+                    // `git submodule update` recreates the workdir, which the
+                    // tripwire re-detects and reindexes, repopulating it. On macOS
+                    // this is the path a deletion takes (FSEvents reports `rm -rf`
+                    // as a rename that triggers a reindex); on Linux the clean
+                    // `Remove` takes the lock-free targeted re-read instead.
                     let modules_path = match self.get_modules_path(&relative_path) {
-                        Ok(p) => p,
+                        Ok(p) => Some(p),
+                        Err(WatchError::IO(e)) if e.kind() == std::io::ErrorKind::NotFound => None,
                         Err(e) => {
                             error!(
                                 "Failed to get modules path for submodule {relative_path} - {e}, skipping...",
@@ -689,11 +702,13 @@ impl WatchServer {
                     // for "stalled" rebases (i.e. that has hit a conflict that must be manually
                     // resolved) so that we can properly skip updating this submodule until its
                     // rebase has been completed.
-                    let is_in_rebase = modules_path.join("rebase-merge").exists();
+                    let is_in_rebase = modules_path
+                        .as_deref()
+                        .is_some_and(|p| p.join("rebase-merge").exists());
 
                     let status = if is_in_rebase {
                         StatusSummary::NEW_COMMITS
-                    } else {
+                    } else if let Some(modules_path) = &modules_path {
                         match get_submod_status(
                             repo,
                             &relative_path,
@@ -702,6 +717,18 @@ impl WatchServer {
                             Ok(st) => st,
                             Err(e) => {
                                 error!("Failed to get {relative_path} status while populating status map: {e}");
+                                Err(e)?
+                            }
+                        }
+                    } else {
+                        // Deleted workdir: no `index.lock` to contend with, so read
+                        // lock-free, mirroring `try_spawn_submod_update`. libgit2
+                        // reports a gone workdir as WD_DELETED -> DELETED_WORKDIR,
+                        // by relative path, so this is correct even under a rename.
+                        match repo.submodule_status(&relative_path, git2::SubmoduleIgnore::None) {
+                            Ok(st) => st.into(),
+                            Err(e) => {
+                                error!("Failed to get deleted {relative_path} status while populating status map: {e}");
                                 Err(e)?
                             }
                         }
@@ -754,7 +781,9 @@ impl WatchServer {
                 if is_in_rebase {
                     self.skip_set.insert(index);
                 }
-                if place_submod_watches {
+                // A deleted submodule has no resolvable modules path (`None`);
+                // it gets no routing entry until a restore reindex repopulates it.
+                if place_submod_watches && let Some(modules_path) = modules_path {
                     self.modules_path_to_index.insert(modules_path, index);
                 }
             }

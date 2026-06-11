@@ -157,6 +157,39 @@ fn restored_submodule_workdir_is_rewatched(_run: u32) {
     harness.assert_submodule_status("sub_a", StatusSummary::clean());
 }
 
+/// A reindex that runs while a submodule's workdir is deleted must keep
+/// reporting it as `DELETED_WORKDIR`, not drop it. Linux normally takes the
+/// targeted re-read path for a deletion (a lock-free `submodule_status` read),
+/// but the reindex path first calls `get_modules_path`, which reads the
+/// submodule's now-gone `.git` gitlink and fails with `NotFound`. Dropping the
+/// submodule there is the macOS bug, where `FSEvents` reports the `rm -rf` as a
+/// rename that routes through a reindex instead of a targeted re-read. Here we
+/// force the reindex path on every platform with an explicit reindex request.
+///
+/// `request_reindex` blocks until indexing finishes, and `populate_status_map`
+/// holds the status-map mutex across the whole reindex, so the assertion sees
+/// the post-reindex map rather than the value the targeted path left behind.
+/// Without the fix the submodule is dropped from the rebuilt map and the
+/// assertion times out.
+#[apply(common::repeat)]
+fn reindex_over_deleted_workdir_still_reports_deleted(_run: u32) {
+    let harness = common::HarnessBuilder::new()
+        .submodule("sub_a")
+        .submodule("sub_b")
+        .build();
+    harness.assert_all_clean();
+
+    std::fs::remove_dir_all(harness.submodule("sub_b").path()).unwrap();
+    harness.assert_submodule_status("sub_b", StatusSummary::DELETED_WORKDIR);
+
+    // Force a full reindex over the deleted workdir.
+    harness.request_reindex(false);
+    harness.assert_submodule_status("sub_b", StatusSummary::DELETED_WORKDIR);
+
+    // sub_a is unaffected.
+    harness.assert_submodule_status("sub_a", StatusSummary::clean());
+}
+
 #[apply(common::repeat)]
 fn remove_submodule_detected_by_server(_run: u32) {
     let mut harness = common::HarnessBuilder::new()
