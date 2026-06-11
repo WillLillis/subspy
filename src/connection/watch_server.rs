@@ -205,6 +205,49 @@ enum HandleEventsExit {
     WatcherError { index: usize },
 }
 
+/// The source a `crossbeam_channel::Select` operation came from.
+#[derive(Clone, Copy)]
+enum SelectSource {
+    /// A filesystem `watchers` entry (a root watcher or a submodule watcher),
+    /// carrying its index into `watchers`.
+    Watcher(usize),
+    /// A `tripwires` entry, carrying its index into `tripwires`.
+    Tripwire(usize),
+    /// The control channel from the listener thread.
+    Control,
+}
+
+/// Decodes a `crossbeam_channel::Select` index back into its [`SelectSource`].
+///
+/// `handle_events` registers receivers in a fixed order: `n_watchers`
+/// watchers, then `n_tripwires` tripwires, then the single control channel.
+const fn select_source(index: usize, n_watchers: usize, n_tripwires: usize) -> SelectSource {
+    if index < n_watchers {
+        SelectSource::Watcher(index)
+    } else if index < n_watchers + n_tripwires {
+        SelectSource::Tripwire(index - n_watchers)
+    } else {
+        SelectSource::Control
+    }
+}
+
+/// Registers every receiver on `sel` in the canonical order [`select_source`]
+/// decodes: all `watchers`, then all `tripwires`, then the control channel.
+fn register_select<'a>(
+    sel: &mut crossbeam_channel::Select<'a>,
+    watchers: &'a WatchList,
+    tripwires: &'a WatchList,
+    control_rx: &'a crossbeam_channel::Receiver<ControlMessage>,
+) {
+    for WatchListItem { receiver, .. } in watchers {
+        sel.recv(receiver);
+    }
+    for WatchListItem { receiver, .. } in tripwires {
+        sel.recv(receiver);
+    }
+    sel.recv(control_rx);
+}
+
 /// Control messages sent from the listener thread to the main event loop
 pub(super) enum ControlMessage {
     Reindex { replace_watchers: bool },
@@ -1545,20 +1588,10 @@ impl WatchServer {
     /// The "meat" of the logic for the watch server. Handles incoming watcher events and updates
     /// server state accordingly. This function will only exit if a reindex is required or
     /// requested, a shutdown is received via the control channel, or if a watcher error occurs.
-    #[allow(clippy::too_many_lines)]
+    #[expect(clippy::too_many_lines)]
     fn handle_events(&mut self) -> WatchResult<HandleEventsExit> {
         let mut sel = crossbeam_channel::Select::new();
-        // filesystem watchers
-        for WatchListItem { receiver, .. } in &self.watchers {
-            sel.recv(receiver);
-        }
-        // tripwire watches occupy the select indices right after the watchers
-        let tripwire_base = self.watchers.len();
-        for WatchListItem { receiver, .. } in &self.tripwires {
-            sel.recv(receiver);
-        }
-        // handles client requests from the listener thread
-        let control_idx = sel.recv(&self.control_rx);
+        register_select(&mut sel, &self.watchers, &self.tripwires, &self.control_rx);
 
         // Shared state for parallel submodule status updates
         let in_flight: Arc<(Mutex<InFlightTracker>, Condvar)> =
@@ -1586,10 +1619,12 @@ impl WatchServer {
             } else {
                 sel.select()
             };
-            let index = oper.index();
-
-            if index == control_idx {
-                match oper.recv(&self.control_rx)? {
+            // Decode which receiver fired. The `Control` and `Tripwire` arms fully
+            // handle their event, while the Watcher arm yields the watcher index for
+            // the match below.
+            let index = match select_source(oper.index(), self.watchers.len(), self.tripwires.len())
+            {
+                SelectSource::Control => match oper.recv(&self.control_rx)? {
                     ControlMessage::Reindex { replace_watchers } => {
                         wait_for_in_flight(&in_flight);
                         return Ok(HandleEventsExit::ReindexRequest { replace_watchers });
@@ -1602,27 +1637,27 @@ impl WatchServer {
                         self.handle_debug_request(&mut conn, &in_flight);
                         continue;
                     }
-                }
-            }
-            // Tripwire watches occupy the select indices in [tripwire_base,
-            // control_idx); a non-control index >= tripwire_base is one of them.
-            if index >= tripwire_base {
-                let tripwire = index - tripwire_base;
-                match oper.recv(&self.tripwires[tripwire].receiver)? {
-                    Ok(event) => {
-                        if self.handle_tripwire_event(&event, &in_flight, &pending_lock_retries) {
+                },
+                SelectSource::Tripwire(tripwire) => {
+                    match oper.recv(&self.tripwires[tripwire].receiver)? {
+                        Ok(event) => {
+                            if self.handle_tripwire_event(&event, &in_flight, &pending_lock_retries)
+                            {
+                                wait_for_in_flight(&in_flight);
+                                return Ok(HandleEventsExit::ReindexEvent);
+                            }
+                        }
+                        Err(e) => {
                             wait_for_in_flight(&in_flight);
+                            error!("Tripwire watcher error -- {e}");
                             return Ok(HandleEventsExit::ReindexEvent);
                         }
                     }
-                    Err(e) => {
-                        wait_for_in_flight(&in_flight);
-                        error!("Tripwire watcher error -- {e}");
-                        return Ok(HandleEventsExit::ReindexEvent);
-                    }
+                    continue;
                 }
-                continue;
-            }
+                SelectSource::Watcher(index) => index,
+            };
+
             match oper.recv(&self.watchers[index].receiver)? {
                 Ok(event) => match self.classify_and_trace_event(&event, index) {
                     Some(EventType::RootGitOperation) => {
@@ -1766,6 +1801,25 @@ pub fn watch(root_dir: &Path, display_progress: bool) -> WatchResult<()> {
 mod tests {
     use super::*;
     use crate::connection::{ClientMessage, ClientRequest};
+
+    #[test]
+    fn select_source_decodes_index_bands() {
+        // `handle_events` registers receivers as: watchers, then tripwires, then
+        // the control channel. For 2 watchers + 1 tripwire that is watchers
+        // [0, 1], tripwire [2], control [3].
+        assert!(matches!(select_source(0, 2, 1), SelectSource::Watcher(0)));
+        assert!(matches!(select_source(1, 2, 1), SelectSource::Watcher(1)));
+        assert!(matches!(select_source(2, 2, 1), SelectSource::Tripwire(0)));
+        assert!(matches!(select_source(3, 2, 1), SelectSource::Control));
+
+        // No tripwires: the control channel sits immediately after the watchers.
+        assert!(matches!(select_source(2, 2, 0), SelectSource::Control));
+
+        // The tripwire band is reported as a 0-based index local to `tripwires`.
+        assert!(matches!(select_source(2, 2, 3), SelectSource::Tripwire(0)));
+        assert!(matches!(select_source(4, 2, 3), SelectSource::Tripwire(2)));
+        assert!(matches!(select_source(5, 2, 3), SelectSource::Control));
+    }
 
     #[test]
     fn unit_variant_sizes() {
