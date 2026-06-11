@@ -121,6 +121,42 @@ fn rm_rf_submodule_workdir_reported_as_deleted(_run: u32) {
     harness.assert_submodule_status("sub_a", StatusSummary::clean());
 }
 
+/// A submodule whose workdir is `rm -rf`'d must still be watched after it is
+/// restored. The submodule's own recursive watch dies silently when its
+/// directory is removed, so the parent "tripwire" watch is what notices both
+/// the deletion and the restore (re-arming the watch via a reindex). The final
+/// `write` is the deterministic part: without a re-armed watch, the server
+/// never sees the new file and the assertion times out.
+#[apply(common::repeat)]
+fn restored_submodule_workdir_is_rewatched(_run: u32) {
+    let harness = common::HarnessBuilder::new()
+        .submodule("sub_a")
+        .submodule("sub_b")
+        .build();
+    harness.assert_all_clean();
+
+    // rm -rf sub_b's workdir: the gitlink stays in HEAD/index, so it is a
+    // deletion. Caught by the parent tripwire, not sub_b's own (dying) watch.
+    std::fs::remove_dir_all(harness.submodule("sub_b").path()).unwrap();
+    harness.assert_submodule_status("sub_b", StatusSummary::DELETED_WORKDIR);
+
+    // Restore the workdir from the submodule's gitdir.
+    harness
+        .root()
+        .run_git(&["submodule", "update", "--force", "sub_b"]);
+    harness.assert_submodule_status("sub_b", StatusSummary::clean());
+
+    // A change made after the restore must be picked up, proving the watch was
+    // re-armed rather than left dead.
+    harness
+        .submodule("sub_b")
+        .write("after_restore.txt", "hi\n");
+    harness.assert_submodule_status("sub_b", StatusSummary::UNTRACKED_CONTENT);
+
+    // sub_a is untouched throughout.
+    harness.assert_submodule_status("sub_a", StatusSummary::clean());
+}
+
 #[apply(common::repeat)]
 fn remove_submodule_detected_by_server(_run: u32) {
     let mut harness = common::HarnessBuilder::new()

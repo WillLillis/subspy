@@ -62,6 +62,15 @@ impl fmt::Display for DebugState {
             }
         }
 
+        writeln!(f, "\nTripwires:")?;
+        if self.tripwires.is_empty() {
+            writeln!(f, "  (none)")?;
+        } else {
+            for (watch_path, pending) in &self.tripwires {
+                writeln!(f, "  {watch_path} ({pending} pending events)")?;
+            }
+        }
+
         writeln!(f, "\nSkip set:")?;
         if self.skip_set.is_empty() {
             writeln!(f, "  (none)")?;

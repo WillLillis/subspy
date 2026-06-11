@@ -2,8 +2,9 @@
 //! maintains a cached status map, and serves status queries over IPC.
 
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     io::BufReader,
+    ops::Bound,
     path::{Path, PathBuf},
     sync::{
         Arc, Condvar, Mutex, MutexGuard,
@@ -110,8 +111,20 @@ type WatchList = Vec<WatchListItem>;
 
 /// The primary state necessary to maintain a status watch over the repository at `root_path`
 struct WatchServer {
-    /// Filesystem watchers
+    /// Filesystem watchers, one per submodule (plus the two root watchers).
     watchers: WatchList,
+    /// Non-recursive "tripwire" watches on the ancestor directories of every
+    /// submodule, up to and including the repo root. A submodule's own watcher
+    /// dies silently when its directory is `rm -rf`'d, so these surviving parent
+    /// watches are what detect a submodule workdir being deleted or restored.
+    /// Rebuilt alongside `watchers` whenever submodule watches are (re)placed.
+    tripwires: WatchList,
+    /// Maps each submodule's **root-relative** working-directory path to its
+    /// watcher index, sorted so a tripwire event on a directory `P` can find
+    /// every submodule at or under `P` via a prefix range. Keys are relative so
+    /// thesecomparisons start at the distinguishing component instead of re-walking
+    /// the identical repo-root prefix.
+    workdir_to_index: BTreeMap<PathBuf, usize>,
     /// Watcher indices of submodules to skip updating (due to being in a rebase)
     skip_set: BitSet,
     /// Whether a rebase is in progress in the root repository
@@ -364,6 +377,8 @@ impl WatchServer {
 
         Self {
             watchers: Vec::new(),
+            tripwires: Vec::new(),
+            workdir_to_index: BTreeMap::new(),
             skip_set: BitSet::with_capacity(0),
             root_rebasing: false,
             root_path: root_path.to_path_buf(),
@@ -428,29 +443,75 @@ impl WatchServer {
         Ok(())
     }
 
-    /// Places a watcher of type `mode` on `watch_path`. Returns the receiver and watcher.
+    /// Builds a watcher wired to a fresh unbounded channel, **without** arming
+    /// it -- callers arm the returned watcher with `watcher.watch(path, mode)`.
+    /// Separating creation from arming lets [`Self::place_submodule_watch`]
+    /// tolerate a missing workdir while still returning a live watcher and an
+    /// open receiver.
     ///
     /// # Errors
     ///
-    /// Returns `notify::Error` if the watcher cannot be created
-    fn place_watch(
-        watch_path: impl AsRef<Path>,
-        mode: notify::RecursiveMode,
-    ) -> notify::Result<(WatchReceiver, ServerWatcher)> {
+    /// Returns `notify::Error` if the watcher backend cannot be created.
+    fn build_watcher(log_path: PathBuf) -> notify::Result<(WatchReceiver, ServerWatcher)> {
         let (tx, rx) = crossbeam_channel::unbounded();
-        let log_full_path = watch_path.as_ref().to_path_buf();
-        let mut watcher = ServerWatcher::new(
+        let watcher = ServerWatcher::new(
             move |res: Result<notify::Event, notify::Error>| {
                 if let Err(e) = tx.send(res) {
-                    error!(
-                        "Watcher for {} failed to send -- {e}",
-                        log_full_path.display()
-                    );
+                    error!("Watcher for {} failed to send -- {e}", log_path.display());
                 }
             },
             notify::Config::default(),
         )?;
+
+        Ok((rx, watcher))
+    }
+
+    /// Places a watcher of type `mode` on `watch_path`. Returns the receiver and watcher.
+    ///
+    /// # Errors
+    ///
+    /// Returns `notify::Error` if the watcher cannot be created or the path cannot be watched
+    fn place_watch(
+        watch_path: impl AsRef<Path>,
+        mode: notify::RecursiveMode,
+    ) -> notify::Result<(WatchReceiver, ServerWatcher)> {
+        let (rx, mut watcher) = Self::build_watcher(watch_path.as_ref().to_path_buf())?;
         watcher.watch(watch_path.as_ref(), mode)?;
+
+        Ok((rx, watcher))
+    }
+
+    /// Places a **recursive** watch on a submodule working directory, tolerating
+    /// a missing directory.
+    ///
+    /// If `watch_path` does not exist (i.e. the submodule was `rm -rf`'d and we
+    /// are reindexing in response to that deletion) the watcher is returned
+    /// **disarmed**: created and connected to its channel, so its watcher slot
+    /// and `Select` receiver stay valid and index-aligned, but watching nothing.
+    /// The deleted submodule's reappearance is detected by the surviving parent
+    /// tripwire, whose `Create` event triggers a reindex that re-arms this watch.
+    ///
+    /// Without this, a reindex landing while the workdir is gone fails fatally
+    /// (`PathNotFound`) and takes down the whole server.
+    ///
+    /// # Errors
+    ///
+    /// Returns `notify::Error` if the watcher cannot be created, or if arming it
+    /// fails for any reason other than the path being absent.
+    fn place_submodule_watch(
+        watch_path: impl AsRef<Path>,
+    ) -> notify::Result<(WatchReceiver, ServerWatcher)> {
+        let (rx, mut watcher) = Self::build_watcher(watch_path.as_ref().to_path_buf())?;
+        match watcher.watch(watch_path.as_ref(), notify::RecursiveMode::Recursive) {
+            Ok(()) => {}
+            Err(e) if matches!(e.kind, notify::ErrorKind::PathNotFound) => {
+                wtrace!(
+                    "submod workdir {} absent; watch left disarmed",
+                    watch_path.as_ref().display()
+                );
+            }
+            Err(e) => return Err(e),
+        }
 
         Ok((rx, watcher))
     }
@@ -503,6 +564,50 @@ impl WatchServer {
 
         debug_assert_eq!(self.watchers.len(), ROOT_WATCHER_COUNT);
         Ok(())
+    }
+
+    /// The distinct ancestor directories of every submodule (as absolute paths):
+    /// each submodule's parent, and every directory between it and the repo
+    /// root, with the root always included. Computed from the root-relative
+    /// `workdir_to_index` keys, so a submodule at `libs/foo` contributes
+    /// `<root>/libs` and `<root>`.
+    fn tripwire_dirs(&self) -> BTreeSet<PathBuf> {
+        let mut dirs = BTreeSet::new();
+        for rel in self.workdir_to_index.keys() {
+            let mut cur = rel.as_path();
+            while let Some(parent) = cur.parent() {
+                if parent.as_os_str().is_empty() {
+                    // Reached the top level; the parent is the repo root itself.
+                    dirs.insert(self.root_path.clone());
+                    break;
+                }
+                dirs.insert(self.root_path.join(parent));
+                cur = parent;
+            }
+        }
+        dirs
+    }
+
+    /// (Re)places the tripwire watches from the current submodule set.
+    /// Best-effort: a directory that can't be watched is logged and skipped
+    /// rather than failing the whole reindex.
+    fn place_tripwires(&mut self) {
+        self.tripwires.clear();
+        for dir in self.tripwire_dirs() {
+            match Self::place_watch(&dir, notify::RecursiveMode::NonRecursive) {
+                Ok((rx, watcher)) => {
+                    wtrace!("tripwire {}", dir.display());
+                    let rel = dir
+                        .strip_prefix(&self.root_path)
+                        .unwrap_or(&dir)
+                        .to_string_lossy()
+                        .into_owned();
+                    self.tripwires
+                        .push(WatchListItem::new(rel, dir, rx, watcher));
+                }
+                Err(e) => error!("Failed to place tripwire on {} -- {e}", dir.display()),
+            }
+        }
     }
 
     /// Gathers the status for all submodules within the given repository. When
@@ -624,6 +729,7 @@ impl WatchServer {
             .clear_and_resize(ROOT_WATCHER_COUNT + results.len());
         if place_submod_watches {
             self.modules_path_to_index.clear();
+            self.workdir_to_index.clear();
         }
         // NOTE: Watcher placement must NOT be parallelized. Creating
         // `notify::RecommendedWatcher` instances concurrently on rayon threads
@@ -653,14 +759,24 @@ impl WatchServer {
                 }
             }
             if place_submod_watches {
-                let (rx, watcher) =
-                    Self::place_watch(&full_path, notify::RecursiveMode::Recursive)?;
+                let (rx, watcher) = Self::place_submodule_watch(&full_path)?;
                 wtrace!("watch submod[{index}] {}", full_path.display());
+                // Record the (root-relative) workdir->index mapping for every
+                // submodule, even ones whose status read failed: tripwire
+                // routing must still be able to find a submodule by path.
+                self.workdir_to_index
+                    .insert(PathBuf::from(&relative_path), index);
                 self.watchers
                     .push(WatchListItem::new(relative_path, full_path, rx, watcher));
             }
         }
         drop(status_guard);
+
+        // Tripwires depend only on the submodule set, so (re)place them whenever
+        // the submodule watches are (re)placed.
+        if place_submod_watches {
+            self.place_tripwires();
+        }
 
         if let Some(pb) = &progress_bar {
             pb.finish();
@@ -681,6 +797,11 @@ impl WatchServer {
                     w.receiver.len() as u32,
                 )
             })
+            .collect();
+        let tripwires: Vec<(String, u32)> = self
+            .tripwires
+            .iter()
+            .map(|w| (w.watch_path.display().to_string(), w.receiver.len() as u32))
             .collect();
 
         let skip_set: Vec<String> = self
@@ -741,6 +862,7 @@ impl WatchServer {
             in_flight: in_flight_tasks,
             progress_queues,
             last_watcher_error: self.last_watcher_error.clone(),
+            tripwires,
         }
     }
 
@@ -802,10 +924,8 @@ impl WatchServer {
                         self.place_root_watchers()?;
                         true
                     } else {
-                        let (new_rx, new_watcher) = Self::place_watch(
-                            &self.watchers[index].watch_path,
-                            notify::RecursiveMode::Recursive,
-                        )?;
+                        let (new_rx, new_watcher) =
+                            Self::place_submodule_watch(&self.watchers[index].watch_path)?;
                         self.watchers[index].watcher = new_watcher;
                         self.watchers[index].receiver = new_rx;
                         false
@@ -1229,6 +1349,11 @@ impl WatchServer {
                             true
                         }
                         Err(e) => {
+                            wtrace!(
+                                "re-read {relative_path} FAILED -> code={:?} class={:?} msg={e}",
+                                e.code(),
+                                e.class(),
+                            );
                             if !cancel.load(Ordering::Relaxed) {
                                 trace!(
                                     "Transient read failure for {relative_path}, \
@@ -1331,6 +1456,63 @@ impl WatchServer {
         event_type
     }
 
+    /// Routes a tripwire event (a structural change to a submodule ancestor
+    /// directory) to the affected submodules. Returns `true` if a reindex is
+    /// needed to re-arm watches.
+    ///
+    /// A `Remove` of a directory at/under which submodules live means those
+    /// submodules' workdirs are gone -> re-read them so they flip to
+    /// `DELETED_WORKDIR` (their own recursive watches just died silently). A
+    /// `Create` or rename (`Modify(Name)`) means a submodule directory
+    /// reappeared or moved -> a full reindex re-places the now-dead recursive
+    /// watch. Events with no submodule at/under the path are ordinary repo-root
+    /// churn and ignored.
+    fn handle_tripwire_event(
+        &self,
+        event: &Event,
+        in_flight: &Arc<(Mutex<InFlightTracker>, Condvar)>,
+        pending_lock_retries: &Arc<Mutex<BitSet>>,
+    ) -> bool {
+        let reindex_kind = matches!(
+            event.kind,
+            EventKind::Create(_) | EventKind::Modify(ModifyKind::Name(_))
+        );
+        let remove_kind = matches!(event.kind, EventKind::Remove(_));
+        if !reindex_kind && !remove_kind {
+            return false;
+        }
+
+        let mut needs_reindex = false;
+        for path in &event.paths {
+            // Tripwire dirs are all under the root, so events on them are too;
+            // strip the root prefix to look up against the relative keys.
+            let Ok(rel) = path.strip_prefix(&self.root_path) else {
+                continue;
+            };
+            // Every submodule at or under `rel` (a prefix range over the sorted
+            // map). An empty range is ordinary repo-root churn and a no-op.
+            for (_, &idx) in self
+                .workdir_to_index
+                .range::<Path, _>((Bound::Included(rel), Bound::Unbounded))
+                .take_while(|(k, _)| k.starts_with(rel))
+            {
+                wtrace!(
+                    "tripwire {:?} {rel:?} -> submod[{idx}] (reindex={reindex_kind})",
+                    event.kind,
+                );
+                if reindex_kind {
+                    // A single affected submodule is enough to decide a reindex.
+                    needs_reindex = true;
+                    break;
+                }
+                if !self.skip_set.contains(idx) {
+                    self.try_spawn_submod_update(idx, in_flight, pending_lock_retries);
+                }
+            }
+        }
+        needs_reindex
+    }
+
     /// The "meat" of the logic for the watch server. Handles incoming watcher events and updates
     /// server state accordingly. This function will only exit if a reindex is required or
     /// requested, a shutdown is received via the control channel, or if a watcher error occurs.
@@ -1339,6 +1521,11 @@ impl WatchServer {
         let mut sel = crossbeam_channel::Select::new();
         // filesystem watchers
         for WatchListItem { receiver, .. } in &self.watchers {
+            sel.recv(receiver);
+        }
+        // tripwire watches occupy the select indices right after the watchers
+        let tripwire_base = self.watchers.len();
+        for WatchListItem { receiver, .. } in &self.tripwires {
             sel.recv(receiver);
         }
         // handles client requests from the listener thread
@@ -1387,6 +1574,25 @@ impl WatchServer {
                         continue;
                     }
                 }
+            }
+            // Tripwire watches occupy the select indices in [tripwire_base,
+            // control_idx); a non-control index >= tripwire_base is one of them.
+            if index >= tripwire_base {
+                let tripwire = index - tripwire_base;
+                match oper.recv(&self.tripwires[tripwire].receiver)? {
+                    Ok(event) => {
+                        if self.handle_tripwire_event(&event, &in_flight, &pending_lock_retries) {
+                            wait_for_in_flight(&in_flight);
+                            return Ok(HandleEventsExit::ReindexEvent);
+                        }
+                    }
+                    Err(e) => {
+                        wait_for_in_flight(&in_flight);
+                        error!("Tripwire watcher error -- {e}");
+                        return Ok(HandleEventsExit::ReindexEvent);
+                    }
+                }
+                continue;
             }
             match oper.recv(&self.watchers[index].receiver)? {
                 Ok(event) => match self.classify_and_trace_event(&event, index) {
@@ -1819,6 +2025,7 @@ mod tests {
                         in_flight: None,
                         progress_queues: None,
                         last_watcher_error: None,
+                        tripwires: vec![],
                     })),
                     BINCODE_CFG,
                 )
@@ -1835,10 +2042,11 @@ mod tests {
                 // | submodule_statuses:None(0)
                 // | in_flight:None(0) | progress_queues:None(0)
                 // | last_watcher_error:None(0)
+                // | tripwires:empty(0,0,0,0,0,0,0,0)
                 &[
                     3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
                     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-                    0, 0,
+                    0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
                 ],
             ),
             (
