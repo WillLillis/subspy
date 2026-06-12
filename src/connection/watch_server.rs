@@ -719,17 +719,12 @@ impl WatchServer {
                         })?;
 
                     // `get_modules_path` reads the submodule's `.git` gitlink to
-                    // find its real `.git/modules/<name>` directory (which git does
-                    // NOT rename when the submodule is renamed). A `rm -rf`'d
-                    // workdir has no gitlink, so this fails with NotFound. Fall
-                    // through with `None`: the status is read lock-free below. We
-                    // can't recover the real modules directory without the gitlink,
-                    // so the submodule gets no `modules_path_to_index` entry; a restoring
-                    // `git submodule update` recreates the workdir, which the
-                    // tripwire re-detects and reindexes, repopulating it. On macOS
-                    // this is the path a deletion takes (FSEvents reports `rm -rf`
-                    // as a rename that triggers a reindex); on Linux the clean
-                    // `Remove` takes the lock-free targeted re-read instead.
+                    // find its real `.git/modules/<name>` dir. A `rm -rf`'d workdir
+                    // has no gitlink -> NotFound: fall through with `None` and read
+                    // status lock-free below (still resolves to WD_DELETED).
+                    // Without the gitlink we can't recover the modules dir, so the
+                    // submodule gets no `modules_path_to_index` entry until a
+                    // restoring `git submodule update` reindexes and repopulates it.
                     let modules_path = match self.get_modules_path(&relative_path) {
                         Ok(p) => Some(p),
                         Err(WatchError::IO(e)) if e.kind() == std::io::ErrorKind::NotFound => None,
@@ -1535,10 +1530,15 @@ impl WatchServer {
     /// A `Remove` of a directory at/under which submodules live means those
     /// submodules' workdirs are gone -> re-read them so they flip to
     /// `DELETED_WORKDIR` (their own recursive watches just died silently). A
-    /// `Create` or rename (`Modify(Name)`) means a submodule directory
-    /// reappeared or moved -> a full reindex re-places the now-dead recursive
-    /// watch. Events with no submodule at/under the path are ordinary repo-root
-    /// churn and ignored.
+    /// `Create` or rename (`Modify(Name)`) means a directory reappeared or moved
+    /// -> a full reindex re-places the now-dead recursive watch.
+    ///
+    /// On macOS things are less clear. `FSEvents` event flags are advisory hints,
+    /// not a reliable log (Apple's guidance is to reconcile against the real
+    /// filesystem), so a `rm -rf` was seen on CI to surface as a `Create` for the
+    /// now-gone dir. The reindex it triggers re-reads actual state and tolerates
+    /// an absent workdir. Events with no submodule at/under the path are repo-root
+    /// churn, ignored.
     fn handle_tripwire_event(
         &self,
         event: &Event,
