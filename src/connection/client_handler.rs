@@ -165,7 +165,7 @@ fn handle_status_request(
     // Skip the 3 mutex lock/unlock pairs for progress subscriber management.
     if let Some(guard) = try_lock(statuses) {
         return ENCODE_BUF.with_borrow_mut(|buf| -> WatchResult<()> {
-            encode_status_response(&mut conn, &guard, buf)?;
+            encode_status_response(&mut conn, guard, buf)?;
             Ok(())
         });
     }
@@ -184,16 +184,15 @@ fn handle_status_request(
     let guard = result?;
 
     ENCODE_BUF.with_borrow_mut(|buf| -> WatchResult<()> {
-        encode_status_response(&mut conn, &guard, buf)?;
+        encode_status_response(&mut conn, guard, buf)?;
         Ok(())
     })?;
-    drop(guard);
 
     Ok(())
 }
 
-/// Encodes a `ServerMessage::Status` response directly from the status map guard,
-/// avoiding String clones by writing borrowed `&str` keys into the buffer.
+/// Encodes a `ServerMessage::Status` response from the status map guard
+/// and writes it to `conn`.
 ///
 /// The wire format matches the derived `Encode` for `ServerMessage::Status`:
 /// `variant(u32) | vec_len(u64) | [str_len(u64) + str_bytes + status(u8)]... | total(u32)`
@@ -203,10 +202,11 @@ fn handle_status_request(
 /// Returns `Err` if writing to `conn` fails.
 fn encode_status_response(
     conn: &mut BufReader<IpcStream>,
-    guard: &MutexGuard<'_, BTreeMap<String, StatusSummary>>,
+    guard: MutexGuard<'_, BTreeMap<String, StatusSummary>>,
     buf: &mut Vec<u8>,
 ) -> WatchResult<()> {
-    encode_status_into(guard, buf);
+    encode_status_into(&guard, buf);
+    drop(guard);
     conn.get_mut().write_all(buf)?;
     Ok(())
 }
