@@ -10,6 +10,7 @@ use std::{
         Arc, Condvar, Mutex, MutexGuard,
         atomic::{AtomicBool, Ordering},
     },
+    thread::JoinHandle,
     time::{Duration, Instant},
 };
 
@@ -29,7 +30,7 @@ use crate::{
     bitset::BitSet,
     connection::{
         BINCODE_CFG, DebugState, IpcStream, ServerMessage, cleanup_socket, create_listener,
-        encode_and_write, ipc_socket_path, write_full_message_fixed,
+        encode_and_write, ipc_connect, ipc_socket_path, write_full_message_fixed,
     },
     create_progress_bar,
     git::parse_gitmodules,
@@ -443,7 +444,13 @@ impl WatchServer {
         }
     }
 
-    /// Spawns a detached listener thread to handle incoming client connections
+    /// Spawns the listener thread that accepts incoming client connections.
+    ///
+    /// Returns a shutdown flag and the thread's `JoinHandle`. To stop the
+    /// listener, [`watch`] sets the flag and connects once to the socket: the
+    /// flag is checked after each `accept`, and the self-connection wakes the
+    /// otherwise-parked `accept` so the thread sees the flag and returns, ready
+    /// to be joined.
     ///
     /// # Errors
     ///
@@ -451,16 +458,17 @@ impl WatchServer {
     fn spawn_listener(
         &self,
         control_tx: crossbeam_channel::Sender<ControlMessage>,
-    ) -> std::io::Result<()> {
+    ) -> std::io::Result<(Arc<AtomicBool>, JoinHandle<()>)> {
         let listener = create_listener(&self.root_path)?;
         let statuses = Arc::clone(&self.submod_statuses);
         let progress = Arc::clone(&self.progress_queue);
         let subscribers = Arc::clone(&self.progress_subscribers);
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let listener_shutdown = Arc::clone(&shutdown);
 
-        std::thread::Builder::new()
+        let handle = std::thread::Builder::new()
             .name("subspy_listener".to_string())
             .spawn(move || {
-                // The listener thread runs until the process exits and is cleaned up by the OS
                 for conn in listener.incoming().filter_map(|c| match c {
                     Ok(c) => Some(c),
                     Err(e) => {
@@ -468,6 +476,11 @@ impl WatchServer {
                         None
                     }
                 }) {
+                    // When set, this `conn` is the shutdown self-connection from
+                    // `watch`.
+                    if listener_shutdown.load(Ordering::Acquire) {
+                        break;
+                    }
                     let control_tx = control_tx.clone();
                     let statuses = Arc::clone(&statuses);
                     let progress = Arc::clone(&progress);
@@ -483,7 +496,7 @@ impl WatchServer {
                 }
             })?;
 
-        Ok(())
+        Ok((shutdown, handle))
     }
 
     /// Builds a watcher wired to a fresh unbounded channel, **without** arming
@@ -1786,12 +1799,17 @@ pub fn watch(root_dir: &Path, display_progress: bool) -> WatchResult<()> {
     let status_lock = Arc::clone(&server.submod_statuses);
     let status_guard = status_lock.lock().expect("Mutex poisoned");
 
-    server.spawn_listener(control_tx)?;
+    let (listener_shutdown, listener_handle) = server.spawn_listener(control_tx)?;
     let result = server.watch(display_progress, status_guard);
+
+    // Stop the listener thread: set the flag, then connect once to wake its
+    // parked `accept` so it observes the flag and returns, and join it.
+    listener_shutdown.store(true, Ordering::Release);
+    let _ = ipc_connect(&ipc_socket_path(root_dir));
+    let _ = listener_handle.join();
+
     // Socket file cleanup can't be tied to IpcListener's Drop because the
-    // listener is moved into a background thread with no shutdown signal,
-    // which it runs until the OS tears down the process. Instead we clean
-    // up here after the server loop returns. Crashes that skip this are
+    // listener is moved into a background thread. Crashes that skip this are
     // handled by create_listener's stale socket recovery on next startup.
     cleanup_socket(root_dir);
     result
