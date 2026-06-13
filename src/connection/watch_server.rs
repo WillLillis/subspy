@@ -684,10 +684,14 @@ impl WatchServer {
 
         use rayon::prelude::*;
 
-        let gitmodule_entries = {
-            let _lock = LockFileGuard::acquire(&self.root_lock_path)?;
-            parse_gitmodules(&self.root_path)?
-        };
+        // Read `.gitmodules` WITHOUT holding `.git/index.lock`. git replaces
+        // `.gitmodules` via an atomic rename, so a reader always sees a complete
+        // old-or-new file, and the `.gitmodules` watcher re-fires for eventual
+        // consistency. Holding the index lock here is unnecessary for that read
+        // and actively harmful. It makes concurrent `git` commands fail fast on
+        // the pre-existing lock. (`parse_gitmodules` reads `.gitmodules` via
+        // `git2::Config`)
+        let gitmodule_entries = parse_gitmodules(&self.root_path)?;
 
         if gitmodule_entries.is_empty() {
             log::warn!(
@@ -1354,13 +1358,6 @@ impl WatchServer {
             // in a consistent state for readers. Acquiring `index.lock`
             // would block concurrent git operations (commit, rebase, add,
             // etc.) that need the same lock for writing.
-            //
-            // NOTE: The assert that exists in git2 around
-            // `git_submodule_lookup` is specific to
-            // `Repository::submodules()`, NOT `submodule_status()`. The
-            // former is separately guarded by the root lock in
-            // `populate_status_map()`. A missing index during
-            // `submodule_status()` returns a git2 error, not a panic.
             //
             // ## Retry strategy for transient read failures
             //
