@@ -1206,6 +1206,18 @@ impl WatchServer {
                 p.eq(&self.root_index_path)
                     || p.eq(&self.root_head_path)
                     || p.starts_with(&self.root_refs_heads_path)
+                    // The filesystem watcher may deliver git's
+                    // `index.lock`/`HEAD.lock` -> target rename as only the
+                    // "source" half (path = the `.lock` file, not the target),
+                    // dropping the target-half event that the clauses above key
+                    // on. Without this, a one-shot op like `git restore
+                    // --staged` whose only delivered event is the `.lock` source
+                    // half is classified `None`, so no re-read fires and a
+                    // cached status (e.g. STAGED_NEW for a just-unstaged
+                    // submodule) persists until the next git op. Mirrors the
+                    // submodule branch above.
+                    || (matches!(event.kind, EventKind::Modify(ModifyKind::Name(_)))
+                        && (p.eq(&self.root_lock_path) || p.eq(&self.root_head_lock_path)))
             }) {
                 // Git's atomic update pattern for `index`, `HEAD`, and branch
                 // refs: write to the `.lock` file, delete the original, rename
@@ -1816,6 +1828,44 @@ pub fn watch(root_dir: &Path, display_progress: bool) -> WatchResult<()> {
 mod tests {
     use super::*;
     use crate::connection::{ClientMessage, ClientRequest};
+
+    #[test]
+    fn root_lock_rename_source_half_triggers_recheck() {
+        // The filesystem watcher can deliver git's `index.lock`/`HEAD.lock` ->
+        // target rename as only the "source" half (path = the `.lock` file).
+        // The root branch of `classify_event` must still treat that as a
+        // RootGitOperation so submodule statuses get re-read; otherwise a cached
+        // STAGED_NEW (or any stale status) persists until the next git op. The
+        // submodule branch already handles this; the root branch did not.
+        // Observed on Windows; inotify can split a rename the same way.
+        use notify::event::RenameMode;
+
+        let (_tx, rx) = crossbeam_channel::unbounded();
+        let server = WatchServer::new(Path::new("/repo"), rx);
+        for lock in ["index.lock", "HEAD.lock"] {
+            let event = Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::From)))
+                .add_path(PathBuf::from("/repo/.git").join(lock));
+            assert!(
+                matches!(
+                    server.classify_event(&event, DOT_GIT_WATCHER_IDX),
+                    Some(EventType::RootGitOperation)
+                ),
+                "source-half rename of {lock} should classify as RootGitOperation"
+            );
+        }
+
+        // A lock *rollback* (the `.lock` deleted, index unchanged) must still be
+        // ignored: acting on it would spawn pointless re-reads on every op that
+        // touches the index without changing it.
+        let rollback = Event::new(EventKind::Remove(notify::event::RemoveKind::File))
+            .add_path(PathBuf::from("/repo/.git/index.lock"));
+        assert!(
+            server
+                .classify_event(&rollback, DOT_GIT_WATCHER_IDX)
+                .is_none(),
+            "index.lock removal (rollback) should not trigger a re-read"
+        );
+    }
 
     #[test]
     fn select_source_decodes_index_bands() {
