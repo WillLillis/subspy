@@ -52,6 +52,25 @@ fn add_submodule_without_commit_detected_by_server(_run: u32) {
     harness.assert_submodule_status("sub_a", StatusSummary::clean());
 }
 
+// Reproduces a reported bug: `git submodule add <src> temporary/some_submod`
+// then `git restore --staged temporary` (unstage the gitlink). git reports the
+// submodule as untracked, not staged. The server must drop the STAGED_NEW flag
+// it cached when the gitlink was first staged.
+#[apply(common::repeat)]
+fn unstage_new_submodule_clears_staged_new(_run: u32) {
+    let mut harness = common::HarnessBuilder::new().submodule("sub_a").build();
+    harness.assert_all_clean();
+
+    harness.add_submodule_no_commit("temporary/some_submod");
+    harness.assert_submodule_status("temporary/some_submod", StatusSummary::STAGED_NEW);
+
+    // `git restore --staged temporary` removes the gitlink from the index.
+    harness.root().restore_staged("temporary");
+    harness.assert_submodule_status("temporary/some_submod", StatusSummary::clean());
+
+    harness.assert_submodule_status("sub_a", StatusSummary::clean());
+}
+
 #[apply(common::repeat)]
 fn remove_submodule_without_commit_detected_by_server(_run: u32) {
     let harness = common::HarnessBuilder::new()
