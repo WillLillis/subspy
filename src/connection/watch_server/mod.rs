@@ -42,8 +42,8 @@ use crate::{
     DOT_GIT, DOT_GITMODULES, StatusSummary,
     bitset::BitSet,
     connection::{
-        BINCODE_CFG, IpcStream, ServerMessage, cleanup_socket, create_listener, ipc_connect,
-        ipc_socket_path, write_full_message_fixed,
+        IpcStream, cleanup_socket, create_listener, ipc_connect, ipc_socket_path,
+        protocol::SHUTDOWN_ACK, write_full_message_fixed,
     },
     watch::WatchResult,
 };
@@ -259,16 +259,8 @@ impl WatchServer {
 
     /// Sends a shutdown acknowledgment to the client over the IPC connection.
     fn signal_shutdown(mut conn: BufReader<IpcStream>) {
-        let mut buf = [0; 4]; // unit variant: 4 byte variant index (fixint)
-        match bincode::encode_into_slice(ServerMessage::ShutdownAck, &mut buf, BINCODE_CFG) {
-            Ok(_) => {
-                if let Err(e) = write_full_message_fixed(&mut conn, &buf) {
-                    error!("Failed to send shutdown ack -- {e}");
-                }
-            }
-            Err(e) => {
-                error!("Failed to encode shutdown ack -- {e}");
-            }
+        if let Err(e) = write_full_message_fixed(&mut conn, &SHUTDOWN_ACK) {
+            error!("Failed to send shutdown ack -- {e}");
         }
     }
 
