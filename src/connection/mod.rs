@@ -15,6 +15,7 @@ use thiserror::Error;
 
 pub mod client;
 mod client_handler;
+mod progress;
 mod protocol;
 mod transport;
 pub mod watch_server;

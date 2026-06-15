@@ -3,13 +3,12 @@
 
 use std::{
     cell::RefCell,
-    collections::{BTreeMap, VecDeque},
+    collections::BTreeMap,
     io::{BufReader, Write as _},
     sync::{Arc, MutexGuard},
 };
 
 use super::IpcStream;
-use bincode::{BorrowDecode, Encode};
 use log::{error, info};
 
 use crate::{
@@ -22,52 +21,13 @@ use crate::{
 };
 
 use super::{
+    progress::{ProgressMap, ProgressSubscribers, ProgressUpdate},
     try_lock,
-    watch_server::{ControlMessage, ProgressMap, ProgressSubscribers, StatusMap},
+    watch_server::{ControlMessage, StatusMap},
 };
 
 thread_local! {
     static ENCODE_BUF: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
-}
-
-#[derive(Debug, Clone, Copy, Encode, BorrowDecode)]
-pub(super) struct ProgressUpdate {
-    pub(super) curr: u32,
-    pub(super) total: u32,
-}
-
-impl ProgressUpdate {
-    #[must_use]
-    pub(super) const fn new(curr: u32, total: u32) -> Self {
-        Self { curr, total }
-    }
-}
-
-/// Pushes `progress_val` to the progress queue for every registered subscriber.
-///
-/// # Panics
-///
-/// Panics if either mutex has been poisoned
-#[inline]
-#[expect(clippy::significant_drop_tightening)]
-pub(super) fn broadcast_progress(
-    subscribers: &ProgressSubscribers,
-    progress: &ProgressMap,
-    progress_val: ProgressUpdate,
-) {
-    let subs = subscribers.lock().expect("Subscribers mutex poisoned");
-    // Avoid locking the progress queue for the common case of no active subscribers
-    if subs.is_empty() {
-        return;
-    }
-    let mut progress_guard = progress.lock().expect("Progress mutex poisoned");
-    for &pid in subs.iter() {
-        let queue = progress_guard.entry(pid).or_insert_with(|| {
-            let ProgressUpdate { total: cap, .. } = progress_val;
-            VecDeque::with_capacity(cap as usize + 1)
-        });
-        queue.push_back(progress_val);
-    }
 }
 
 /// Handles an incoming client connection on a dedicated OS thread.

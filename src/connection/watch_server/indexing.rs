@@ -10,7 +10,7 @@ use log::{error, info};
 use crate::{
     DOT_GIT, StatusSummary,
     connection::{
-        client_handler::{ProgressUpdate, broadcast_progress},
+        progress::{ProgressUpdate, broadcast_progress},
         watch_server::{ROOT_WATCHER_COUNT, WatchListItem, WatchServer},
     },
     create_progress_bar,
