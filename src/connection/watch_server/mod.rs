@@ -22,7 +22,7 @@ mod placement;
 mod update;
 
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::BTreeMap,
     io::BufReader,
     path::{Path, PathBuf},
     sync::{
@@ -52,7 +52,8 @@ use classify::EventType;
 use event_loop::HandleEventsExit;
 use update::InFlightTracker;
 
-use super::client_handler::{ProgressUpdate, handle_client_connection};
+use super::client_handler::handle_client_connection;
+use super::progress::{ProgressMap, ProgressSubscribers};
 
 /// `.git/` and `.gitmodules`
 const ROOT_WATCHER_COUNT: usize = 2;
@@ -62,12 +63,6 @@ const DOT_GIT_WATCHER_IDX: usize = 1;
 
 /// Type alias for the submodule status map mutex
 pub(super) type StatusMap = Mutex<BTreeMap<String, StatusSummary>>;
-
-/// Type alias for the progress queue mutex
-pub(super) type ProgressMap = Mutex<FxHashMap<u32, VecDeque<ProgressUpdate>>>;
-
-/// Set of client PIDs that should receive progress updates during indexing
-pub(super) type ProgressSubscribers = Mutex<FxHashSet<u32>>;
 
 /// Message receiver type for a watcher
 type WatchReceiver = crossbeam_channel::Receiver<Result<notify::Event, notify::Error>>;
