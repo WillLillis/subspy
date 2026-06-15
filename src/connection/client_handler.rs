@@ -15,8 +15,8 @@ use log::{error, info};
 use crate::{
     StatusSummary,
     connection::{
-        BINCODE_CFG, ClientMessage, ClientRequest, IPC_VERSION, MSG_PREFIX_LEN, ServerMessage,
-        read_full_message_fixed, write_full_message_fixed,
+        BINCODE_CFG, ClientMessage, ClientRequest, IPC_VERSION, ServerMessage,
+        read_full_message_fixed, transport::MSG_PREFIX_LEN, write_full_message_fixed,
     },
     watch::WatchResult,
 };
