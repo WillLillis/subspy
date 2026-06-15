@@ -78,6 +78,33 @@ pub enum ClientMessage {
     Debug,
 }
 
+/// The watch server's internal state snapshot, sent as the
+/// `ServerMessage::DebugInfo` payload in response to a debug request.
+#[derive(Clone, Debug, Eq, PartialEq, Encode, BorrowDecode)]
+pub struct DebugState {
+    pub server_pid: u32,
+    pub rayon_threads: u32,
+    pub progress_subscribers: Option<Vec<u32>>,
+    pub watcher_count: u32,
+    pub watched_paths: Vec<(String, String, u32)>,
+    pub skip_set: Vec<String>,
+    pub root_rebasing: bool,
+    pub root_path: String,
+    pub socket_name: String,
+    pub submodule_statuses: Option<Vec<(String, StatusSummary)>>,
+    /// In-flight rayon tasks: `(relative_path, state)` where state is
+    /// "active", "active (cancelling)", "dirty", or "dirty (cancelling)"
+    pub in_flight: Option<Vec<(String, String)>>,
+    /// Progress queues keyed by client PID: `(pid, [(curr, total)])`
+    #[expect(clippy::type_complexity)]
+    pub progress_queues: Option<Vec<(u32, Vec<(u32, u32)>)>>,
+    /// The last watcher error that triggered a reindex, if any
+    pub last_watcher_error: Option<String>,
+    /// Non-recursive tripwire watches on submodule ancestor directories:
+    /// `(watch_path, pending_event_count)`.
+    pub tripwires: Vec<(String, u32)>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Encode, BorrowDecode)]
 pub enum ServerMessage {
     Status {
@@ -126,32 +153,6 @@ impl std::fmt::Display for VersionMismatchError {
             self.client_version, self.server_version,
         )
     }
-}
-
-/// Diagnostic snapshot of the watch server's internal state
-#[derive(Clone, Debug, Eq, PartialEq, Encode, BorrowDecode)]
-pub struct DebugState {
-    pub server_pid: u32,
-    pub rayon_threads: u32,
-    pub progress_subscribers: Option<Vec<u32>>,
-    pub watcher_count: u32,
-    pub watched_paths: Vec<(String, String, u32)>,
-    pub skip_set: Vec<String>,
-    pub root_rebasing: bool,
-    pub root_path: String,
-    pub socket_name: String,
-    pub submodule_statuses: Option<Vec<(String, StatusSummary)>>,
-    /// In-flight rayon tasks: `(relative_path, state)` where state is
-    /// "active", "active (cancelling)", "dirty", or "dirty (cancelling)"
-    pub in_flight: Option<Vec<(String, String)>>,
-    /// Progress queues keyed by client PID: `(pid, [(curr, total)])`
-    #[expect(clippy::type_complexity)]
-    pub progress_queues: Option<Vec<(u32, Vec<(u32, u32)>)>>,
-    /// The last watcher error that triggered a reindex, if any
-    pub last_watcher_error: Option<String>,
-    /// Non-recursive tripwire watches on submodule ancestor directories:
-    /// `(watch_path, pending_event_count)`.
-    pub tripwires: Vec<(String, u32)>,
 }
 
 /// Returns `true` if IPC uses filesystem sockets that need manual cleanup.
