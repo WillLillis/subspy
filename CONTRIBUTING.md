@@ -82,10 +82,25 @@ each with its own renderer. Long stands alone; short + porcelain v1 share an
 
 | File | Purpose |
 |---|---|
-| `mod.rs` | Shared IPC types (`ClientRequest`, `ClientMessage`, `ServerMessage`), wire format helpers (`read_full_message`, `write_full_message_fixed`, `encode_and_write`), `IpcError`, platform abstractions |
-| `watch_server.rs` | Server event loop, watcher management, status computation, `InFlightTask` cancellation |
-| `client_handler.rs` | Server-side IPC message dispatch, progress broadcasting |
+| `mod.rs` | Spine: `IpcError`, `BINCODE_CFG` / `IPC_VERSION`, `VersionMismatchError`, the `try_lock` helpers, and grouped re-exports of `protocol` / `transport` so callers keep stable `connection::X` paths |
+| `protocol.rs` | IPC message types (`ClientRequest`, `ClientMessage`, `ServerMessage`, `DebugState`) and their wire-format stability tests |
+| `transport.rs` | Platform-specific sockets (`IpcStream` / `IpcListener`, connect/listen/cleanup) and length-prefixed framing (`read_full_message`, `write_full_message_fixed`, `encode_and_write`) |
+| `progress.rs` | Progress-update vocabulary shared by the server and client handler (`ProgressUpdate`, `ProgressMap`, `ProgressSubscribers`, `broadcast_progress`) |
 | `client.rs` | Client-side IPC (connect, send request, receive response) |
+| `client_handler.rs` | Server-side IPC message dispatch and progress delivery to subscribed clients |
+| `watch_server/` | The watch server (filesystem watching, status computation); see below |
+
+### Watch server (`src/connection/watch_server/`)
+
+| File | Purpose |
+|---|---|
+| `mod.rs` | The `WatchServer` struct, shared vocabulary (consts, type aliases, `ControlMessage`, `StatusMap`), the `watch()` entry, and the run-loop spine |
+| `classify.rs` | Event classification: `classify_event`, the `EventType` enum, and the path predicates |
+| `placement.rs` | Watcher and tripwire setup (`place_*`, `build_watcher`, `WatchListItem`) |
+| `indexing.rs` | Full status-map population (`populate_status_map`, `get_submod_status`, `get_modules_path`) |
+| `update.rs` | The in-flight rayon update engine (`try_spawn_submod_update`, `InFlightTask`/`InFlightTracker`) |
+| `event_loop.rs` | The `crossbeam` select loop, dispatch, tripwire handling, and reindex deferral (`GitmodulesTracker`) |
+| `debug.rs` | The debug-state dump (`gather_debug_state`, `handle_debug_request`) |
 
 ### Testing
 
