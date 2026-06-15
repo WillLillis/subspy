@@ -75,10 +75,34 @@ pub enum ServerMessage {
     },
 }
 
+/// Pre-encoded wire bytes for the payload-free messages, so the send paths can
+/// write them directly rather than running a bincode encode (and guarding an
+/// error that can never occur for a fixed unit variant).
+pub(super) const SHUTDOWN_REQUEST: [u8; 5] = [0, 1, 0, 0, 0];
+pub(super) const DEBUG_REQUEST: [u8; 5] = [0, 3, 0, 0, 0];
+pub(super) const SHUTDOWN_ACK: [u8; 4] = [2, 0, 0, 0];
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::connection::BINCODE_CFG;
+
+    #[test]
+    fn encoded_constants_match_their_messages() {
+        assert_eq!(
+            bincode::encode_to_vec(ClientRequest::new(ClientMessage::Shutdown), BINCODE_CFG)
+                .unwrap(),
+            SHUTDOWN_REQUEST,
+        );
+        assert_eq!(
+            bincode::encode_to_vec(ClientRequest::new(ClientMessage::Debug), BINCODE_CFG).unwrap(),
+            DEBUG_REQUEST,
+        );
+        assert_eq!(
+            bincode::encode_to_vec(ServerMessage::ShutdownAck, BINCODE_CFG).unwrap(),
+            SHUTDOWN_ACK,
+        );
+    }
 
     #[test]
     fn unit_variant_sizes() {

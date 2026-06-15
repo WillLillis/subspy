@@ -14,8 +14,9 @@ use crate::{
     StatusSummary,
     connection::{
         BINCODE_CFG, ClientMessage, ClientRequest, DebugState, IPC_VERSION, IpcResult, IpcStream,
-        ServerMessage, VersionMismatchError, ipc_connect, ipc_socket_path, read_full_message,
-        read_full_message_fixed, write_full_message_fixed,
+        ServerMessage, VersionMismatchError, ipc_connect, ipc_socket_path,
+        protocol::{DEBUG_REQUEST, SHUTDOWN_REQUEST},
+        read_full_message, read_full_message_fixed, write_full_message_fixed,
     },
     create_progress_bar,
     watch::spawn_daemon,
@@ -97,10 +98,7 @@ pub fn request_shutdown(root_path: &Path) -> IpcResult<()> {
     let sock_path = ipc_socket_path(root_path);
     let conn = ipc_connect(&sock_path)?;
     let mut conn = BufReader::new(conn);
-    let req = ClientRequest::new(ClientMessage::Shutdown);
-    let mut msg = [0; 5]; // 1 byte version + 4 byte variant index (fixint)
-    let msg_len = bincode::encode_into_slice(&req, &mut msg, BINCODE_CFG)?;
-    write_full_message_fixed(&mut conn, &msg[..msg_len])?;
+    write_full_message_fixed(&mut conn, &SHUTDOWN_REQUEST)?;
 
     // Wait for the watch server to acknowledge the shutdown.
     // VersionMismatch { u8 } = 5 bytes is the largest possible response.
@@ -301,10 +299,7 @@ pub fn request_debug(root_path: &Path) -> IpcResult<DebugState> {
     let sock_path = ipc_socket_path(root_path);
     let conn = ipc_connect(&sock_path)?;
     let mut conn = BufReader::new(conn);
-    let req = ClientRequest::new(ClientMessage::Debug);
-    let mut msg = [0; 5]; // 1 byte version + 4 byte variant index (fixint)
-    let msg_len = bincode::encode_into_slice(&req, &mut msg, BINCODE_CFG)?;
-    write_full_message_fixed(&mut conn, &msg[..msg_len])?;
+    write_full_message_fixed(&mut conn, &DEBUG_REQUEST)?;
 
     let mut buffer = Vec::with_capacity(1024);
     read_full_message(&mut conn, &mut buffer)?;
