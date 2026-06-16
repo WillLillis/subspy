@@ -318,6 +318,17 @@ pub fn setup_submodule_renamed(h: &TestHarness) {
     h.root().run_git(&["mv", "sub", "renamed_sub"]);
 }
 
+/// A submodule with both a new commit (HEAD advanced past the parent's
+/// gitlink) and modified working-tree content -- the `(modified content, new
+/// commits)` shape a submodule that is itself a superproject must still report.
+pub fn setup_submodule_modified_and_new_commits(h: &TestHarness) {
+    h.submodule("sub")
+        .write("README.md", "moved forward\n")
+        .add_all()
+        .commit("submodule advances")
+        .write("README.md", "and now dirty\n");
+}
+
 // -- Upstream-tracking setups --
 //
 // We fake an upstream without a real remote: `update-ref` positions
