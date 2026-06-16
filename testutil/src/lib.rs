@@ -334,6 +334,23 @@ impl Drop for TestHarness {
                 let _ = handle.join();
             }
         }
+
+        // The server thread is now joined, so every producer has quiesced and
+        // the captured trace is complete. Print it to stderr (where `libtest`
+        // attributes it to the failing test) if we are unwinding from a test
+        // failure; otherwise discard it. Compiled out without `trace_events`.
+        #[cfg(trace_events)]
+        {
+            let root = self.root.path();
+            if std::thread::panicking() {
+                subspy::connection::watch_server::trace::dump_for(
+                    root,
+                    &root.display().to_string(),
+                );
+            } else {
+                subspy::connection::watch_server::trace::discard_for(root);
+            }
+        }
     }
 }
 
@@ -592,6 +609,11 @@ fn start_watch_server(root_path: &Path) -> JoinHandle<()> {
     std::thread::Builder::new()
         .name("test_watch_server".to_string())
         .spawn(move || {
+            // In a `trace_events` build, capture this server's events into a
+            // per-test buffer keyed by repo root; the harness drains it on
+            // teardown (printing only if the test failed). No-op otherwise.
+            #[cfg(trace_events)]
+            subspy::connection::watch_server::trace::capture_for(&path);
             if let Err(e) = watch(&path, false) {
                 eprintln!("Watch server exited: {e}");
             }

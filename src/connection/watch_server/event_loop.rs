@@ -9,6 +9,8 @@ use std::{
 use log::error;
 use notify::{EventKind, event::ModifyKind};
 
+use super::trace::wtrace;
+
 use crate::{
     StatusSummary,
     bitset::BitSet,
@@ -170,7 +172,7 @@ impl WatchServer {
                     Err(_) => {
                         // No new events within the debounce window-> trigger
                         // the deferred reindex.
-                        wtrace!("reindex debounce expired -> reindexing");
+                        wtrace!(ReindexExpired);
                         wait_for_in_flight(&in_flight);
                         return Ok(HandleEventsExit::ReindexEvent);
                     }
@@ -229,13 +231,12 @@ impl WatchServer {
                             // root events (index rename, etc.) that spawn
                             // tasks independently.
                             gitmodules.on_gitmodules_changed();
-                            wtrace!(".gitmodules changed -> deferring reindex");
+                            wtrace!(GitmodulesDeferred);
                         } else {
                             gitmodules.on_root_event(&event);
-                            wtrace!(
-                                "root git op -> reindex deadline {:?}",
-                                gitmodules.deadline()
-                            );
+                            wtrace!(RootGitOp {
+                                deadline: gitmodules.deadline()
+                            });
                             for i in ROOT_WATCHER_COUNT..self.watchers.len() {
                                 if !self.skip_set.contains(i) {
                                     self.try_spawn_submod_update(
@@ -364,10 +365,12 @@ impl WatchServer {
                 .range::<Path, _>((Bound::Included(rel), Bound::Unbounded))
                 .take_while(|(k, _)| k.starts_with(rel))
             {
-                wtrace!(
-                    "tripwire {:?} {rel:?} -> submod[{idx}] (reindex={reindex_kind})",
-                    event.kind,
-                );
+                wtrace!(|s| TripwireFired {
+                    kind: event.kind,
+                    rel: s.intern_path(rel),
+                    idx,
+                    reindex: reindex_kind,
+                });
                 if reindex_kind {
                     // A single affected submodule is enough to decide a reindex.
                     needs_reindex = true;

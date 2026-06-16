@@ -9,3 +9,9 @@ dunce.workspace = true
 git2.workspace = true
 subspy = { path = ".." }
 tempfile.workspace = true
+
+[lints.rust]
+# `trace_events` is a build-time switch for verbose watch-server tracing; the
+# harness gates its capture/dump calls on it. Declared so `unexpected_cfgs`
+# stays quiet under `-D warnings`.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(trace_events)'] }

@@ -7,6 +7,8 @@ use std::{
 use git2::Repository;
 use log::{error, info};
 
+use super::trace::wtrace;
+
 use crate::{
     DOT_GIT, StatusSummary,
     connection::{
@@ -83,7 +85,10 @@ impl WatchServer {
 
         info!("Indexing project at {}", self.root_path.display());
         let n_submodules = gitmodule_entries.len() as u32;
-        wtrace!("(re)indexing {n_submodules} submodules (place_watches={place_submod_watches})");
+        wtrace!(Reindexing {
+            n: n_submodules,
+            place_watches: place_submod_watches,
+        });
         let progress_bar = display_progress
             .then(|| create_progress_bar(u64::from(n_submodules), "Indexing submodules"));
 
@@ -223,7 +228,10 @@ impl WatchServer {
             }
             if place_submod_watches {
                 let (rx, watcher) = Self::place_submodule_watch(&full_path)?;
-                wtrace!("watch submod[{index}] {}", full_path.display());
+                wtrace!(|s| WatchSubmod {
+                    index,
+                    path: s.intern_path(&full_path),
+                });
                 // Record the (root-relative) workdir->index mapping for every
                 // submodule, even ones whose status read failed: tripwire
                 // routing must still be able to find a submodule by path.

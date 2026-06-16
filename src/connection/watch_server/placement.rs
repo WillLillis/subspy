@@ -6,6 +6,8 @@ use std::{
 use log::error;
 use notify::Watcher as _;
 
+use super::trace::wtrace;
+
 use crate::{
     DOT_GIT, DOT_GITMODULES,
     connection::watch_server::{
@@ -76,10 +78,9 @@ impl WatchServer {
         match watcher.watch(watch_path.as_ref(), notify::RecursiveMode::Recursive) {
             Ok(()) => {}
             Err(e) if matches!(e.kind, notify::ErrorKind::PathNotFound) => {
-                wtrace!(
-                    "submod workdir {} absent; watch left disarmed",
-                    watch_path.as_ref().display()
-                );
+                wtrace!(|s| WatchDisarmed {
+                    path: s.intern_path(watch_path.as_ref())
+                });
             }
             Err(e) => return Err(e),
         }
@@ -167,7 +168,9 @@ impl WatchServer {
         for dir in self.tripwire_dirs() {
             match Self::place_watch(&dir, notify::RecursiveMode::NonRecursive) {
                 Ok((rx, watcher)) => {
-                    wtrace!("tripwire {}", dir.display());
+                    wtrace!(|s| TripwirePlaced {
+                        path: s.intern_path(&dir)
+                    });
                     let rel = dir
                         .strip_prefix(&self.root_path)
                         .unwrap_or(&dir)

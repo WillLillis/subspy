@@ -101,6 +101,7 @@ each with its own renderer. Long stands alone; short + porcelain v1 share an
 | `update.rs` | The in-flight rayon update engine (`try_spawn_submod_update`, `InFlightTask`/`InFlightTracker`) |
 | `event_loop.rs` | The `crossbeam` select loop, dispatch, tripwire handling, and reindex deferral (`GitmodulesTracker`) |
 | `debug.rs` | The debug-state dump (`gather_debug_state`, `handle_debug_request`) |
+| `trace.rs` | Opt-in (`--cfg trace_events`) structured event tracing: the `wtrace!` macro, `TraceEvent`, the per-thread interning sink, and the per-test capture/dump API |
 
 ### Testing
 
@@ -293,6 +294,41 @@ harness.assert_submodule_status("sub_b", StatusSummary::clean());
 real watch server with filesystem watchers. Too many concurrent servers exhaust
 OS watcher limits (e.g. inotify instances on Linux).
 
+### Tracing watch-server failures (`--cfg trace_events`)
+
+The hardest failures are rare, load-dependent races in the watch server that don't
+reproduce locally (e.g. a dropped inotify event under CI load). To make those
+debuggable, the watch server records a structured trace of every event it processes
+(`wtrace!` -> `TraceEvent`), gated behind `--cfg trace_events` so a normal build pays
+nothing -- the macro drops its argument unevaluated.
+
+Capture is per-test: the harness installs a sink on each server thread and, on test
+teardown, dumps the buffered timeline to stderr **only if the test failed** (passing
+tests discard theirs). The dump runs on the test thread, so `libtest` attributes it to
+the failing test. Events are timestamped and labeled by thread (`[test_watch_server]`
+for the event loop, `[ThreadId(N)]` for rayon workers) and merged into one sorted
+timeline:
+
+```text
++    50347us [test_watch_server] watcher[2] (sub_a) Access(Close(Write)) [".../sub_a/README.md"] -> Some(SubmoduleChange)
++    50697us [ThreadId(7)] re-read sub_a -> MODIFIED_CONTENT
+```
+
+**CI runs every test with it armed** (the `test` job sets `RUSTFLAGS=... --cfg
+trace_events`), so a flake that only surfaces under load still leaves a full trace.
+The clippy and build steps stay on the normal config, so the shipping binary is still
+compiled and linted.
+
+To arm it locally (e.g. when reproducing a CI failure):
+
+```sh
+RUSTFLAGS='--cfg trace_events' cargo test <test_name>
+```
+
+It is deliberately not always-on locally: the races rarely reproduce on a fast dev
+box, and it must stay out of `.cargo/config.toml`, which would also apply `--cfg
+trace_events` to `cargo build --release` and compile the tracing into production.
+
 ### Fuzzer (`xtask/`)
 
 The integration tests cover known scenarios deterministically, but can't cover the
@@ -335,6 +371,10 @@ cargo build
 cargo test          # unit + integration tests
 cargo clippy        # lints (pedantic + nursery enabled)
 cargo xtask fuzz    # randomized server fuzzing (runs indefinitely by default)
+
+# Re-run tests with watch-server event tracing (dumped on failure; armed in CI).
+# See "Tracing watch-server failures".
+RUSTFLAGS='--cfg trace_events' cargo test
 ```
 
 ## Platform Notes
