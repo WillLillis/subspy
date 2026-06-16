@@ -204,10 +204,11 @@ pub fn build_status_options(opts: OutputOpts, repo_kind: RepoKind) -> git2::Stat
         .renames_index_to_workdir(true)
         .renames_from_rewrites(true);
 
-    // Ignore submodules _only_ if we are the top level, in which case
-    // submodule statuses are provided by the watch server or computed
-    // locally outside `repo.statuses`.
-    if repo_kind == RepoKind::WithSubmodules {
+    // Exclude submodules from the plain status walk whenever subspy supplies
+    // their statuses itself -- the watch server at the top level, or local
+    // computation for a (possibly nested) superproject. Otherwise they would
+    // render as bare entries, missing the `(modified content, ...)` detail.
+    if repo_kind.has_submodules() {
         st_opts.exclude_submodules(true);
     }
     st_opts
@@ -316,9 +317,7 @@ pub fn status(
         opts,
         |repo| match conn {
             Some(ref mut c) => Ok(recv_status_response(c, display_progress)?.0),
-            None if kind == RepoKind::WithSubmodules
-                && ignore_submodules != IgnoreSubmodules::All =>
-            {
+            None if kind.has_submodules() && ignore_submodules != IgnoreSubmodules::All => {
                 compute_local_statuses(&project.repo_root, repo)
             }
             None => Ok(Vec::new()),

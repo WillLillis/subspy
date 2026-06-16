@@ -367,7 +367,7 @@ impl Status {
         let project = get_project_path(self.dir)?;
         let display_progress = std::io::stderr().is_terminal();
         let use_server = !self.no_server
-            && project.kind == RepoKind::WithSubmodules
+            && project.kind.server_eligible()
             && self.ignore_submodules != IgnoreSubmodules::All;
         // Default is on; only the explicit `--no-ahead-behind` flips it off.
         // `--ahead-behind` is accepted for symmetry but is the default.
@@ -400,13 +400,14 @@ impl Prompt {
     /// Returns `Err` if the project path is invalid or the operation fails.
     pub fn run(self) -> RunResult<()> {
         let project = get_project_path(self.dir)?;
-        if project.kind != RepoKind::WithSubmodules {
+        if !project.kind.has_submodules() {
             return Ok(());
         }
         let timeout = Duration::from_millis(self.timeout_ms);
+        let use_server = !self.no_server && project.kind.server_eligible();
         prompt(
             &project.repo_root,
-            !self.no_server,
+            use_server,
             self.format.as_deref(),
             timeout,
         )?;
@@ -422,7 +423,7 @@ impl List {
     /// Returns `Err` if the project path is invalid or the operation fails.
     pub fn run(self) -> RunResult<()> {
         let project = get_project_path(self.dir)?;
-        let no_server = self.no_server || project.kind != RepoKind::WithSubmodules;
+        let no_server = self.no_server || !project.kind.server_eligible();
         Ok(list(
             &project.repo_root,
             self.format.as_deref(),
@@ -470,7 +471,7 @@ impl ProjectPath {
     /// Returns `RunError::ProjectPath` when `kind` is not
     /// `RepoKind::WithSubmodules`.
     pub fn require_with_submodules(self) -> RunResult<PathBuf> {
-        if self.kind == RepoKind::WithSubmodules {
+        if self.kind.server_eligible() {
             Ok(self.repo_root)
         } else {
             Err(RunError::server_path(self.repo_root))
@@ -503,12 +504,18 @@ pub fn get_project_path(path: Option<PathBuf>) -> RunResult<ProjectPath> {
     loop {
         let dot_git_path = current_path.join(DOT_GIT);
         if dot_git_path.exists() {
-            let kind = if dot_git_path.is_file() {
-                RepoKind::Submodule
-            } else if current_path.join(DOT_GITMODULES).is_file() {
-                RepoKind::WithSubmodules
-            } else {
-                RepoKind::Normal
+            // A `.gitmodules` file means this repo has submodules to show; a
+            // `.git` *file* means this repo is itself a submodule (gitlink).
+            // A submodule can also be a superproject, which still needs
+            // submodule handling even though it can't host a watch server.
+            let kind = match (
+                dot_git_path.is_file(),
+                current_path.join(DOT_GITMODULES).is_file(),
+            ) {
+                (false, false) => RepoKind::Normal,
+                (false, true) => RepoKind::WithSubmodules,
+                (true, false) => RepoKind::Submodule,
+                (true, true) => RepoKind::SubmoduleWithSubmodules,
             };
             return Ok(ProjectPath {
                 repo_root: current_path.to_path_buf(),
@@ -609,13 +616,16 @@ mod tests {
 
     #[test]
     fn nested_submodule_with_own_submodules() {
-        // .git file takes precedence over .gitmodules presence.
+        // A submodule (`.git` file) that itself has submodules (`.gitmodules`)
+        // is its own superproject for status purposes, but not server-eligible.
         let tmp = TempDir::new().unwrap();
         setup_git_file(tmp.path());
         setup_gitmodules(tmp.path());
 
         let project = get_project_path(Some(tmp.path().to_path_buf())).unwrap();
-        assert_eq!(project.kind, RepoKind::Submodule);
+        assert_eq!(project.kind, RepoKind::SubmoduleWithSubmodules);
+        assert!(project.kind.has_submodules());
+        assert!(!project.kind.server_eligible());
     }
 
     #[test]

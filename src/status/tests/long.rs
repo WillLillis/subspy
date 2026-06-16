@@ -199,12 +199,12 @@ fn run_subspy_long(project: &ProjectPath, opts: OutputOpts) -> Vec<u8> {
     crate::paint::force_disable();
     let ahead_behind = opts.ahead_behind;
     let show_stash = opts.show_stash;
-    let with_submodules = project.kind == RepoKind::WithSubmodules;
+    let has_submodules = project.kind.has_submodules();
     assemble_status(
         project,
         opts,
         |repo| {
-            Ok(if with_submodules {
+            Ok(if has_submodules {
                 compute_local_statuses(&project.repo_root, repo)?
             } else {
                 Vec::new()
@@ -297,6 +297,26 @@ fn long_snapshots() {
     for case in CASES {
         run_case(case, default_opts());
     }
+}
+
+#[test]
+fn long_nested_superproject_snapshot() {
+    // A submodule that is itself a superproject (`SubmoduleWithSubmodules`)
+    // computes its submodule statuses locally, like a top-level superproject,
+    // so a modified submodule must still show the `(modified content, new
+    // commits)` detail (the bug dropped it). The gitlink-`.git` detection that
+    // yields this kind is covered by `cli`'s `get_project_path` tests; this
+    // covers the display path for the kind, so it hardcodes the kind like the
+    // other submodule cases.
+    let harness = HarnessBuilder::new().no_server().submodule("sub").build();
+    setup_submodule_modified_and_new_commits(&harness);
+    let project = ProjectPath {
+        repo_root: harness.root().path().to_path_buf(),
+        effective_cwd: harness.root().path().to_path_buf(),
+        kind: RepoKind::SubmoduleWithSubmodules,
+    };
+    let got = run_subspy_long(&project, default_opts());
+    assert_snapshot("nested_superproject_modified", &got);
 }
 
 #[test]
