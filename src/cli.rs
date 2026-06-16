@@ -39,30 +39,12 @@ pub enum Commands {
     Prompt(Prompt),
 }
 
-impl Commands {
-    #[must_use]
-    pub const fn log_level(&self) -> Option<LogLevel> {
-        match self {
-            Self::Reindex(cmd) => cmd.log_level,
-            Self::Stop(cmd) => cmd.log_level,
-            Self::Status(cmd) => cmd.log_level,
-            Self::Start(cmd) => cmd.log_level,
-            Self::Debug(cmd) => cmd.log_level,
-            Self::List(cmd) => cmd.log_level,
-            Self::Prompt(cmd) => cmd.log_level,
-        }
-    }
-}
-
 #[derive(Args, Debug)]
 #[command(visible_aliases = ["re", "r"])]
 pub struct Reindex {
     /// The directory whose watcher should reindex
     #[arg(index = 1)]
     pub dir: Option<PathBuf>,
-    /// The log level to use for the requesting client
-    #[arg(short, long)]
-    pub log_level: Option<LogLevel>,
     /// Replace all filesystem watchers during the reindex
     #[arg(short = 'w', long)]
     pub replace_watchers: bool,
@@ -78,9 +60,6 @@ pub struct Status {
     /// The directory to query `git status` for
     #[arg(index = 1)]
     pub dir: Option<PathBuf>,
-    /// The log level to use for the requesting client
-    #[arg(short, long)]
-    pub log_level: Option<LogLevel>,
     /// Skip the watch server and compute status locally via libgit2
     #[arg(long)]
     pub no_server: bool,
@@ -145,9 +124,6 @@ pub struct Stop {
     /// The directory to shutdown a watcher for
     #[arg(index = 1)]
     pub dir: Option<PathBuf>,
-    /// The log level to use for the requesting client
-    #[arg(short, long)]
-    pub log_level: Option<LogLevel>,
 }
 
 #[derive(Args, Debug)]
@@ -156,9 +132,6 @@ pub struct DebugDump {
     /// The directory whose watcher state to dump
     #[arg(index = 1)]
     pub dir: Option<PathBuf>,
-    /// The log level to use for the requesting client
-    #[arg(short, long)]
-    pub log_level: Option<LogLevel>,
 }
 
 #[derive(Args, Debug)]
@@ -167,9 +140,6 @@ pub struct List {
     /// The directory to list submodule info for
     #[arg(index = 1)]
     pub dir: Option<PathBuf>,
-    /// The log level to use for the requesting client
-    #[arg(short, long)]
-    pub log_level: Option<LogLevel>,
     #[expect(
         clippy::doc_markdown,
         reason = "placeholder names render in clap help text"
@@ -206,9 +176,6 @@ pub struct Prompt {
     /// The directory to query submodule status for
     #[arg(index = 1)]
     pub dir: Option<PathBuf>,
-    /// The log level to use for the requesting client
-    #[arg(short, long)]
-    pub log_level: Option<LogLevel>,
     /// Skip the watch server and compute status locally via libgit2
     #[arg(long)]
     pub no_server: bool,

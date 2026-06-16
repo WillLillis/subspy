@@ -102,7 +102,6 @@ impl From<Intercept> for Status {
         };
         Self {
             dir: value.chdir,
-            log_level: None,
             no_server: false,
             porcelain,
             short,

@@ -7,7 +7,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use log::{error, trace};
+use log::error;
 use notify::{RecursiveMode, Watcher as _};
 use thiserror::Error;
 
@@ -162,7 +162,6 @@ impl<'a> LockFileGuard<'a> {
 
 impl Drop for LockFileGuard<'_> {
     fn drop(&mut self) {
-        trace!("Releasing lock file at path: {}", self.path.display());
         if let Err(e) = fs::remove_file(self.path) {
             error!(
                 "Failed to release lock file at {}: {e}",

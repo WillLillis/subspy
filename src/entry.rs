@@ -80,10 +80,17 @@ where
     let cli = Commands::augment_subcommands(cli);
 
     let command = Commands::from_arg_matches(&cli.get_matches_from(args))?;
-    let is_watcher = setup_logging(&command)?;
+    setup_logging(&command)?;
 
-    let result = match command {
-        Commands::Start(watch_options) => watch_options.run(),
+    match command {
+        Commands::Start(watch_options) => {
+            let result = watch_options.run();
+            if let Err(ref err) = result {
+                error!("Fatal: {err}");
+            }
+            log::logger().flush();
+            result
+        }
         Commands::Status(status_options) => {
             let mut out = io::BufWriter::with_capacity(64 * 1024, io::stdout().lock());
             status_options.run(&mut out)
@@ -93,27 +100,17 @@ where
         Commands::Debug(debug_options) => debug_options.run(),
         Commands::List(list_options) => list_options.run(),
         Commands::Prompt(prompt_options) => prompt_options.run(),
-    };
-
-    if is_watcher {
-        if let Err(ref err) = result {
-            error!("Fatal: {err}");
-        }
-        log::logger().flush();
     }
-
-    result
 }
 
-/// Sets up logging, panic hooks, and flush behavior. Returns `true` if the
-/// command is the watch server (i.e. logs should be flushed on exit).
-fn setup_logging(command: &Commands) -> RunResult<bool> {
-    let is_watcher = matches!(command, Commands::Start(_));
-
-    if is_watcher {
+/// Sets up logging and, for the watch server, the panic hook. The watch
+/// server logs to a file in the cache dir (default `info`); client commands
+/// log to stderr (default `warn`).
+fn setup_logging(command: &Commands) -> RunResult<()> {
+    if let Commands::Start(start) = command {
         let mut log_file_dir = etcetera::choose_base_strategy()?.cache_dir();
         log_file_dir.push("subspy");
-        Logger::with(command.log_level().unwrap_or(LogLevel::Info))
+        Logger::with(start.log_level.unwrap_or(LogLevel::Info))
             .log_to_file(FileSpec::default().directory(log_file_dir))
             .write_mode(WriteMode::BufferAndFlush)
             .start()
@@ -128,13 +125,13 @@ fn setup_logging(command: &Commands) -> RunResult<bool> {
 
         info!("Invoked with command: {command:#?}");
     } else {
-        Logger::with(command.log_level().unwrap_or(LogLevel::Warn))
+        Logger::with(LogLevel::Warn)
             .log_to_stderr()
             .start()
             .unwrap();
     }
 
-    Ok(is_watcher)
+    Ok(())
 }
 
 #[cfg(test)]
