@@ -67,17 +67,19 @@ enum GitmodulesDeferral {
 
 /// Tracks deferred reindex state after `.gitmodules` changes.
 ///
-/// When `.gitmodules` is modified, we can't reindex immediately because the
-/// git operation (e.g. `git submodule add`, `git rm -f`) also produces index
-/// rename events as part of the same command. Triggering a reindex on those
-/// would acquire `index.lock` before the git operation completes, causing git
-/// to fail.
+/// When `.gitmodules` is modified, the same git command (e.g. `git submodule
+/// add`, `git rm -f`) also produces a burst of further index/ref events. Rather
+/// than reindex on each, we debounce: arm a deadline on the `.gitmodules` change
+/// and reset it on each further event, reindexing once they settle so we read
+/// the operation's final state.
 ///
 /// This state machine:
-/// 1. Records that a watcher update is needed ([`Self::on_gitmodules_changed`])
+/// 1. Arms a fallback deadline on the `.gitmodules` change ([`Self::on_gitmodules_changed`])
 /// 2. Skips events from the same git operation (via matching tracker cookie)
-/// 3. Resets a debounce deadline on events from subsequent operations
-/// 4. Falls back to a deadline-based reindex if no further root events arrive
+/// 3. Resets the debounce deadline on events from subsequent operations
+/// 4. Reindexes once the deadline elapses, even if no further root event
+///    arrives -- the index event can be dropped under inotify queue pressure,
+///    and a manual `.gitmodules` edit produces none at all
 #[derive(Clone, Copy)]
 pub(super) struct GitmodulesTracker {
     state: GitmodulesDeferral,
@@ -101,12 +103,15 @@ impl GitmodulesTracker {
         self.deadline
     }
 
-    /// Called when `.gitmodules` itself changes. Resets the tracker to begin
-    /// deferring the reindex until a subsequent operation completes.
+    /// Called when `.gitmodules` itself changes. Begins deferring the reindex
+    /// and arms a fallback deadline, so the reindex still fires if the git
+    /// operation's index event never reaches us -- an inotify queue overflow
+    /// under load can drop it, and a manual `.gitmodules` edit produces none.
+    /// A subsequent root event resets the deadline to debounce normally.
     #[inline]
-    pub(super) const fn on_gitmodules_changed(&mut self) {
+    pub(super) fn on_gitmodules_changed(&mut self) {
         self.state = GitmodulesDeferral::Pending;
-        self.deadline = None;
+        self.deadline = Some(Instant::now() + REINDEX_DEBOUNCE);
     }
 
     /// Called when a non-`.gitmodules` root git event arrives. Updates the
@@ -117,11 +122,10 @@ impl GitmodulesTracker {
         match self.state {
             GitmodulesDeferral::Idle => {}
             GitmodulesDeferral::Pending => {
-                // First root event after .gitmodules changed-> this is the
-                // index rename from the same git operation. Record its
-                // tracker cookie and start a debounce timer as a fallback
-                // (in case no subsequent git command produces a root event,
-                // e.g. `git submodule add` without a follow-up `git commit`).
+                // First root event after .gitmodules changed-> the index rename
+                // from the same git operation. Record its tracker cookie and
+                // reset the debounce deadline (already armed by
+                // on_gitmodules_changed) so a burst of events settles first.
                 self.state = GitmodulesDeferral::Consumed(event.attrs.tracker());
                 self.deadline = Some(Instant::now() + REINDEX_DEBOUNCE);
             }
@@ -441,5 +445,20 @@ mod tests {
         assert!(matches!(select_source(2, 2, 3), SelectSource::Tripwire(0)));
         assert!(matches!(select_source(4, 2, 3), SelectSource::Tripwire(2)));
         assert!(matches!(select_source(5, 2, 3), SelectSource::Control));
+    }
+
+    #[test]
+    fn gitmodules_change_arms_fallback_deadline() {
+        // A `.gitmodules` change must arm a deadline on its own, so the deferred
+        // reindex fires even when the git operation's index event is dropped
+        // (e.g. inotify queue overflow under load). Without it, `handle_events`
+        // blocks on `sel.select()` forever and the new submodule never indexes.
+        let mut tracker = GitmodulesTracker::new();
+        assert!(tracker.deadline().is_none());
+        tracker.on_gitmodules_changed();
+        assert!(
+            tracker.deadline().is_some(),
+            "a .gitmodules change must arm a fallback deadline"
+        );
     }
 }
