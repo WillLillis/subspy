@@ -9,6 +9,8 @@ use rustc_hash::FxHashMap;
 
 use crate::{StatusSummary, bitset::BitSet, connection::watch_server::WatchServer};
 
+use super::trace::{spawn_submod_task, wtrace};
+
 /// An in-flight rayon task for a submodule status read. Setting the cancel
 /// flag signals the task to stop.
 pub(super) struct InFlightTask {
@@ -94,7 +96,7 @@ impl WatchServer {
         let root_path = Arc::clone(&self.root_path_shared);
         let pending_retries = Arc::clone(pending_lock_retries);
 
-        rayon::spawn(move || {
+        spawn_submod_task(move || {
             // ## Lock-free submodule status reads
             //
             // No `index.lock` is acquired here. `submodule_status()` is a
@@ -161,7 +163,10 @@ impl WatchServer {
                     match repo.submodule_status(&relative_path, git2::SubmoduleIgnore::None) {
                         Ok(st) => {
                             let submod_status: StatusSummary = st.into();
-                            wtrace!("re-read {relative_path} -> {submod_status:?}");
+                            wtrace!(|s| ReReadOk {
+                                rel: s.intern_str(&relative_path),
+                                status: submod_status,
+                            });
                             if !cancel.load(Ordering::Relaxed) {
                                 let mut guard = statuses.lock().expect("StatusMap mutex poisoned");
                                 if let Some(entry) = guard.get_mut(relative_path.as_str()) {
@@ -173,11 +178,12 @@ impl WatchServer {
                             true
                         }
                         Err(e) => {
-                            wtrace!(
-                                "re-read {relative_path} FAILED -> code={:?} class={:?} msg={e}",
-                                e.code(),
-                                e.class(),
-                            );
+                            wtrace!(|s| ReReadFailed {
+                                rel: s.intern_str(&relative_path),
+                                code: e.code(),
+                                class: e.class(),
+                                msg: s.intern_str(e.message()),
+                            });
                             if !cancel.load(Ordering::Relaxed) {
                                 trace!(
                                     "Transient read failure for {relative_path}, \

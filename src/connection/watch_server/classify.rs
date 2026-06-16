@@ -9,6 +9,8 @@ use crate::connection::watch_server::{
     DOT_GIT_WATCHER_IDX, DOT_GITMODULES_WATCHER_IDX, ROOT_WATCHER_COUNT, WatchServer,
 };
 
+use super::trace::wtrace;
+
 /// Summarizes an event received from a watcher. Create with [`WatchServer::classify_event`]
 #[derive(Debug, Copy, Clone)]
 pub(super) enum EventType {
@@ -195,12 +197,13 @@ impl WatchServer {
         index: usize,
     ) -> Option<EventType> {
         let event_type = self.classify_event(event, index);
-        wtrace!(
-            "watcher[{index}] ({}) {:?} {:?} -> {event_type:?}",
-            self.watchers[index].relative_path,
-            event.kind,
-            event.paths,
-        );
+        wtrace!(|s| Classified {
+            index,
+            rel: s.intern_str(&self.watchers[index].relative_path),
+            kind: event.kind,
+            paths: event.paths.iter().map(|p| s.intern_path(p)).collect(),
+            result: event_type,
+        });
         event_type
     }
 

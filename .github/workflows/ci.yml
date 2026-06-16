@@ -44,6 +44,15 @@ jobs:
         # hang when many watchers run in parallel -- likely a similar
         # resource pinch (ReadDirectoryChangesW buffer / IPC contention).
         # Force serial execution there until we can investigate properly.
+        #
+        # `--cfg trace_events` arms the watch-server trace capture for every
+        # test run, so a rare, load-dependent failure dumps a full per-test
+        # event timeline under the failing test (see CONTRIBUTING.md). The
+        # clippy and build steps above keep the normal config, so the shipping
+        # binary is still compiled and linted. `-D warnings` is repeated here
+        # because a step-level `env` replaces the workflow-level value rather
+        # than merging with it.
         env:
           RUST_TEST_THREADS: ${{ runner.os == 'Windows' && '1' || '4' }}
+          RUSTFLAGS: -D warnings --cfg trace_events
         run: cargo test --workspace --locked

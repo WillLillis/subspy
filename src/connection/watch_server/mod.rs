@@ -1,25 +1,21 @@
 //! The watch server: monitors filesystem events on submodule working trees,
 //! maintains a cached status map, and serves status queries over IPC.
 
-/// Emits a watch-server trace line to stderr, but only in builds made with
-/// `--cfg trace_events`.
-#[cfg(trace_events)]
-macro_rules! wtrace {
-    ($($arg:tt)*) => {{ eprintln!("[subspy] {}", format_args!($($arg)*)); }};
-}
-/// Emits a watch-server trace line to stderr, but only in builds made with
-/// `--cfg trace_events`.
-#[cfg(not(trace_events))]
-macro_rules! wtrace {
-    ($($arg:tt)*) => {};
-}
-
 mod classify;
 mod debug;
 mod event_loop;
 mod indexing;
 mod placement;
 mod update;
+
+// Defines the `wtrace!` macro (imported by path where used) plus the trace
+// capture machinery. `pub` only under `--cfg trace_events`, where
+// `capture_for`/`dump_for` are reachable by the test harness; a normal build
+// keeps it private, adding no public surface.
+#[cfg(trace_events)]
+pub mod trace;
+#[cfg(not(trace_events))]
+mod trace;
 
 use std::{
     collections::BTreeMap,
