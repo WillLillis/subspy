@@ -9,7 +9,7 @@ use std::{
 };
 
 use super::IpcStream;
-use log::{error, info};
+use log::error;
 
 use crate::{
     StatusSummary,
@@ -64,7 +64,6 @@ fn dispatch_client_message(
     let msg_len = read_full_message_fixed(&mut conn, &mut buffer)?;
     let (request, _): (ClientRequest, usize) =
         bincode::borrow_decode_from_slice(&buffer[..msg_len], BINCODE_CFG)?;
-    info!("Received client request: {request:?}");
 
     if request.version != IPC_VERSION {
         error!(

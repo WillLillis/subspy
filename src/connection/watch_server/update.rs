@@ -4,7 +4,7 @@ use std::sync::{
 };
 
 use git2::Repository;
-use log::{error, trace};
+use log::error;
 use rustc_hash::FxHashMap;
 
 use crate::{StatusSummary, bitset::BitSet, connection::watch_server::WatchServer};
@@ -177,6 +177,7 @@ impl WatchServer {
                             }
                             true
                         }
+                        #[cfg_attr(not(trace_events), allow(unused_variables))]
                         Err(e) => {
                             wtrace!(|s| ReReadFailed {
                                 rel: s.intern_str(&relative_path),
@@ -184,12 +185,6 @@ impl WatchServer {
                                 class: e.class(),
                                 msg: s.intern_str(e.message()),
                             });
-                            if !cancel.load(Ordering::Relaxed) {
-                                trace!(
-                                    "Transient read failure for {relative_path}, \
-                                     will retry if dirty -- {e}",
-                                );
-                            }
                             false
                         }
                     };

@@ -444,7 +444,7 @@ The watch server logs to a file under the OS cache directory:
 - **Windows**: `%LocalAppData%/subspy/` (typically `C:\Users\<user>\AppData\Local\subspy\`)
 
 The default log level is `info`. For more detail, start the server with
-`--log-level trace` (or `debug`). Client commands log to stderr at `warn` by default.
+`--log-level trace` (or `debug`). Client commands log to stderr at `warn`.
 
 To watch logs in real time while reproducing an issue:
 
