@@ -17,6 +17,7 @@
 mod conflict;
 mod display;
 mod header;
+mod interleave;
 mod porcelain_v1;
 mod porcelain_v2;
 mod quote;

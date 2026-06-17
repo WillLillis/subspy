@@ -156,6 +156,20 @@ const CASES: &[Case] = &[
         },
     },
     Case {
+        name: "submodules_interleaved_unstaged",
+        setup: Setup::WithSubmodules {
+            names: &["ddd", "ppp"],
+            setup: setup_submodules_interleaved_unstaged,
+        },
+    },
+    Case {
+        name: "submodules_interleaved_staged",
+        setup: Setup::WithSubmodules {
+            names: &["ddd", "ppp"],
+            setup: setup_submodules_interleaved_staged,
+        },
+    },
+    Case {
         name: "upstream_up_to_date",
         setup: Setup::Plain(setup_upstream_up_to_date),
     },

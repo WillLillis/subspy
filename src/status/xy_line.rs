@@ -23,6 +23,7 @@ use crate::{StatusSummary, paint::paint_into};
 use super::{
     PorcelainOpts, StatusEntries, StatusResult, configured_upstream_short_name,
     conflict::{ConflictEntry, build_conflict_map},
+    interleave::{Row, SubRow, for_each_merged},
     line_terminator,
     quote::QuoteMode,
     relativize::Relativizer,
@@ -85,50 +86,68 @@ pub(super) fn display_xy_lines(
     let index = repo.index()?;
     let conflicts = build_conflict_map(&index)?;
 
-    for entry in entries.non_submod.iter() {
+    // git emits tracked changes (including submodules) in one path-sorted
+    // stream, then untracked, then ignored. libgit2 excludes submodules from
+    // `non_submod`, so interleave the submodule rows among the tracked file
+    // entries by path.
+    let tracked = entries.non_submod.iter().filter(|entry| {
         let st = entry.status();
-        if st == git2::Status::CURRENT
-            || st == git2::Status::WT_NEW
-            || st.contains(git2::Status::IGNORED)
-        {
-            continue;
-        }
-        if st.contains(git2::Status::CONFLICTED) {
-            write_conflict(&entry, &conflicts, out, rel, null_terminate, style)?;
-        } else if st.intersects(git2::Status::INDEX_RENAMED | git2::Status::WT_RENAMED) {
-            write_renamed(&entry, out, rel, null_terminate, style)?;
-        } else {
-            write_ordinary(&entry, out, rel, null_terminate, style)?;
-        }
-    }
+        st != git2::Status::CURRENT
+            && st != git2::Status::WT_NEW
+            && !st.contains(git2::Status::IGNORED)
+    });
+    let mut submods: Vec<SubRow<'_>> = Vec::new();
+    submods.extend(
+        entries
+            .submodules
+            .iter()
+            .map(|(path, st)| SubRow::Modified(path, *st)),
+    );
+    submods.extend(
+        entries
+            .deleted_submodules
+            .iter()
+            .map(|path| SubRow::Deleted(path)),
+    );
+    submods.extend(entries.renamed_submodules.iter().map(SubRow::Renamed));
 
-    for (path, st) in entries.submodules {
-        write_submodule(path, *st, out, rel, null_terminate, style)?;
-    }
-
-    for path in entries.deleted_submodules {
-        // `D ` (staged deletion of a submodule). X gets the staged color,
-        // Y is blank.
-        let x = XyChar::new('D', style.palette.map(|p| p.updated));
-        let y = XyChar::new(' ', None);
-        write_xy_path(out, x, y, path, rel, null_terminate, style)?;
-    }
-
-    for rename in entries.renamed_submodules {
-        // `R ` (staged submodule rename). With -z the new and old paths
-        // are NUL-separated; otherwise rendered as `old -> new`.
-        let x = XyChar::new('R', style.palette.map(|p| p.updated));
-        let y = XyChar::new(' ', None);
-        write_xy_prefix(out, x, y)?;
-        if null_terminate {
-            write!(out, "{new}\0{old}\0", new = rename.new, old = rename.old)?;
-        } else {
-            write_path(out, &rename.old, rel, false, style)?;
-            out.write_all(b" -> ")?;
-            write_path(out, &rename.new, rel, false, style)?;
-            out.write_all(b"\n")?;
+    for_each_merged(tracked, submods, |row| match row {
+        Row::File(entry) => {
+            let st = entry.status();
+            if st.contains(git2::Status::CONFLICTED) {
+                write_conflict(&entry, &conflicts, out, rel, null_terminate, style)
+            } else if st.intersects(git2::Status::INDEX_RENAMED | git2::Status::WT_RENAMED) {
+                write_renamed(&entry, out, rel, null_terminate, style)
+            } else {
+                write_ordinary(&entry, out, rel, null_terminate, style)
+            }
         }
-    }
+        Row::Sub(SubRow::Modified(path, st)) => {
+            write_submodule(path, st, out, rel, null_terminate, style)
+        }
+        Row::Sub(SubRow::Deleted(path)) => {
+            // `D ` (staged deletion of a submodule). X gets the staged color,
+            // Y is blank.
+            let x = XyChar::new('D', style.palette.map(|p| p.updated));
+            let y = XyChar::new(' ', None);
+            write_xy_path(out, x, y, path, rel, null_terminate, style)
+        }
+        Row::Sub(SubRow::Renamed(rename)) => {
+            // `R ` (staged submodule rename). With -z the new and old paths
+            // are NUL-separated; otherwise rendered as `old -> new`.
+            let x = XyChar::new('R', style.palette.map(|p| p.updated));
+            let y = XyChar::new(' ', None);
+            write_xy_prefix(out, x, y)?;
+            if null_terminate {
+                write!(out, "{new}\0{old}\0", new = rename.new, old = rename.old)
+            } else {
+                write_path(out, &rename.old, rel, false, style)?;
+                out.write_all(b" -> ")?;
+                write_path(out, &rename.new, rel, false, style)?;
+                out.write_all(b"\n")
+            }
+        }
+    })?;
 
     for entry in entries
         .non_submod

@@ -20,6 +20,7 @@ use crate::StatusSummary;
 use super::{
     PorcelainOpts, StatusEntries, StatusResult, configured_upstream_short_name,
     conflict::{ConflictEntry, build_conflict_map},
+    interleave::{Row, SubRow, for_each_merged},
     line_terminator,
     quote::QuoteMode,
     relativize::Relativizer,
@@ -45,6 +46,10 @@ struct RenderOpts<'a> {
 /// Quoting policy: porcelain v2 doesn't treat a plain space as
 /// "unusual" (no `QUOTE_PATH_QUOTE_SP`). High bytes are quoted unless
 /// the caller passed `-c core.quotepath=false` via `opts.quote_path`.
+#[expect(
+    clippy::too_many_lines,
+    reason = "branch headers plus the interleaved tracked pass and untracked/ignored passes"
+)]
 pub fn display_porcelain_v2(
     out: &mut impl Write,
     repo: &Repository,
@@ -83,54 +88,69 @@ pub fn display_porcelain_v2(
     let conflicts = build_conflict_map(&index)?;
     let head_tree = repo.head().ok().and_then(|h| h.peel_to_tree().ok());
 
-    // Match git's three-pass ordering: tracked (modified/staged/conflicted/
-    // renamed) first, then untracked, then ignored.
-    for entry in entries.non_submod.iter() {
+    // git emits tracked changes (ordinary/renamed/conflicted, including
+    // submodules) in one path-sorted stream, then untracked, then ignored.
+    // libgit2 excludes submodules from `non_submod`, so interleave the
+    // submodule rows among the tracked file entries by path.
+    let tracked = entries.non_submod.iter().filter(|entry| {
         let st = entry.status();
-        if st == git2::Status::CURRENT
-            || st == git2::Status::WT_NEW
-            || st.contains(git2::Status::IGNORED)
-        {
-            continue;
-        }
-        if st.contains(git2::Status::CONFLICTED) {
-            write_conflict(&entry, &conflicts, out, &render_opts)?;
-        } else if st.intersects(git2::Status::INDEX_RENAMED | git2::Status::WT_RENAMED) {
-            write_renamed(&entry, out, &render_opts)?;
-        } else {
-            write_ordinary(&entry, out, &render_opts)?;
-        }
-    }
+        st != git2::Status::CURRENT
+            && st != git2::Status::WT_NEW
+            && !st.contains(git2::Status::IGNORED)
+    });
+    let mut submods: Vec<SubRow<'_>> = Vec::new();
+    submods.extend(
+        entries
+            .submodules
+            .iter()
+            .map(|(path, st)| SubRow::Modified(path, *st)),
+    );
+    submods.extend(
+        entries
+            .deleted_submodules
+            .iter()
+            .map(|path| SubRow::Deleted(path)),
+    );
+    submods.extend(entries.renamed_submodules.iter().map(SubRow::Renamed));
 
-    for (path, st) in entries.submodules {
-        let h_head = head_tree
+    // Gitlink OIDs come from HEAD's tree and the index, keyed by submodule path.
+    let head_oid = |path: &str| {
+        head_tree
             .as_ref()
             .and_then(|t| t.get_path(Path::new(path)).ok())
-            .map_or(git2::Oid::ZERO_SHA1, |e| e.id());
-        let h_index = index
+            .map_or(git2::Oid::ZERO_SHA1, |e| e.id())
+    };
+    let index_oid = |path: &str| {
+        index
             .get_path(Path::new(path), 0)
-            .map_or(git2::Oid::ZERO_SHA1, |e| e.id);
-        write_submodule(path, *st, h_head, h_index, out, &render_opts)?;
-    }
+            .map_or(git2::Oid::ZERO_SHA1, |e| e.id)
+    };
 
-    for path in entries.deleted_submodules {
-        let h_head = head_tree
-            .as_ref()
-            .and_then(|t| t.get_path(Path::new(path)).ok())
-            .map_or(git2::Oid::ZERO_SHA1, |e| e.id());
-        write_deleted_submodule(path, h_head, out, &render_opts)?;
-    }
-
-    for rename in entries.renamed_submodules {
-        let h_head = head_tree
-            .as_ref()
-            .and_then(|t| t.get_path(Path::new(&rename.old)).ok())
-            .map_or(git2::Oid::ZERO_SHA1, |e| e.id());
-        let h_index = index
-            .get_path(Path::new(&rename.new), 0)
-            .map_or(git2::Oid::ZERO_SHA1, |e| e.id);
-        write_renamed_submodule(rename, h_head, h_index, out, &render_opts)?;
-    }
+    for_each_merged(tracked, submods, |row| match row {
+        Row::File(entry) => {
+            let st = entry.status();
+            if st.contains(git2::Status::CONFLICTED) {
+                write_conflict(&entry, &conflicts, out, &render_opts)
+            } else if st.intersects(git2::Status::INDEX_RENAMED | git2::Status::WT_RENAMED) {
+                write_renamed(&entry, out, &render_opts)
+            } else {
+                write_ordinary(&entry, out, &render_opts)
+            }
+        }
+        Row::Sub(SubRow::Modified(path, st)) => {
+            write_submodule(path, st, head_oid(path), index_oid(path), out, &render_opts)
+        }
+        Row::Sub(SubRow::Deleted(path)) => {
+            write_deleted_submodule(path, head_oid(path), out, &render_opts)
+        }
+        Row::Sub(SubRow::Renamed(rename)) => write_renamed_submodule(
+            rename,
+            head_oid(&rename.old),
+            index_oid(&rename.new),
+            out,
+            &render_opts,
+        ),
+    })?;
 
     for entry in entries
         .non_submod
