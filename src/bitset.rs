@@ -47,6 +47,19 @@ impl BitSet {
         }
     }
 
+    /// Debug-only bounds check shared by the unchecked accessors. Compiles out
+    /// in release; in debug it converts an out-of-range index (e.g. a watcher
+    /// index past a wrongly-sized bitset) into a panic rather than a silent
+    /// out-of-bounds read.
+    #[inline]
+    fn assert_in_bounds(&self, i: usize) {
+        debug_assert!(
+            i / 64 < self.words().len(),
+            "BitSet index {i} out of bounds ({} words)",
+            self.words().len(),
+        );
+    }
+
     /// Returns whether the bit at index `i` is set.
     ///
     /// Safety:
@@ -55,6 +68,7 @@ impl BitSet {
     #[inline]
     #[must_use]
     pub fn contains(&self, i: usize) -> bool {
+        self.assert_in_bounds(i);
         // SAFETY: callers only pass watcher indices, which are bounded by the
         // capacity established in `with_capacity` / `clear_and_resize`.
         unsafe { *self.words().get_unchecked(i / 64) & (1u64 << (i % 64)) != 0 }
@@ -67,6 +81,7 @@ impl BitSet {
     /// `i` must be less than the capacity of `self`.
     #[inline]
     pub fn insert(&mut self, i: usize) {
+        self.assert_in_bounds(i);
         // SAFETY: same as `contains`
         unsafe { *self.words_mut().get_unchecked_mut(i / 64) |= 1u64 << (i % 64) }
     }
@@ -74,6 +89,7 @@ impl BitSet {
     /// Removes `i` from the set. Returns `true` if it was present.
     #[inline]
     pub fn remove(&mut self, i: usize) -> bool {
+        self.assert_in_bounds(i);
         // SAFETY: same as `contains`
         unsafe {
             let word = self.words_mut().get_unchecked_mut(i / 64);
@@ -249,5 +265,20 @@ mod tests {
         assert!(!bs.contains(5));
         bs.insert(5);
         assert!(bs.contains(5));
+    }
+
+    // Mirrors the watch-server skip_set invariant: after a heap bitset is
+    // cleared and resized smaller, the old (now out-of-range) indices must not
+    // be probed. The watch server upholds this by sizing skip_set to the live
+    // watcher count; this asserts the debug backstop catches a regression
+    // instead of letting `contains` read out of bounds. Debug-only: the
+    // assertion compiles out in release, where the access would be UB.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "out of bounds")]
+    fn probe_past_shrunk_heap_capacity_is_caught() {
+        let mut bs = BitSet::with_capacity(1024); // heap: 16 words, 1024 bits
+        bs.clear_and_resize(64); // inline: 512-bit capacity
+        let _ = bs.contains(900); // 900 >= 512 -> out of bounds
     }
 }
