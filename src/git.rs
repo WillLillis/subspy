@@ -119,10 +119,6 @@ pub fn parse_per_submodule_ignore(
 /// # Errors
 ///
 /// Returns `git2::Error` if `.gitmodules` cannot be parsed.
-///
-/// # Panics
-///
-/// Panics if a `.gitmodules` entry contains non-UTF-8 keys or paths.
 pub fn parse_gitmodules(
     root_path: &Path,
 ) -> Result<Vec<(String, String, Option<String>)>, git2::Error> {
@@ -134,16 +130,19 @@ pub fn parse_gitmodules(
     let mut iter = config.entries(Some("submodule\\..*\\.path"))?;
     while let Some(entry) = iter.next() {
         let entry = entry?;
-        let key = entry.name().expect("non-UTF-8 key in .gitmodules");
-        // Guaranteed by the regex filter on entries()
-        let name = key
+        // Skip entries with a non-UTF-8 key or path instead of panicking: a
+        // submodule path is arbitrary bytes on Linux, and git tolerates it.
+        // Mirrors `scan_submodule_props`.
+        let Ok(key) = entry.name() else { continue };
+        // The regex filter on entries() guarantees this shape; skip defensively.
+        let Some(name) = key
             .strip_prefix("submodule.")
             .and_then(|s| s.strip_suffix(".path"))
-            .unwrap();
-        let path = entry
-            .value()
-            .expect("non-UTF-8 path in .gitmodules")
-            .to_string();
+        else {
+            continue;
+        };
+        let Ok(path) = entry.value() else { continue };
+        let path = path.to_string();
         branch_key.truncate("submodule.".len());
         branch_key.push_str(name);
         branch_key.push_str(".branch");
@@ -239,6 +238,23 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let entries = parse_gitmodules(tmp.path()).unwrap();
         assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn non_utf8_path_is_skipped_not_panicking() {
+        // A submodule path is arbitrary bytes on Linux; libgit2 surfaces the
+        // entry but `value()` returns Err for the non-UTF-8 byte. The bad entry
+        // must be skipped, not crash the process (which would take down the
+        // whole daemon under `panic = "abort"`).
+        let tmp = TempDir::new().unwrap();
+        let mut content = Vec::new();
+        content.extend_from_slice(b"[submodule \"good\"]\n\tpath = good\n\turl = u\n");
+        content.extend_from_slice(b"[submodule \"bad\"]\n\tpath = b\xffd\n\turl = u\n");
+        std::fs::write(tmp.path().join(".gitmodules"), content).unwrap();
+
+        let entries = parse_gitmodules(tmp.path()).unwrap();
+        assert!(entries.iter().any(|(n, p, _)| n == "good" && p == "good"));
+        assert!(!entries.iter().any(|(n, _, _)| n == "bad"));
     }
 
     #[test]
