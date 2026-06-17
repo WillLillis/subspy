@@ -13,6 +13,7 @@ use crate::{
 use super::{
     StatusEntries, StatusResult,
     header::{print_header, print_unmerged_paths},
+    interleave::{Row, SubRow, for_each_merged},
     relativize::Relativizer,
 };
 
@@ -112,6 +113,10 @@ const fn has_status_info(st: StatusSummary) -> bool {
 
 /// Prints the "Changes to be committed:" section for staged files, submodules,
 /// renames, and deleted submodule paths. Returns `true` if anything was printed.
+#[expect(
+    clippy::too_many_lines,
+    reason = "interleaves files with three submodule row kinds, each rendered inline"
+)]
 fn print_staged_changes(
     non_submod: &Statuses<'_>,
     submodule_statuses: &[(String, StatusSummary)],
@@ -128,88 +133,109 @@ fn print_staged_changes(
         STAGED_HEADER
     };
 
-    for entry in non_submod
-        .iter()
-        .filter(|e| e.status() != git2::Status::CURRENT)
-    {
-        let istatus = match entry.status() {
-            s if s.contains(git2::Status::INDEX_NEW) => "new file:   ",
-            s if s.contains(git2::Status::INDEX_MODIFIED) => "modified:   ",
-            s if s.contains(git2::Status::INDEX_DELETED) => "deleted:    ",
-            s if s.contains(git2::Status::INDEX_RENAMED) => "renamed:    ",
-            s if s.contains(git2::Status::INDEX_TYPECHANGE) => "typechange: ",
-            _ => continue,
-        };
-        if !header {
-            writeln!(stdout, "{staged_header}")?;
-            header = true;
-        }
-        let Some(index) = entry.head_to_index() else {
-            continue;
-        };
-        let old_path = index.old_file().path();
-        let new_path = index.new_file().path();
-        match (old_path, new_path) {
-            (Some(old), Some(new)) if old != new => {
-                let old_str = old.to_string_lossy();
-                let new_str = new.to_string_lossy();
-                paint_into(stdout, GREEN, |out| {
-                    write!(out, "\t{istatus}")?;
-                    rel.write_to(out, &old_str)?;
-                    out.write_all(b" -> ")?;
-                    rel.write_to(out, &new_str)
-                })?;
-                writeln!(stdout)?;
+    // git lists staged files and staged submodule changes (modified/new,
+    // deleted, renamed) in one path-sorted stream. libgit2 excludes submodules
+    // from `non_submod`, so interleave the submodule rows among the files.
+    let files = non_submod.iter().filter(|e| {
+        e.status().intersects(
+            git2::Status::INDEX_NEW
+                | git2::Status::INDEX_MODIFIED
+                | git2::Status::INDEX_DELETED
+                | git2::Status::INDEX_RENAMED
+                | git2::Status::INDEX_TYPECHANGE,
+        )
+    });
+    let mut submods: Vec<SubRow<'_>> = Vec::new();
+    submods.extend(
+        deleted_submodule_paths
+            .iter()
+            .map(|path| SubRow::Deleted(path)),
+    );
+    submods.extend(renamed_submodules.iter().map(SubRow::Renamed));
+    submods.extend(
+        submodule_statuses
+            .iter()
+            .filter(|(_, st)| is_staged(*st))
+            .map(|(path, st)| SubRow::Modified(path, *st)),
+    );
+
+    for_each_merged(files, submods, |row| match row {
+        Row::File(entry) => {
+            let istatus = match entry.status() {
+                s if s.contains(git2::Status::INDEX_NEW) => "new file:   ",
+                s if s.contains(git2::Status::INDEX_MODIFIED) => "modified:   ",
+                s if s.contains(git2::Status::INDEX_DELETED) => "deleted:    ",
+                s if s.contains(git2::Status::INDEX_RENAMED) => "renamed:    ",
+                s if s.contains(git2::Status::INDEX_TYPECHANGE) => "typechange: ",
+                _ => return Ok(()),
+            };
+            let Some(index) = entry.head_to_index() else {
+                return Ok(());
+            };
+            if !header {
+                writeln!(stdout, "{staged_header}")?;
+                header = true;
             }
-            (old, new) => {
-                let path_str = old.or(new).unwrap().to_string_lossy();
-                paint_into(stdout, GREEN, |out| {
-                    write!(out, "\t{istatus}")?;
-                    rel.write_to(out, &path_str)
-                })?;
-                writeln!(stdout)?;
+            let old_path = index.old_file().path();
+            let new_path = index.new_file().path();
+            match (old_path, new_path) {
+                (Some(old), Some(new)) if old != new => {
+                    let old_str = old.to_string_lossy();
+                    let new_str = new.to_string_lossy();
+                    paint_into(stdout, GREEN, |out| {
+                        write!(out, "\t{istatus}")?;
+                        rel.write_to(out, &old_str)?;
+                        out.write_all(b" -> ")?;
+                        rel.write_to(out, &new_str)
+                    })?;
+                }
+                (old, new) => {
+                    let path_str = old.or(new).unwrap().to_string_lossy();
+                    paint_into(stdout, GREEN, |out| {
+                        write!(out, "\t{istatus}")?;
+                        rel.write_to(out, &path_str)
+                    })?;
+                }
             }
+            writeln!(stdout)
         }
-    }
-
-    for path in deleted_submodule_paths {
-        if !header {
-            writeln!(stdout, "{staged_header}")?;
-            header = true;
+        Row::Sub(SubRow::Deleted(path)) => {
+            if !header {
+                writeln!(stdout, "{staged_header}")?;
+                header = true;
+            }
+            paint_into(stdout, GREEN, |out| {
+                write!(out, "\tdeleted:    ")?;
+                rel.write_to(out, path)
+            })?;
+            writeln!(stdout)
         }
-        paint_into(stdout, GREEN, |out| {
-            write!(out, "\tdeleted:    ")?;
-            rel.write_to(out, path)
-        })?;
-        writeln!(stdout)?;
-    }
-
-    for rename in renamed_submodules {
-        if !header {
-            writeln!(stdout, "{staged_header}")?;
-            header = true;
+        Row::Sub(SubRow::Renamed(rename)) => {
+            if !header {
+                writeln!(stdout, "{staged_header}")?;
+                header = true;
+            }
+            paint_into(stdout, GREEN, |out| {
+                write!(out, "\trenamed:    ")?;
+                rel.write_to(out, &rename.old)?;
+                out.write_all(b" -> ")?;
+                rel.write_to(out, &rename.new)
+            })?;
+            writeln!(stdout)
         }
-        paint_into(stdout, GREEN, |out| {
-            write!(out, "\trenamed:    ")?;
-            rel.write_to(out, &rename.old)?;
-            out.write_all(b" -> ")?;
-            rel.write_to(out, &rename.new)
-        })?;
-        writeln!(stdout)?;
-    }
-
-    for (submod_path, st) in submodule_statuses.iter().filter(|(_, st)| is_staged(*st)) {
-        if !header {
-            writeln!(stdout, "{staged_header}")?;
-            header = true;
+        Row::Sub(SubRow::Modified(submod_path, st)) => {
+            if !header {
+                writeln!(stdout, "{staged_header}")?;
+                header = true;
+            }
+            let label = staged_label(st);
+            paint_into(stdout, GREEN, |out| {
+                write!(out, "\t{label}")?;
+                rel.write_to(out, submod_path)
+            })?;
+            writeln!(stdout)
         }
-        let label = staged_label(*st);
-        paint_into(stdout, GREEN, |out| {
-            write!(out, "\t{label}")?;
-            rel.write_to(out, submod_path)
-        })?;
-        writeln!(stdout)?;
-    }
+    })?;
 
     if header {
         writeln!(stdout)?;
@@ -231,75 +257,93 @@ fn print_unstaged_changes(
         .any(|(_, st)| has_workdir_changes(*st));
     let mut header = false;
 
-    for entry in non_submod.iter() {
-        let status = entry.status();
-        if status == git2::Status::CURRENT || status.contains(git2::Status::CONFLICTED) {
-            continue;
-        }
-        let Some(workdir) = entry.index_to_workdir() else {
-            continue;
-        };
-        let istatus = match status {
-            s if s.contains(git2::Status::WT_MODIFIED) => "modified:   ",
-            s if s.contains(git2::Status::WT_DELETED) => "deleted:    ",
-            s if s.contains(git2::Status::WT_RENAMED) => "renamed:    ",
-            s if s.contains(git2::Status::WT_TYPECHANGE) => "typechange: ",
-            _ => continue,
-        };
-        if !header {
-            writeln!(
-                stdout,
-                "{}",
-                unstaged_header(rm_in_workdir, has_submod_changes)
-            )?;
-            header = true;
-        }
-        let old_path = workdir.old_file().path();
-        let new_path = workdir.new_file().path();
-        match (old_path, new_path) {
-            (Some(old), Some(new)) if old != new => {
-                let old_str = old.to_string_lossy();
-                let new_str = new.to_string_lossy();
-                paint_into(stdout, RED, |out| {
-                    write!(out, "\t{istatus}")?;
-                    rel.write_to(out, &old_str)?;
-                    out.write_all(b" -> ")?;
-                    rel.write_to(out, &new_str)
-                })?;
-                writeln!(stdout)?;
-            }
-            (old, new) => {
-                let path_str = old.or(new).unwrap().to_string_lossy();
-                paint_into(stdout, RED, |out| {
-                    write!(out, "\t{istatus}")?;
-                    rel.write_to(out, &path_str)
-                })?;
-                writeln!(stdout)?;
-            }
-        }
-    }
+    // git lists unstaged file changes and dirty submodules in one path-sorted
+    // stream. Deleted/renamed submodule rows are staged-only, so this section
+    // interleaves files with the unstaged submodule rows. libgit2 excludes
+    // submodules from `non_submod`.
+    let files = non_submod.iter().filter(|e| {
+        let st = e.status();
+        !st.contains(git2::Status::CONFLICTED)
+            && st.intersects(
+                git2::Status::WT_MODIFIED
+                    | git2::Status::WT_DELETED
+                    | git2::Status::WT_RENAMED
+                    | git2::Status::WT_TYPECHANGE,
+            )
+    });
+    let submods: Vec<SubRow<'_>> = submodule_statuses
+        .iter()
+        .filter(|(_, st)| is_unstaged(*st))
+        .map(|(path, st)| SubRow::Modified(path, *st))
+        .collect();
 
-    for (submod_path, submod_status) in submodule_statuses.iter().filter(|(_, st)| is_unstaged(*st))
-    {
-        if !header {
-            writeln!(
-                stdout,
-                "{}",
-                unstaged_header(rm_in_workdir, has_submod_changes)
-            )?;
-            header = true;
+    for_each_merged(files, submods, |row| match row {
+        Row::File(entry) => {
+            let Some(workdir) = entry.index_to_workdir() else {
+                return Ok(());
+            };
+            let istatus = match entry.status() {
+                s if s.contains(git2::Status::WT_MODIFIED) => "modified:   ",
+                s if s.contains(git2::Status::WT_DELETED) => "deleted:    ",
+                s if s.contains(git2::Status::WT_RENAMED) => "renamed:    ",
+                s if s.contains(git2::Status::WT_TYPECHANGE) => "typechange: ",
+                _ => return Ok(()),
+            };
+            if !header {
+                writeln!(
+                    stdout,
+                    "{}",
+                    unstaged_header(rm_in_workdir, has_submod_changes)
+                )?;
+                header = true;
+            }
+            let old_path = workdir.old_file().path();
+            let new_path = workdir.new_file().path();
+            match (old_path, new_path) {
+                (Some(old), Some(new)) if old != new => {
+                    let old_str = old.to_string_lossy();
+                    let new_str = new.to_string_lossy();
+                    paint_into(stdout, RED, |out| {
+                        write!(out, "\t{istatus}")?;
+                        rel.write_to(out, &old_str)?;
+                        out.write_all(b" -> ")?;
+                        rel.write_to(out, &new_str)
+                    })?;
+                }
+                (old, new) => {
+                    let path_str = old.or(new).unwrap().to_string_lossy();
+                    paint_into(stdout, RED, |out| {
+                        write!(out, "\t{istatus}")?;
+                        rel.write_to(out, &path_str)
+                    })?;
+                }
+            }
+            writeln!(stdout)
         }
-        let label = unstaged_label(*submod_status);
-        paint_into(stdout, RED, |out| {
-            write!(out, "\t{label}")?;
-            rel.write_to(out, submod_path)
-        })?;
-        if has_status_info(*submod_status) {
-            writeln!(stdout, " {submod_status}")?;
-        } else {
-            writeln!(stdout)?;
+        Row::Sub(SubRow::Modified(submod_path, submod_status)) => {
+            if !header {
+                writeln!(
+                    stdout,
+                    "{}",
+                    unstaged_header(rm_in_workdir, has_submod_changes)
+                )?;
+                header = true;
+            }
+            let label = unstaged_label(submod_status);
+            paint_into(stdout, RED, |out| {
+                write!(out, "\t{label}")?;
+                rel.write_to(out, submod_path)
+            })?;
+            if has_status_info(submod_status) {
+                writeln!(stdout, " {submod_status}")
+            } else {
+                writeln!(stdout)
+            }
         }
-    }
+        // Deleted/renamed submodule rows are staged changes; they never appear
+        // in the unstaged section, so this section builds none of them.
+        Row::Sub(SubRow::Deleted(_) | SubRow::Renamed(_)) => Ok(()),
+    })?;
 
     if header {
         writeln!(stdout)?;

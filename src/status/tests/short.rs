@@ -129,6 +129,22 @@ const CASES: &[Case] = &[
         },
         branch: false,
     },
+    Case {
+        name: "submodules_interleaved_unstaged",
+        setup: Setup::WithSubmodules {
+            names: &["ddd", "ppp"],
+            setup: setup_submodules_interleaved_unstaged,
+        },
+        branch: false,
+    },
+    Case {
+        name: "submodules_interleaved_staged",
+        setup: Setup::WithSubmodules {
+            names: &["ddd", "ppp"],
+            setup: setup_submodules_interleaved_staged,
+        },
+        branch: false,
+    },
     // Branch-header cases (`-b` / `--branch`).
     Case {
         name: "branch_clean",

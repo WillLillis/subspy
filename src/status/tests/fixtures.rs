@@ -370,6 +370,50 @@ pub fn setup_submodule_modified_and_new_commits(h: &TestHarness) {
         .write("README.md", "and now dirty\n");
 }
 
+/// Files and submodules whose paths interleave, all with unstaged changes.
+/// The submodule rows must sort among the file rows by path
+/// (`aaa.txt` < `ddd` < `mmm.txt` < `ppp` < `zzz.txt`) rather than trailing
+/// them, in every renderer.
+pub fn setup_submodules_interleaved_unstaged(h: &TestHarness) {
+    let root = h.root();
+    root.write("aaa.txt", "a\n")
+        .write("mmm.txt", "m\n")
+        .write("zzz.txt", "z\n")
+        .add_all()
+        .commit("bracketing files");
+    root.write("aaa.txt", "a2\n")
+        .write("mmm.txt", "m2\n")
+        .write("zzz.txt", "z2\n");
+    h.submodule("ddd").write("README.md", "dirty\n");
+    h.submodule("ppp").write("README.md", "dirty\n");
+}
+
+/// Like [`setup_submodules_interleaved_unstaged`] but everything is staged:
+/// staged file modifications plus two submodules advanced with their gitlinks
+/// staged, exercising the staged-section merge.
+pub fn setup_submodules_interleaved_staged(h: &TestHarness) {
+    let root = h.root();
+    root.write("aaa.txt", "a\n")
+        .write("mmm.txt", "m\n")
+        .write("zzz.txt", "z\n")
+        .add_all()
+        .commit("bracketing files");
+    root.write("aaa.txt", "a2\n")
+        .write("mmm.txt", "m2\n")
+        .write("zzz.txt", "z2\n")
+        .add_all();
+    h.submodule("ddd")
+        .write("README.md", "moved\n")
+        .add_all()
+        .commit("advance ddd");
+    h.submodule("ppp")
+        .write("README.md", "moved\n")
+        .add_all()
+        .commit("advance ppp");
+    root.add("ddd");
+    root.add("ppp");
+}
+
 // -- Upstream-tracking setups --
 //
 // We fake an upstream without a real remote: `update-ref` positions

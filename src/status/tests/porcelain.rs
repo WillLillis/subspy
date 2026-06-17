@@ -205,6 +205,27 @@ const CASES: &[Case] = &[
         &["sub_a"],
         setup_submod_rm_rf_workdir,
     ),
+    // Interleaving: a submodule must slot between files by path, not after them.
+    submodule_case(
+        "submodule interleaved (workdir)",
+        &["mmm"],
+        setup_submod_interleaved_workdir,
+    ),
+    submodule_case(
+        "submodule interleaved (staged)",
+        &["mmm"],
+        setup_submod_interleaved_staged,
+    ),
+    submodule_case(
+        "submodule interleaved (deleted)",
+        &["mmm"],
+        setup_submod_interleaved_deleted,
+    ),
+    submodule_case(
+        "submodule interleaved (renamed)",
+        &["mmm"],
+        setup_submod_interleaved_renamed,
+    ),
     // Upstream tracking. Only `--branch` output diverges per upstream
     // state, so these exist primarily to exercise the `v1_branch` /
     // `v2_branch` matrix arms; without `--branch` they produce the
@@ -262,6 +283,57 @@ fn setup_submod_rm_rf_workdir(h: &TestHarness) {
     // Wipe the submodule's workdir but leave the gitlink in HEAD and the
     // index -> parent shows ` D sub_a` in v1 / `.D` with m_work=0 in v2.
     std::fs::remove_dir_all(h.submodule("sub_a").path()).unwrap();
+}
+
+// -- Interleaving: the submodule `mmm` sorts between `aaa.txt` and `zzz.txt`,
+// so the single path-sorted change stream must place it between them. The
+// live oracle byte-compares each against real git.
+
+/// Commits `aaa.txt` and `zzz.txt` in the root, returning its `Repo`.
+fn seed_bracketing_files(h: &TestHarness) {
+    h.root()
+        .write("aaa.txt", "a\n")
+        .write("zzz.txt", "z\n")
+        .add_all()
+        .commit("bracketing files");
+}
+
+fn setup_submod_interleaved_workdir(h: &TestHarness) {
+    seed_bracketing_files(h);
+    h.root().write("aaa.txt", "a2\n").write("zzz.txt", "z2\n");
+    // Untracked content inside the submodule -> ` M mmm`.
+    h.submodule("mmm").write("dirty.txt", "x\n");
+}
+
+fn setup_submod_interleaved_staged(h: &TestHarness) {
+    seed_bracketing_files(h);
+    h.root()
+        .write("aaa.txt", "a2\n")
+        .write("zzz.txt", "z2\n")
+        .add_all();
+    // Advance the submodule and stage the gitlink -> staged ` M mmm`.
+    h.submodule("mmm")
+        .write("README.md", "moved\n")
+        .add_all()
+        .commit("advance");
+    h.root().add("mmm");
+}
+
+fn setup_submod_interleaved_deleted(h: &TestHarness) {
+    seed_bracketing_files(h);
+    h.root()
+        .write("aaa.txt", "a2\n")
+        .write("zzz.txt", "z2\n")
+        .add_all();
+    // Staged deletion of the submodule's gitlink (also touches .gitmodules).
+    h.root().run_git(&["rm", "-q", "mmm"]);
+}
+
+fn setup_submod_interleaved_renamed(h: &TestHarness) {
+    seed_bracketing_files(h);
+    // `git mv` the submodule to another bracketed path -> staged rename keyed
+    // on the new path (`nnn`, still between aaa.txt and zzz.txt).
+    h.root().run_git(&["mv", "mmm", "nnn"]);
 }
 
 /// Translates `OutputOpts` to the equivalent `git status` argv. Mirrors
