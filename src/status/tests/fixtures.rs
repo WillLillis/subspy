@@ -276,6 +276,47 @@ pub fn setup_rebase_interactive_with_conflict(root: &Path) {
     repo.try_git(&["rebase", "-i", "feature"]);
 }
 
+/// A six-commit interactive rebase that stops on a mid-stack conflict,
+/// leaving more than the two commands git lists in each direction. Exercises
+/// the plural "Last/Next commands" header lines and the "(see more in file
+/// ...)" pointer that only the done list gets.
+pub fn setup_rebase_interactive_multi_command(root: &Path) {
+    let repo = Repo::init(root);
+    repo.write("file.txt", "base\n")
+        .add_all()
+        .commit("base")
+        .branch("feature")
+        .write("a.txt", "a\n")
+        .add_all()
+        .commit("F1 add a")
+        .write("b.txt", "b\n")
+        .add_all()
+        .commit("F2 add b")
+        .write("file.txt", "from feature\n")
+        .add_all()
+        .commit("F3 edit file")
+        .write("c.txt", "c\n")
+        .add_all()
+        .commit("F4 add c")
+        .write("d.txt", "d\n")
+        .add_all()
+        .commit("F5 add d")
+        .write("e.txt", "e\n")
+        .add_all()
+        .commit("F6 add e")
+        .checkout("master")
+        .write("file.txt", "from master\n")
+        .add_all()
+        .commit("master commit")
+        .checkout("feature");
+    // Replay feature's six commits onto master. F1 and F2 add new files and
+    // apply cleanly; F3 edits file.txt and conflicts with master's edit,
+    // stopping with three commands done (F1, F2, F3) and three remaining
+    // (F4, F5, F6). `GIT_SEQUENCE_EDITOR=true` (set by `git_may_fail`) accepts
+    // the generated todo as-is.
+    repo.try_git(&["rebase", "-i", "master"]);
+}
+
 pub fn setup_cherry_pick_with_conflict(root: &Path) {
     let repo = Repo::init(root);
     repo.write("file.txt", "base\n")

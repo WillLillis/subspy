@@ -1,0 +1,20 @@
+interactive rebase in progress; onto 28a535d
+Last commands done (3 commands done):
+   pick 80109b6 # F2 add b
+   pick 31675e6 # F3 edit file
+  (see more in file .git/rebase-merge/done)
+Next commands to do (3 remaining commands):
+   pick 2e4457a # F4 add c
+   pick 226b5bc # F5 add d
+  (use "git rebase --edit-todo" to view and edit)
+You are currently rebasing branch 'feature' on '28a535d'.
+  (fix conflicts and then run "git rebase --continue")
+  (use "git rebase --skip" to skip this patch)
+  (use "git rebase --abort" to check out the original branch)
+
+Unmerged paths:
+  (use "git restore --staged <file>..." to unstage)
+  (use "git add <file>..." to mark resolution)
+	both modified:   file.txt
+
+no changes added to commit (use "git add" and/or "git commit -a")

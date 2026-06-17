@@ -33,6 +33,10 @@ struct RebaseInfo {
     total_remaining: usize,
     is_interactive: bool,
     is_editing: bool,
+    /// Path to the rebase `done` file as git prints it in the "(see more in
+    /// file ...)" hint: relative to the worktree root, e.g.
+    /// `.git/rebase-merge/done`.
+    done_file: String,
 }
 
 /// Parses lines from a rebase todo/done file, skipping blanks and comments, and shortening
@@ -61,6 +65,22 @@ fn parse_rebase_lines(content: &str) -> Vec<String> {
             }
         })
         .collect()
+}
+
+/// The path to the rebase `done` file, formatted as git prints it in the
+/// "(see more in file ...)" hint (e.g. `.git/rebase-merge/done`). git renders
+/// this from its stored gitdir relative to the worktree root, not the cwd, so
+/// this relativizes `repo.path()` against the workdir directly rather than via
+/// the cwd-based [`Relativizer`]. Falls back to the absolute gitdir for repos
+/// with no workdir or a gitdir outside it. Forward slashes are emitted on all
+/// platforms to match git.
+fn rebase_done_display_path(repo: &Repository) -> String {
+    let gitdir = repo.path();
+    let rel = repo
+        .workdir()
+        .and_then(|wd| gitdir.strip_prefix(wd).ok())
+        .unwrap_or(gitdir);
+    format!("{}/rebase-merge/done", rel.display())
 }
 
 /// Reads rebase state from `.git/rebase-merge/` if an interactive or merge-backend
@@ -104,6 +124,7 @@ fn get_rebase_info(repo: &Repository) -> StatusResult<Option<RebaseInfo>> {
         total_remaining,
         is_interactive,
         is_editing,
+        done_file: rebase_done_display_path(repo),
     }))
 }
 
@@ -122,42 +143,39 @@ fn print_rebase_header(info: &RebaseInfo, stdout: &mut impl Write) -> Result<(),
     )?;
 
     if info.total_done > 0 {
-        let shown = info.done_ops.len();
-        if shown == 1 {
-            writeln!(
-                stdout,
-                "Last command done ({} command done):",
-                info.total_done
-            )?;
+        if info.total_done == 1 {
+            writeln!(stdout, "Last command done (1 command done):")?;
         } else {
             writeln!(
                 stdout,
-                "Last {shown} commands done ({} commands done):",
+                "Last commands done ({} commands done):",
                 info.total_done
             )?;
         }
         for cmd in &info.done_ops {
             writeln!(stdout, "   {cmd}")?;
         }
+        // Only the last two ops are listed; when more were done git points
+        // at the full file (relative to the worktree root) for the rest.
+        if info.total_done > info.done_ops.len() {
+            writeln!(stdout, "  (see more in file {})", info.done_file)?;
+        }
     }
 
     if info.total_remaining == 0 {
         writeln!(stdout, "No commands remaining.")?;
     } else {
-        let shown = info.remaining_ops.len();
-        if shown == 1 {
-            writeln!(
-                stdout,
-                "Next command to do ({} remaining command):",
-                info.total_remaining
-            )?;
+        if info.total_remaining == 1 {
+            writeln!(stdout, "Next command to do (1 remaining command):")?;
         } else {
             writeln!(
                 stdout,
-                "Next {shown} commands to do ({} remaining commands):",
+                "Next commands to do ({} remaining commands):",
                 info.total_remaining
             )?;
         }
+        // git lists only the next two ops here and, unlike the done list,
+        // emits no "see more" pointer (the edit-todo hint covers the rest).
         for cmd in &info.remaining_ops {
             writeln!(stdout, "   {cmd}")?;
         }

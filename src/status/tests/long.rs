@@ -108,6 +108,10 @@ const CASES: &[Case] = &[
         setup: Setup::Plain(setup_rebase_interactive_with_conflict),
     },
     Case {
+        name: "rebase_interactive_multi_command",
+        setup: Setup::Plain(setup_rebase_interactive_multi_command),
+    },
+    Case {
         name: "rebase_apply_with_conflict",
         setup: Setup::Plain(setup_rebase_apply_with_conflict),
     },
