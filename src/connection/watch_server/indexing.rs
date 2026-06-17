@@ -109,72 +109,77 @@ impl WatchServer {
             .map(|(_, relative_path, _)| {
                 let full_path = root_path.join(&relative_path);
 
-                // TODO: This would be better as a `try` block if that's ever stabilized
-                // (https://github.com/rust-lang/rust/issues/31436)
-                // (`.git/modules/` path, status, is in rebase)
-                let inner: WatchResult<(Option<PathBuf>, StatusSummary, bool)> = (|| {
-                    let repo = tl_repo.get_or_try(|| Repository::open(root_path))
-                        .map_err(|e| {
-                            error!("Failed to open repository while indexing {relative_path}: {e}");
-                            e
-                        })?;
-
-                    // `get_modules_path` reads the submodule's `.git` gitlink to
-                    // find its real `.git/modules/<name>` dir. A `rm -rf`'d workdir
-                    // has no gitlink -> NotFound: fall through with `None` and read
-                    // status lock-free below (still resolves to WD_DELETED).
-                    // Without the gitlink we can't recover the modules dir, so the
-                    // submodule gets no `modules_path_to_index` entry until a
-                    // restoring `git submodule update` reindexes and repopulates it.
-                    let modules_path = match self.get_modules_path(&relative_path) {
-                        Ok(p) => Some(p),
-                        Err(WatchError::IO(e)) if e.kind() == std::io::ErrorKind::NotFound => None,
-                        Err(e) => {
+                // `get_modules_path` reads the submodule's `.git` gitlink to find
+                // its real `.git/modules/<name>` dir. It is resolved here, off the
+                // gitlink and independent of the repo/status read, and carried
+                // separately from the (fallible) status so that a transient
+                // status-read failure still leaves us the `modules_path_to_index`
+                // routing entry the `.git/modules` watcher needs (without it those
+                // events would resolve to no submodule, and nothing would drive the
+                // retry). A `rm -rf`'d workdir has no gitlink -> NotFound -> `None`,
+                // read lock-free below.
+                let (modules_path, status): (Option<PathBuf>, WatchResult<(StatusSummary, bool)>) =
+                    match self.get_modules_path(&relative_path) {
+                        // A hard resolution error (not a missing gitlink) leaves no
+                        // path to route with, so fail the slot and skip the read.
+                        Err(e)
+                            if !matches!(
+                                &e,
+                                WatchError::IO(io) if io.kind() == std::io::ErrorKind::NotFound
+                            ) =>
+                        {
                             error!(
                                 "Failed to get modules path for submodule {relative_path} - {e}, skipping...",
                             );
-                            Err(e)?
+                            (None, Err(e))
+                        }
+                        // Ok(path) -> Some; a missing gitlink -> None (lock-free read).
+                        // TODO: the inner read would be cleaner as a `try` block once
+                        // stabilized (https://github.com/rust-lang/rust/issues/31436).
+                        resolved => {
+                            let modules_path = resolved.ok();
+                            let status = (|| {
+                                let repo = tl_repo.get_or_try(|| Repository::open(root_path))
+                                    .map_err(|e| {
+                                        error!("Failed to open repository while indexing {relative_path}: {e}");
+                                        e
+                                    })?;
+
+                                // This is definitely a race condition, and is not meant to catch "active"
+                                // rebases while the status map is being populated. Instead, the intention is
+                                // for "stalled" rebases (i.e. that has hit a conflict that must be manually
+                                // resolved) so that we can properly skip updating this submodule until its
+                                // rebase has been completed.
+                                let is_in_rebase = modules_path
+                                    .as_deref()
+                                    .is_some_and(|p| p.join("rebase-merge").exists());
+
+                                let status = if is_in_rebase {
+                                    StatusSummary::NEW_COMMITS
+                                } else if let Some(modules_path) = &modules_path {
+                                    get_submod_status(repo, &relative_path, &modules_path.join("index.lock"))
+                                        .map_err(|e| {
+                                            error!("Failed to get {relative_path} status while populating status map: {e}");
+                                            e
+                                        })?
+                                } else {
+                                    // Deleted workdir: no `index.lock` to contend with, so read
+                                    // lock-free, mirroring `try_spawn_submod_update`. libgit2
+                                    // reports a gone workdir as WD_DELETED -> DELETED_WORKDIR,
+                                    // by relative path, so this is correct even under a rename.
+                                    repo.submodule_status(&relative_path, git2::SubmoduleIgnore::None)
+                                        .map_err(|e| {
+                                            error!("Failed to get deleted {relative_path} status while populating status map: {e}");
+                                            e
+                                        })?
+                                        .into()
+                                };
+
+                                Ok((status, is_in_rebase))
+                            })();
+                            (modules_path, status)
                         }
                     };
-                    // This is definitely a race condition, and is not meant to catch "active"
-                    // rebases while the status map is being populated. Instead, the intention is
-                    // for "stalled" rebases (i.e. that has hit a conflict that must be manually
-                    // resolved) so that we can properly skip updating this submodule until its
-                    // rebase has been completed.
-                    let is_in_rebase = modules_path
-                        .as_deref()
-                        .is_some_and(|p| p.join("rebase-merge").exists());
-
-                    let status = if is_in_rebase {
-                        StatusSummary::NEW_COMMITS
-                    } else if let Some(modules_path) = &modules_path {
-                        match get_submod_status(
-                            repo,
-                            &relative_path,
-                            &modules_path.join("index.lock"),
-                        ) {
-                            Ok(st) => st,
-                            Err(e) => {
-                                error!("Failed to get {relative_path} status while populating status map: {e}");
-                                Err(e)?
-                            }
-                        }
-                    } else {
-                        // Deleted workdir: no `index.lock` to contend with, so read
-                        // lock-free, mirroring `try_spawn_submod_update`. libgit2
-                        // reports a gone workdir as WD_DELETED -> DELETED_WORKDIR,
-                        // by relative path, so this is correct even under a rename.
-                        match repo.submodule_status(&relative_path, git2::SubmoduleIgnore::None) {
-                            Ok(st) => st.into(),
-                            Err(e) => {
-                                error!("Failed to get deleted {relative_path} status while populating status map: {e}");
-                                Err(e)?
-                            }
-                        }
-                    };
-
-                    Ok((modules_path, status, is_in_rebase))
-                })();
 
                 let count = completed.fetch_add(1, Ordering::Relaxed) + 1;
                 broadcast_progress(
@@ -186,7 +191,7 @@ impl WatchServer {
                     pb.inc(1);
                 }
 
-                (relative_path, full_path, inner)
+                (relative_path, full_path, modules_path, status)
             })
             .collect();
 
@@ -219,24 +224,29 @@ impl WatchServer {
         // indexed iterators, and `parse_gitmodules()` returns a consistent order.
         // Skipping failed submodules would shift subsequent indices and misalign
         // skip_set / modules_path_to_index with the watcher array.
-        for (i, (relative_path, full_path, inner)) in results.into_iter().enumerate() {
+        for (i, (relative_path, full_path, modules_path, status)) in results.into_iter().enumerate()
+        {
             let index = ROOT_WATCHER_COUNT + i;
-            // Only populate status/skip_set/modules_path_to_index on success.
-            // Failed submodules get no status entry but still reserve a watcher
-            // slot -- the watcher will generate events that trigger re-reads via
+            // Status and skip_set come only from a successful read. A failed read
+            // leaves no status entry but still reserves a watcher slot (below);
+            // the watcher will generate events that trigger re-reads via
             // try_spawn_submod_update, so the status will eventually converge.
-            if let Ok((modules_path, status, is_in_rebase)) = inner {
+            if let Ok((status, is_in_rebase)) = status {
                 status_guard.insert(relative_path.clone(), status);
                 if is_in_rebase {
                     self.skip_set.insert(index);
                 }
-                // A deleted submodule has no resolvable modules path (`None`);
-                // it gets no routing entry until a restore reindex repopulates it.
-                if place_submod_watches && let Some(modules_path) = modules_path {
-                    self.modules_path_to_index.insert(modules_path, index);
-                }
             }
             if place_submod_watches {
+                // Route `.git/modules/<name>` events to this slot whenever the
+                // path resolved, independent of the status read: a transient
+                // read failure must not strand the submodule without routing,
+                // since the routed event is what drives the retry. A deleted
+                // workdir has no resolvable path (`None`) and gets no entry until
+                // a restore reindex repopulates it.
+                if let Some(modules_path) = modules_path {
+                    self.modules_path_to_index.insert(modules_path, index);
+                }
                 let (rx, watcher) = Self::place_submodule_watch(&full_path)?;
                 wtrace!(|s| WatchSubmod {
                     index,
