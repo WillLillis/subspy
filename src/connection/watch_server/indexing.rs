@@ -191,8 +191,18 @@ impl WatchServer {
             .collect();
 
         status_guard.clear();
-        self.skip_set
-            .clear_and_resize(ROOT_WATCHER_COUNT + results.len());
+        // `skip_set` is indexed by watcher position and read with an unchecked
+        // index in the event loop, so it must cover every live watcher. A
+        // no-replace reindex leaves `self.watchers` at its current length while
+        // this pass still assigns slots up to `ROOT_WATCHER_COUNT +
+        // results.len()`, so size to whichever is larger. Using only the new
+        // submodule count would let a no-replace reindex that shrinks the set
+        // leave `skip_set` shorter than `watchers` (an out-of-bounds read);
+        // using only `watchers.len()` would under-size it when the set grows
+        // (an out-of-bounds insert below). On the replace path `watchers` holds
+        // just the root watchers here, so the new count dominates.
+        let skip_set_len = self.watchers.len().max(ROOT_WATCHER_COUNT + results.len());
+        self.skip_set.clear_and_resize(skip_set_len);
         if place_submod_watches {
             self.modules_path_to_index.clear();
             self.workdir_to_index.clear();
