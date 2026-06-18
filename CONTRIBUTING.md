@@ -99,7 +99,8 @@ each with its own renderer. Long stands alone; short + porcelain v1 share an
 | `placement.rs` | Watcher and tripwire setup (`place_*`, `build_watcher`, `WatchListItem`) |
 | `indexing.rs` | Full status-map population (`populate_status_map`, `get_submod_status`, `get_modules_path`) |
 | `update.rs` | The in-flight rayon update engine (`try_spawn_submod_update`, `InFlightTask`/`InFlightTracker`) |
-| `event_loop.rs` | The `crossbeam` select loop, dispatch, tripwire handling, and reindex deferral (`GitmodulesTracker`) |
+| `event_loop.rs` | The `crossbeam` select loop, dispatch, tripwire handling, and reindex-deferral wiring |
+| `debounce.rs` | Debounced reindex deadlines (`ReindexDebounce`, `DebounceKind`, `earliest_deadline`) shared by the `.gitmodules` and structural-tripwire reindex paths |
 | `debug.rs` | The debug-state dump (`gather_debug_state`, `handle_debug_request`) |
 | `trace.rs` | Opt-in (`--cfg trace_events`) structured event tracing: the `wtrace!` macro, `TraceEvent`, the per-thread interning sink, and the per-test capture/dump API |
 
@@ -216,6 +217,11 @@ UPDATE_SHORT_SNAPSHOTS=1 cargo test status::tests::short
 Each rewrites every `.snapshot` file on disk with subspy's current output and passes.
 Always inspect `git diff src/status/snapshots/` before committing so you don't silently
 rubber-stamp a regression.
+
+**A snapshot mismatch can be a git-version difference rather than a regression.** Some
+cases include text git emits and rewords between releases, so a local git that differs
+from the one the snapshots were seeded with may fail them on an unmodified tree -- check
+`git --version` before assuming your change is at fault.
 
 **Adding a new case:**
 1. If the fixture is reusable, add a `setup_*` function to `fixtures.rs`. Otherwise,
@@ -379,8 +385,14 @@ RUSTFLAGS='--cfg trace_events' cargo test
 
 ## Platform Notes
 
-- **Linux**: Each watch server consumes inotify watches. For large repos, you may need
-  `sudo sysctl fs.inotify.max_user_watches=<value>`.
+- **Linux**: Each watch server uses inotify. It consumes watch descriptors
+  (`fs.inotify.max_user_watches`) for its recursive watches, and -- since it opens one
+  inotify *instance* per submodule (plus tripwires and the root) -- can also exhaust the
+  per-user instance cap (`fs.inotify.max_user_instances`), which is as low as 128 on some
+  distros. A repo with many submodules, or running the test suite (which starts many
+  servers at once), may need either raised via
+  `sudo sysctl fs.inotify.max_user_watches=<value>` or
+  `sudo sysctl fs.inotify.max_user_instances=<value>`.
 - **Windows**: Uses `uds_windows` for AF_UNIX sockets (requires Windows 10 1809+).
   When `std::os::windows::net::UnixStream` stabilizes in std, the `uds_windows`
   dependency can be dropped.
@@ -409,14 +421,22 @@ The key rule: **hold `index.lock` only during config/gitmodules reads, never dur
 `submodule_status` calls.** Getting this wrong either blocks user git operations
 (holding too long) or produces corrupt reads (not holding when needed).
 
-### `.gitmodules` change deferral
+### Reindex deferral (debouncing)
 
-When `.gitmodules` changes, the server can't reindex immediately. The git operation
-that modified `.gitmodules` (e.g. `git submodule add`) also updates the index as part
-of the same command. If the server triggered a reindex on the `.gitmodules` event, it
-would try to acquire `index.lock` before the git command releases it, causing the git
-command to fail. The `GitmodulesTracker` defers the reindex until the git operation's
-root events have settled.
+Some events call for a full reindex, but not *immediately*. When `.gitmodules` changes,
+the git operation that modified it (e.g. `git submodule add`) also updates the index as
+part of the same command; reindexing on the `.gitmodules` event would try to acquire
+`index.lock` before the command releases it, failing the command. Likewise, a structural
+change to a submodule workdir (a `rm -rf` and re-checkout) arrives as a burst of events,
+and reindexing mid-burst reads a transient state.
+
+Both use a shared `ReindexDebounce` (`debounce.rs`): the triggering event *arms* a short
+deadline that the in-flight git operation's subsequent root-`.git` activity keeps
+*bumping*, so the reindex fires only once that operation has settled (released
+`index.lock`). `event_loop.rs` holds two -- one for `.gitmodules` changes, one for a
+submodule workdir appearing -- and reindexes when the earlier deadline elapses. Submodule
+working-tree watchers don't extend the structural window: a submodule can't witness its
+own workdir reappearing (its watch is dead until the reindex re-arms it).
 
 ### Transient read failures in rayon tasks
 

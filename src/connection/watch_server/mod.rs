@@ -2,6 +2,7 @@
 //! maintains a cached status map, and serves status queries over IPC.
 
 mod classify;
+mod debounce;
 mod debug;
 mod event_loop;
 mod indexing;

@@ -3,12 +3,12 @@ use std::{
     ops::Bound,
     path::Path,
     sync::{Arc, Condvar, Mutex},
-    time::{Duration, Instant},
 };
 
 use log::error;
 use notify::{EventKind, event::ModifyKind};
 
+use super::debounce::{DebounceKind, ReindexDebounce, earliest_deadline};
 use super::trace::wtrace;
 
 use crate::{
@@ -24,11 +24,6 @@ use crate::{
     },
     watch::WatchResult,
 };
-
-/// Fallback timeout for triggering a reindex after `.gitmodules` changes when
-/// no subsequent git operation produces a root event (e.g. `git submodule add`
-/// without a follow-up `git commit`).
-const REINDEX_DEBOUNCE: Duration = Duration::from_millis(200);
 
 /// Reason `handle_events` exited its select loop
 pub(super) enum HandleEventsExit {
@@ -54,97 +49,6 @@ enum SelectSource {
     Control,
 }
 
-/// Deferral state for `.gitmodules` changes within [`GitmodulesTracker`].
-#[derive(Clone, Copy)]
-enum GitmodulesDeferral {
-    /// No `.gitmodules` change is pending.
-    Idle,
-    /// `.gitmodules` changed; waiting for the first root event from the
-    /// same git operation.
-    Pending,
-    /// First root event consumed. Stores the tracker cookie (if any) to
-    /// skip subsequent events from the same rename operation.
-    Consumed(Option<usize>),
-}
-
-/// Tracks deferred reindex state after `.gitmodules` changes.
-///
-/// When `.gitmodules` is modified, the same git command (e.g. `git submodule
-/// add`, `git rm -f`) also produces a burst of further index/ref events. Rather
-/// than reindex on each, we debounce: arm a deadline on the `.gitmodules` change
-/// and reset it on each further event, reindexing once they settle so we read
-/// the operation's final state.
-///
-/// This state machine:
-/// 1. Arms a fallback deadline on the `.gitmodules` change ([`Self::on_gitmodules_changed`])
-/// 2. Skips events from the same git operation (via matching tracker cookie)
-/// 3. Resets the debounce deadline on events from subsequent operations
-/// 4. Reindexes once the deadline elapses, even if no further root event
-///    arrives -- the index event can be dropped under inotify queue pressure,
-///    and a manual `.gitmodules` edit produces none at all
-#[derive(Clone, Copy)]
-pub(super) struct GitmodulesTracker {
-    state: GitmodulesDeferral,
-    /// Fallback deadline: if no subsequent root event arrives before this
-    /// instant, `handle_events` returns `ReindexEvent`.
-    deadline: Option<Instant>,
-}
-
-impl GitmodulesTracker {
-    #[inline]
-    pub(super) const fn new() -> Self {
-        Self {
-            state: GitmodulesDeferral::Idle,
-            deadline: None,
-        }
-    }
-
-    /// Returns the current reindex deadline, if any.
-    #[inline]
-    pub(super) const fn deadline(&self) -> Option<Instant> {
-        self.deadline
-    }
-
-    /// Called when `.gitmodules` itself changes. Begins deferring the reindex
-    /// and arms a fallback deadline, so the reindex still fires if the git
-    /// operation's index event never reaches us -- an inotify queue overflow
-    /// under load can drop it, and a manual `.gitmodules` edit produces none.
-    /// A subsequent root event resets the deadline to debounce normally.
-    #[inline]
-    pub(super) fn on_gitmodules_changed(&mut self) {
-        self.state = GitmodulesDeferral::Pending;
-        self.deadline = Some(Instant::now() + REINDEX_DEBOUNCE);
-    }
-
-    /// Called when a non-`.gitmodules` root git event arrives. Updates the
-    /// deferral state based on whether the event belongs to the same git
-    /// operation that modified `.gitmodules`.
-    #[inline]
-    pub(super) fn on_root_event(&mut self, event: &notify::Event) {
-        match self.state {
-            GitmodulesDeferral::Idle => {}
-            GitmodulesDeferral::Pending => {
-                // First root event after .gitmodules changed-> the index rename
-                // from the same git operation. Record its tracker cookie and
-                // reset the debounce deadline (already armed by
-                // on_gitmodules_changed) so a burst of events settles first.
-                self.state = GitmodulesDeferral::Consumed(event.attrs.tracker());
-                self.deadline = Some(Instant::now() + REINDEX_DEBOUNCE);
-            }
-            GitmodulesDeferral::Consumed(Some(cookie)) if event.attrs.tracker() == Some(cookie) => {
-                // Same rename operation (matching tracker cookie)-> skip.
-            }
-            GitmodulesDeferral::Consumed(_) => {
-                // Event from a subsequent git operation. Reset the debounce
-                // timer rather than reindexing immediately: the operation
-                // may still be in progress (e.g. `git commit` has renamed
-                // the index but has not yet updated the branch ref).
-                self.deadline = Some(Instant::now() + REINDEX_DEBOUNCE);
-            }
-        }
-    }
-}
-
 impl WatchServer {
     /// The "meat" of the logic for the watch server. Handles incoming watcher events and updates
     /// server state accordingly. This function will only exit if a reindex is required or
@@ -162,11 +66,21 @@ impl WatchServer {
         // loop re-fires the status read.
         let pending_lock_retries: Arc<Mutex<BitSet>> =
             Arc::new(Mutex::new(BitSet::with_capacity(self.watchers.len())));
-        let mut gitmodules = GitmodulesTracker::new();
+        // Two debounced reindex deadlines. `gitmodules` is armed by a
+        // `.gitmodules` change and bumped by subsequent root git events.
+        // `structural` is armed when a tripwire sees a submodule workdir
+        // (re)appear, and bumped by later tripwire and root-watcher events, so
+        // its reindex reads the settled state once the restoring operation's
+        // burst dies down rather than racing a half-finished one.
+        // `earliest_deadline` collapses the two for the select below.
+        let mut gitmodules = ReindexDebounce::new(DebounceKind::Gitmodules);
+        let mut structural = ReindexDebounce::new(DebounceKind::Structural);
 
         loop {
             #[allow(clippy::single_match_else)]
-            let oper = if let Some(deadline) = gitmodules.deadline() {
+            let oper = if let Some(deadline) =
+                earliest_deadline(gitmodules.deadline(), structural.deadline())
+            {
                 match sel.select_deadline(deadline) {
                     Ok(oper) => oper,
                     Err(_) => {
@@ -202,10 +116,18 @@ impl WatchServer {
                 SelectSource::Tripwire(tripwire) => {
                     match oper.recv(&self.tripwires[tripwire].receiver)? {
                         Ok(event) => {
-                            if self.handle_tripwire_event(&event, &in_flight, &pending_lock_retries)
-                            {
-                                wait_for_in_flight(&in_flight);
-                                return Ok(HandleEventsExit::ReindexEvent);
+                            // A structural change (workdir appearing/disappearing) needs
+                            // a reindex to re-arm watches; any other tripwire event seen
+                            // while one is already pending just pushes the window out.
+                            let needs_reindex = self.handle_tripwire_event(
+                                &event,
+                                &in_flight,
+                                &pending_lock_retries,
+                            );
+                            if needs_reindex {
+                                structural.arm();
+                            } else {
+                                structural.bump();
                             }
                         }
                         Err(e) => {
@@ -220,87 +142,97 @@ impl WatchServer {
             };
 
             match oper.recv(&self.watchers[index].receiver)? {
-                Ok(event) => match self.classify_and_trace_event(&event, index) {
-                    Some(EventType::RootGitOperation) => {
-                        if index == DOT_GITMODULES_WATCHER_IDX {
-                            // .gitmodules changed, defer reindex. Don't
-                            // spawn submodule tasks here: individual
-                            // submodule statuses aren't affected until the
-                            // reindex runs, and the git operation that
-                            // modified .gitmodules will produce its own
-                            // root events (index rename, etc.) that spawn
-                            // tasks independently.
-                            gitmodules.on_gitmodules_changed();
-                            wtrace!(GitmodulesDeferred);
-                        } else {
-                            gitmodules.on_root_event(&event);
-                            wtrace!(RootGitOp {
-                                deadline: gitmodules.deadline()
-                            });
-                            for i in ROOT_WATCHER_COUNT..self.watchers.len() {
-                                if !self.skip_set.contains(i) {
-                                    self.try_spawn_submod_update(
-                                        i,
-                                        &in_flight,
-                                        &pending_lock_retries,
-                                    );
+                Ok(event) => {
+                    // Of the watcher events, only the root `.git/`and `.gitmodules` ones
+                    // extend a pending structural reindex (tripwire events arm and bump
+                    // it too, above). A restoring git op churns `.git/modules/<name>`
+                    // (config.lock, index.lock, the index rename), which the recursive
+                    // `.git` watcher sees. Bumping on that defers the reindex until the op
+                    // releases `index.lock` rather than contending with it. A submodule's
+                    // own watcher can't witness its workdir reappearing (it's dead until
+                    // the reindex re-arms it), so submodule watchers don't extend the
+                    // window. No-op when unarmed.
+                    if index < ROOT_WATCHER_COUNT {
+                        structural.bump();
+                    }
+                    match self.classify_and_trace_event(&event, index) {
+                        Some(EventType::RootGitOperation) => {
+                            if index == DOT_GITMODULES_WATCHER_IDX {
+                                // .gitmodules changed, defer reindex. Don't
+                                // spawn submodule tasks here: individual
+                                // submodule statuses aren't affected until the
+                                // reindex runs, and the git operation that
+                                // modified .gitmodules will produce its own
+                                // root events (index rename, etc.) that spawn
+                                // tasks independently.
+                                gitmodules.arm();
+                            } else {
+                                gitmodules.bump();
+                                for i in ROOT_WATCHER_COUNT..self.watchers.len() {
+                                    if !self.skip_set.contains(i) {
+                                        self.try_spawn_submod_update(
+                                            i,
+                                            &in_flight,
+                                            &pending_lock_retries,
+                                        );
+                                    }
                                 }
                             }
                         }
-                    }
-                    Some(EventType::RootRebaseStart) => {
-                        self.root_rebasing = true;
-                    }
-                    Some(EventType::RootRebaseEnd) => {
-                        wait_for_in_flight(&in_flight);
-                        self.root_rebasing = false;
-                        return Ok(HandleEventsExit::ReindexEvent);
-                    }
-                    Some(EventType::SubmoduleChange) if !self.skip_set.contains(index) => {
-                        self.try_spawn_submod_update(index, &in_flight, &pending_lock_retries);
-                    }
-                    Some(EventType::SubmoduleGitOperation) => {
-                        if let Some(i) = self.submod_for_event(&event)
-                            && !self.skip_set.contains(i)
-                        {
-                            self.try_spawn_submod_update(i, &in_flight, &pending_lock_retries);
+                        Some(EventType::RootRebaseStart) => {
+                            self.root_rebasing = true;
                         }
-                    }
-                    // Rebases generate an incredible volume of events, and during such an
-                    // operation git continually acquires and releases `index.lock`. This,
-                    // paired with the changes to the submodule's source files leads to too much
-                    // contention for `index.lock`, which leads to the rebase failing partway
-                    // through when git fails to acquire `index.lock`. Instead, we pause
-                    // updating the relevant submodule until the rebase is completed.
-                    Some(EventType::SubmoduleRebaseStart) => {
-                        if let Some(i) = self.submod_for_event(&event) {
-                            cancel_submod_update(i, &in_flight);
-                            self.skip_set.insert(i);
-                            self.submod_statuses.lock().expect("Mutex poisoned").insert(
-                                self.watchers[i].relative_path.clone(),
-                                StatusSummary::NEW_COMMITS,
-                            );
+                        Some(EventType::RootRebaseEnd) => {
+                            wait_for_in_flight(&in_flight);
+                            self.root_rebasing = false;
+                            return Ok(HandleEventsExit::ReindexEvent);
                         }
-                    }
-                    Some(EventType::SubmoduleRebaseEnd) => {
-                        if let Some(i) = self.submod_for_event(&event) {
-                            self.skip_set.remove(i);
-                            self.try_spawn_submod_update(i, &in_flight, &pending_lock_retries);
+                        Some(EventType::SubmoduleChange) if !self.skip_set.contains(index) => {
+                            self.try_spawn_submod_update(index, &in_flight, &pending_lock_retries);
                         }
-                    }
-                    Some(EventType::SubmoduleLockRelease) => {
-                        if let Some(i) = self.submod_for_event(&event)
-                            && !self.skip_set.contains(i)
-                            && pending_lock_retries
-                                .lock()
-                                .expect("pending_lock_retries mutex poisoned")
-                                .remove(i)
-                        {
-                            self.try_spawn_submod_update(i, &in_flight, &pending_lock_retries);
+                        Some(EventType::SubmoduleGitOperation) => {
+                            if let Some(i) = self.submod_for_event(&event)
+                                && !self.skip_set.contains(i)
+                            {
+                                self.try_spawn_submod_update(i, &in_flight, &pending_lock_retries);
+                            }
                         }
+                        // Rebases generate an incredible volume of events, and during such an
+                        // operation git continually acquires and releases `index.lock`. This,
+                        // paired with the changes to the submodule's source files leads to too much
+                        // contention for `index.lock`, which leads to the rebase failing partway
+                        // through when git fails to acquire `index.lock`. Instead, we pause
+                        // updating the relevant submodule until the rebase is completed.
+                        Some(EventType::SubmoduleRebaseStart) => {
+                            if let Some(i) = self.submod_for_event(&event) {
+                                cancel_submod_update(i, &in_flight);
+                                self.skip_set.insert(i);
+                                self.submod_statuses.lock().expect("Mutex poisoned").insert(
+                                    self.watchers[i].relative_path.clone(),
+                                    StatusSummary::NEW_COMMITS,
+                                );
+                            }
+                        }
+                        Some(EventType::SubmoduleRebaseEnd) => {
+                            if let Some(i) = self.submod_for_event(&event) {
+                                self.skip_set.remove(i);
+                                self.try_spawn_submod_update(i, &in_flight, &pending_lock_retries);
+                            }
+                        }
+                        Some(EventType::SubmoduleLockRelease) => {
+                            if let Some(i) = self.submod_for_event(&event)
+                                && !self.skip_set.contains(i)
+                                && pending_lock_retries
+                                    .lock()
+                                    .expect("pending_lock_retries mutex poisoned")
+                                    .remove(i)
+                            {
+                                self.try_spawn_submod_update(i, &in_flight, &pending_lock_retries);
+                            }
+                        }
+                        Some(EventType::SubmoduleChange) | None => {}
                     }
-                    Some(EventType::SubmoduleChange) | None => {}
-                },
+                }
                 Err(e) => {
                     wait_for_in_flight(&in_flight);
                     return Ok(self.handle_watcher_error(index, &e));
@@ -448,20 +380,5 @@ mod tests {
         assert!(matches!(select_source(2, 2, 3), SelectSource::Tripwire(0)));
         assert!(matches!(select_source(4, 2, 3), SelectSource::Tripwire(2)));
         assert!(matches!(select_source(5, 2, 3), SelectSource::Control));
-    }
-
-    #[test]
-    fn gitmodules_change_arms_fallback_deadline() {
-        // A `.gitmodules` change must arm a deadline on its own, so the deferred
-        // reindex fires even when the git operation's index event is dropped
-        // (e.g. inotify queue overflow under load). Without it, `handle_events`
-        // blocks on `sel.select()` forever and the new submodule never indexes.
-        let mut tracker = GitmodulesTracker::new();
-        assert!(tracker.deadline().is_none());
-        tracker.on_gitmodules_changed();
-        assert!(
-            tracker.deadline().is_some(),
-            "a .gitmodules change must arm a fallback deadline"
-        );
     }
 }

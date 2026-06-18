@@ -1,7 +1,7 @@
-# Integration tests spin up real watch servers with recursive inotify
-# watchers. Running too many in parallel exhausts inotify instance limits
-# (default 1024). 4 threads stays well within that budget while giving a
-# ~4x speedup over serial execution.
+# Integration tests spin up real watch servers, each opening one inotify
+# instance per watched directory (submodule + tripwires + root). Too many in
+# parallel exhaust the per-user `fs.inotify.max_user_instances` cap, which
+# varies by distro and is as low as 128 on stock Ubuntu/WSL2.
 [env]
 RUST_TEST_THREADS = "4"
 
