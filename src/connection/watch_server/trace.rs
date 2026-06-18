@@ -113,6 +113,8 @@ use thread_local::ThreadLocal;
 #[cfg(trace_events)]
 use super::classify::EventType;
 #[cfg(trace_events)]
+use super::debounce::DebounceKind;
+#[cfg(trace_events)]
 use crate::StatusSummary;
 
 /// A single structured watch-server trace event. Stores cheap owned data
@@ -133,10 +135,12 @@ pub(super) enum TraceEvent {
     TripwirePlaced { path: Arc<OsStr> },
     /// The deferred-reindex debounce window expired; a reindex will run.
     ReindexExpired,
-    /// `.gitmodules` itself changed; the reindex is being deferred.
-    GitmodulesDeferred,
-    /// A root git operation armed (or re-armed) the reindex deadline.
-    RootGitOp { deadline: Option<Instant> },
+    /// A debounced reindex deadline was (re)armed; the reindex runs once the
+    /// window elapses without further events. `kind` says which debounce.
+    ReindexDeferred {
+        kind: DebounceKind,
+        deadline: Option<Instant>,
+    },
     /// A tripwire event matched a submodule (or submodules) under a directory.
     TripwireFired {
         kind: EventKind,
@@ -188,9 +192,8 @@ impl fmt::Display for TraceEvent {
                 write!(f, "tripwire {}", Path::new(path).display())
             }
             Self::ReindexExpired => f.write_str("reindex debounce expired -> reindexing"),
-            Self::GitmodulesDeferred => f.write_str(".gitmodules changed -> deferring reindex"),
-            Self::RootGitOp { deadline } => {
-                write!(f, "root git op -> reindex deadline {deadline:?}")
+            Self::ReindexDeferred { kind, deadline } => {
+                write!(f, "deferring {kind:?} reindex -> deadline {deadline:?}")
             }
             Self::TripwireFired {
                 kind,
