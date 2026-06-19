@@ -18,7 +18,7 @@ use crate::{
         IpcStream,
         watch_server::{
             ControlMessage, DOT_GITMODULES_WATCHER_IDX, EventType, InFlightTracker,
-            ROOT_WATCHER_COUNT, WatchList, WatchListItem, WatchServer,
+            ROOT_WATCHER_COUNT, StatusMap, WatchList, WatchListItem, WatchServer,
             update::{cancel_submod_update, wait_for_in_flight},
         },
     },
@@ -222,10 +222,12 @@ impl WatchServer {
                         Some(EventType::SubmoduleLockRelease) => {
                             if let Some(i) = self.submod_for_event(&event)
                                 && !self.skip_set.contains(i)
-                                && pending_lock_retries
-                                    .lock()
-                                    .expect("pending_lock_retries mutex poisoned")
-                                    .remove(i)
+                                && lock_release_needs_reread(
+                                    i,
+                                    &pending_lock_retries,
+                                    &self.submod_statuses,
+                                    &self.watchers[i].relative_path,
+                                )
                             {
                                 self.try_spawn_submod_update(i, &in_flight, &pending_lock_retries);
                             }
@@ -328,6 +330,39 @@ impl WatchServer {
     }
 }
 
+/// Whether a `SubmoduleLockRelease` for watcher `index` should trigger a status
+/// re-read, consuming any pending lock-retry request for it.
+///
+/// Re-reads when either:
+/// - a prior lock-free read failed and registered a retry in
+///   `pending_lock_retries` (the incremental path's safety net), or
+/// - the submodule's cached status is `LOCK_FAILURE` -- e.g. a full reindex
+///   timed out acquiring this submodule's `index.lock` (a stale lock), recorded
+///   `LOCK_FAILURE`, and never entered `pending_lock_retries`. The lock now
+///   being gone (the op finished/aborted, or the user cleared the stale lock)
+///   means a lock-free re-read will now succeed.
+///
+/// The two locks are taken in separate statements, never held simultaneously.
+fn lock_release_needs_reread(
+    index: usize,
+    pending_lock_retries: &Mutex<BitSet>,
+    submod_statuses: &StatusMap,
+    relative_path: &str,
+) -> bool {
+    // Always consume any registered retry request, matching the prior inline
+    // `pending_lock_retries.remove(i)`; `remove` returns whether it was set.
+    let pending = pending_lock_retries
+        .lock()
+        .expect("pending_lock_retries mutex poisoned")
+        .remove(index);
+    let lock_failed = submod_statuses
+        .lock()
+        .expect("StatusMap mutex poisoned")
+        .get(relative_path)
+        .is_some_and(|s| s.contains(StatusSummary::LOCK_FAILURE));
+    pending || lock_failed
+}
+
 /// Decodes a `crossbeam_channel::Select` index back into its [`SelectSource`].
 ///
 /// `handle_events` registers receivers in a fixed order: `n_watchers`
@@ -380,5 +415,55 @@ mod tests {
         assert!(matches!(select_source(2, 2, 3), SelectSource::Tripwire(0)));
         assert!(matches!(select_source(4, 2, 3), SelectSource::Tripwire(2)));
         assert!(matches!(select_source(5, 2, 3), SelectSource::Control));
+    }
+
+    // -- lock_release_needs_reread --
+
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn lock_release_rereads_on_pending_retry() {
+        // Existing behavior: a registered retry (the incremental path's safety
+        // net) triggers a re-read, and is consumed so it can't re-fire.
+        let mut set = BitSet::with_capacity(4);
+        set.insert(2);
+        let pending = Mutex::new(set);
+        let statuses: StatusMap = Mutex::new(BTreeMap::new());
+        assert!(lock_release_needs_reread(2, &pending, &statuses, "sub"));
+        assert!(
+            !lock_release_needs_reread(2, &pending, &statuses, "sub"),
+            "the pending retry must be consumed by the first call"
+        );
+    }
+
+    #[test]
+    fn lock_release_rereads_on_cached_lock_failure() {
+        // The fix: a reindex that recorded LOCK_FAILURE (and so never entered
+        // `pending_lock_retries`) still gets re-read when the lock is released --
+        // e.g. the user clears a stale `index.lock`. Without this, the submodule
+        // would stay LOCK_FAILURE until some unrelated event touched it.
+        let pending = Mutex::new(BitSet::with_capacity(4));
+        let statuses: StatusMap = Mutex::new(BTreeMap::from([(
+            "sub".to_string(),
+            StatusSummary::LOCK_FAILURE,
+        )]));
+        assert!(lock_release_needs_reread(0, &pending, &statuses, "sub"));
+    }
+
+    #[test]
+    fn lock_release_skips_clean_dirty_or_absent() {
+        // No spurious re-read: a clean or ordinarily-dirty cached status (or no
+        // entry at all) with no pending retry must not re-fire on every
+        // `index.lock` removal.
+        let pending = Mutex::new(BitSet::with_capacity(4));
+        let statuses: StatusMap = Mutex::new(BTreeMap::from([
+            ("clean".to_string(), StatusSummary::clean()),
+            ("dirty".to_string(), StatusSummary::UNTRACKED_CONTENT),
+        ]));
+        assert!(!lock_release_needs_reread(0, &pending, &statuses, "clean"));
+        assert!(!lock_release_needs_reread(0, &pending, &statuses, "dirty"));
+        assert!(!lock_release_needs_reread(
+            0, &pending, &statuses, "missing"
+        ));
     }
 }

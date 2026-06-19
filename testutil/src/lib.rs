@@ -152,7 +152,8 @@ impl TestHarness {
 
     /// Request the current status from the watch server.
     pub fn status(&self) -> Vec<(String, StatusSummary)> {
-        let mut conn = send_status_request(self.root.path()).expect("send_status_request failed");
+        let mut conn =
+            send_status_request(self.root.path(), false).expect("send_status_request failed");
         recv_status_response(&mut conn, false)
             .expect("recv_status_response failed")
             .0
@@ -311,7 +312,7 @@ impl TestHarness {
             if ipc_connect(&sock_path).is_ok() {
                 // Server is listening. Do a full status request to
                 // wait for initial indexing to complete.
-                let mut conn = send_status_request(self.root.path()).unwrap();
+                let mut conn = send_status_request(self.root.path(), false).unwrap();
                 let _ = recv_status_response(&mut conn, false);
                 return;
             }

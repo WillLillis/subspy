@@ -79,12 +79,12 @@ pub struct Status {
         default_value = "none"
     )]
     pub ignore_submodules: IgnoreSubmodules,
-    /// Show untracked files
+    /// Show untracked files. Bare `-u` is `-u=all`, matching git (absent is `normal`).
     #[arg(
         long = "untracked-files",
         short = 'u',
         value_name = "MODE",
-        default_missing_value = "normal",
+        default_missing_value = "all",
         num_args = 0..=1
     )]
     pub untracked_files: Option<UntrackedFiles>,
@@ -345,6 +345,12 @@ impl Status {
             OutputFormat::Short
         } else if let Some(v) = self.porcelain {
             OutputFormat::Porcelain(v)
+        } else if self.null_terminate {
+            // Bare `-z` with no explicit format implies porcelain v1, matching
+            // `git status -z` (NUL-delimited machine output, not the human
+            // long format). The shim builds a `Status` and runs it through here
+            // too, so this also fixes `git status -z` via `subspy-git`.
+            OutputFormat::Porcelain(PorcelainVersion::V1)
         } else {
             OutputFormat::Long
         }

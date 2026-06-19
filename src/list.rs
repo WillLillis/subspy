@@ -384,11 +384,14 @@ pub fn list(
         None => (DEFAULT_FORMAT, DEFAULT_USED),
     };
 
-    let server_statuses = if no_server {
+    // Only contact (and possibly cold-start) the watch server when the format
+    // template actually references `{status}`; otherwise the statuses are
+    // discarded, so a status-free `--format` shouldn't spawn a daemon.
+    let server_statuses = if no_server || !used[IDX_STATUS] {
         None
     } else {
-        let mut conn = send_status_request(root_path)?;
         let display_progress = std::io::stderr().is_terminal();
+        let mut conn = send_status_request(root_path, display_progress)?;
         Some(recv_status_response(&mut conn, display_progress)?.0)
     };
 
