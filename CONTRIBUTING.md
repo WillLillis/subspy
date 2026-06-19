@@ -406,20 +406,21 @@ Git uses an atomic rename pattern: write to `index.lock`, delete the original `i
 rename `index.lock` to `index`. The server must be careful about when it holds
 `index.lock`:
 
-- **During `populate_status_map`**: The root `index.lock` is held while calling
-  `parse_gitmodules` (which reads `.gitmodules` via `git2::Config`). This prevents
-  concurrent git operations from modifying the index mid-read. The lock is released
-  before the parallel `submodule_status` calls.
+- **During `populate_status_map`**: `.gitmodules` is read **lock-free**. Git replaces it
+  via an atomic rename, so a reader always sees a complete old-or-new file; holding the
+  root `index.lock` here would be unnecessary and actively harmful, since it makes
+  concurrent git commands fail fast on the pre-existing lock.
 - **During rayon status updates**: No lock is held. `submodule_status()` is read-only
   and never calls `git_index_write()`. Git's atomic rename guarantees the index is
   always consistent for readers. Holding the lock here would block user git operations.
 - **During `get_submod_status`**: The submodule's `index.lock` (not the root's) is
-  acquired. If it can't be acquired (git is actively writing), the server returns
-  `LOCK_FAILURE` as a transient pseudo-status.
+  acquired -- the one place the server takes a lock, and only on the full-reindex path.
+  If it can't be acquired (git is actively writing), the server returns `LOCK_FAILURE`
+  as a transient pseudo-status so a wedged submodule is visible to the user.
 
-The key rule: **hold `index.lock` only during config/gitmodules reads, never during
-`submodule_status` calls.** Getting this wrong either blocks user git operations
-(holding too long) or produces corrupt reads (not holding when needed).
+The key rule: **never hold the root `index.lock`.** `.gitmodules` is read lock-free and
+`submodule_status()` needs no lock; the only lock the server acquires is the *submodule's*
+own `index.lock` in `get_submod_status`, solely to surface `LOCK_FAILURE` during a reindex.
 
 ### Reindex deferral (debouncing)
 

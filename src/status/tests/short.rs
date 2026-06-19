@@ -213,9 +213,9 @@ fn run_subspy_short(project: &ProjectPath, opts: OutputOpts) -> Vec<u8> {
     assemble_status(
         project,
         opts,
-        |repo| {
+        || {
             Ok(if with_submodules {
-                compute_local_statuses(&project.repo_root, repo)?
+                compute_local_statuses(&project.repo_root)?
             } else {
                 Vec::new()
             })

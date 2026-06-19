@@ -8,7 +8,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use git2::Repository;
 use thiserror::Error;
 
 use crate::{
@@ -70,14 +69,11 @@ pub fn prompt(
         };
         (statuses, total as usize)
     } else {
-        let Ok(repo) = Repository::open(root_path) else {
-            return Ok(());
-        };
         let Ok(gitmodule_entries) = parse_gitmodules(root_path) else {
             return Ok(());
         };
         let total = gitmodule_entries.len();
-        let Ok(statuses) = compute_local_statuses(root_path, &repo) else {
+        let Ok(statuses) = compute_local_statuses(root_path) else {
             return Ok(());
         };
         (statuses, total)

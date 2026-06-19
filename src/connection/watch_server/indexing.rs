@@ -28,6 +28,16 @@ fn get_submod_status(
     relative_path: &str,
     lock_path: &Path,
 ) -> WatchResult<StatusSummary> {
+    // Unlike the incremental path (`try_spawn_submod_update`, which reads
+    // lock-free), the reindex acquires the submodule's `index.lock` on purpose:
+    // a failure surfaces as `StatusSummary::LOCK_FAILURE` so a wedged submodule
+    // is visible to the user (commit 27f2ecb), and this one-shot pass has no
+    // per-submodule retry loop to make a lock-free read converge the way the
+    // incremental path's dirty / `SubmoduleLockRelease` retries do. Contention
+    // with a concurrent git op is handled upstream by debouncing the reindex
+    // (`ReindexDebounce`), not by dropping this lock; and a recorded
+    // `LOCK_FAILURE` is re-read once the lock is released (see
+    // `lock_release_needs_reread`).
     let lock = LockFileGuard::acquire(lock_path);
     let status: StatusSummary = if lock.is_ok() {
         repo.submodule_status(relative_path, git2::SubmoduleIgnore::None)?

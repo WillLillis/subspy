@@ -139,7 +139,7 @@ const COLD_START_DEADLINE: Duration = Duration::from_secs(1);
 /// or `NotFound`, a new server is spawned and the connection is retried
 /// until it succeeds, the user terminates the program, or
 /// [`COLD_START_DEADLINE`] passes.
-fn connect_to_server(root_path: &Path) -> IpcResult<BufReader<IpcStream>> {
+fn connect_to_server(root_path: &Path, display_progress: bool) -> IpcResult<BufReader<IpcStream>> {
     let sock_path = ipc_socket_path(root_path);
     match ipc_connect(&sock_path) {
         Ok(conn) => return Ok(BufReader::new(conn)),
@@ -149,30 +149,41 @@ fn connect_to_server(root_path: &Path) -> IpcResult<BufReader<IpcStream>> {
 
     spawn_daemon(root_path, None)?;
 
-    #[allow(clippy::literal_string_with_formatting_args)]
-    let spinner = ProgressBar::new_spinner()
-        .with_style(ProgressStyle::with_template("{spinner} {msg}").unwrap());
-    spinner.set_message("Starting watch server...");
-    spinner.enable_steady_tick(Duration::from_millis(80));
+    // Only build a spinner -- which spawns a steady-tick draw thread -- when
+    // attached to a terminal; non-terminal callers get `None`.
+    let spinner = display_progress.then(|| {
+        #[allow(clippy::literal_string_with_formatting_args)]
+        let s = ProgressBar::new_spinner()
+            .with_style(ProgressStyle::with_template("{spinner} {msg}").unwrap());
+        s.set_message("Starting watch server...");
+        s.enable_steady_tick(Duration::from_millis(80));
+        s
+    });
 
     let deadline = Instant::now() + COLD_START_DEADLINE;
     loop {
         match ipc_connect(&sock_path) {
             Ok(conn) => {
-                spinner.finish_and_clear();
+                if let Some(s) = &spinner {
+                    s.finish_and_clear();
+                }
                 return Ok(BufReader::new(conn));
             }
             Err(e) if server_not_started(&e) => {
                 if Instant::now() >= deadline {
-                    spinner.abandon_with_message(format!(
-                        "Watch server failed to start within {}s",
-                        COLD_START_DEADLINE.as_secs(),
-                    ));
+                    if let Some(s) = &spinner {
+                        s.abandon_with_message(format!(
+                            "Watch server failed to start within {}s",
+                            COLD_START_DEADLINE.as_secs(),
+                        ));
+                    }
                     Err(e)?;
                 }
             }
             Err(e) => {
-                spinner.abandon_with_message("Failed to connect to watch server".to_string());
+                if let Some(s) = &spinner {
+                    s.abandon_with_message("Failed to connect to watch server".to_string());
+                }
                 Err(e)?;
             }
         }
@@ -215,13 +226,18 @@ pub fn server_not_started(e: &std::io::Error) -> bool {
 ///
 /// Connects to the server (spawning if needed) and sends a `ClientMessage::Status`
 /// request. Returns the live connection so that the caller can perform other work
-/// before reading the response with [`recv_status_response`].
+/// before reading the response with [`recv_status_response`]. `display_progress`
+/// gates the cold-start spinner shown while a freshly spawned server starts up
+/// (off for non-terminal callers).
 ///
 /// # Errors
 ///
 /// Returns error if the ipc channel cannot be created or the request cannot be sent.
-pub fn send_status_request(root_path: &Path) -> IpcResult<BufReader<IpcStream>> {
-    let mut conn = connect_to_server(root_path)?;
+pub fn send_status_request(
+    root_path: &Path,
+    display_progress: bool,
+) -> IpcResult<BufReader<IpcStream>> {
+    let mut conn = connect_to_server(root_path, display_progress)?;
     let req = ClientRequest::new(ClientMessage::Status(std::process::id()));
     let mut req_msg = [0; 9]; // 1 byte version + 4 byte variant index + 4 byte u32 pid (fixint)
     let req_msg_len = bincode::encode_into_slice(&req, &mut req_msg, BINCODE_CFG)?;

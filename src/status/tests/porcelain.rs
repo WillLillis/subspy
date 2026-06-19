@@ -443,9 +443,9 @@ fn assert_outputs_match(project: &ProjectPath, case_name: &str, opts: OutputOpts
     let got: Vec<u8> = assemble_status(
         project,
         opts,
-        |repo| {
+        || {
             Ok(if with_submodules {
-                compute_local_statuses(&project.repo_root, repo)?
+                compute_local_statuses(&project.repo_root)?
             } else {
                 Vec::new()
             })

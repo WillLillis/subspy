@@ -80,7 +80,7 @@ where
     let cli = Commands::augment_subcommands(cli);
 
     let command = Commands::from_arg_matches(&cli.get_matches_from(args))?;
-    setup_logging(&command)?;
+    setup_logging(&command);
 
     match command {
         Commands::Start(watch_options) => {
@@ -106,15 +106,21 @@ where
 /// Sets up logging and, for the watch server, the panic hook. The watch
 /// server logs to a file in the cache dir (default `info`); client commands
 /// log to stderr (default `warn`).
-fn setup_logging(command: &Commands) -> RunResult<()> {
+///
+/// Logging is best-effort: a setup failure is swallowed and the command runs
+/// unlogged rather than aborting. This matters most for the daemon, which is
+/// spawned detached with a null stderr -- propagating the error would kill the
+/// auto-spawned server silently and break the client that spawned it.
+fn setup_logging(command: &Commands) {
     if let Commands::Start(start) = command {
-        let mut log_file_dir = etcetera::choose_base_strategy()?.cache_dir();
-        log_file_dir.push("subspy");
-        Logger::with(start.log_level.unwrap_or(LogLevel::Info))
-            .log_to_file(FileSpec::default().directory(log_file_dir))
-            .write_mode(WriteMode::BufferAndFlush)
-            .start()
-            .unwrap();
+        if let Ok(base) = etcetera::choose_base_strategy() {
+            let mut log_file_dir = base.cache_dir();
+            log_file_dir.push("subspy");
+            let _ = Logger::with(start.log_level.unwrap_or(LogLevel::Info))
+                .log_to_file(FileSpec::default().directory(log_file_dir))
+                .write_mode(WriteMode::BufferAndFlush)
+                .start();
+        }
 
         let default_panic_hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
@@ -125,13 +131,8 @@ fn setup_logging(command: &Commands) -> RunResult<()> {
 
         info!("Invoked with command: {command:#?}");
     } else {
-        Logger::with(LogLevel::Warn)
-            .log_to_stderr()
-            .start()
-            .unwrap();
+        let _ = Logger::with(LogLevel::Warn).log_to_stderr().start();
     }
-
-    Ok(())
 }
 
 #[cfg(test)]

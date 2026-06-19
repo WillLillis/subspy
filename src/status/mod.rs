@@ -231,7 +231,7 @@ pub fn build_status_options(opts: OutputOpts, repo_kind: RepoKind) -> git2::Stat
 pub fn assemble_status<R>(
     project: &ProjectPath,
     opts: OutputOpts,
-    submodule_statuses: impl FnOnce(&Repository) -> StatusResult<Vec<(String, StatusSummary)>>,
+    submodule_statuses: impl FnOnce() -> StatusResult<Vec<(String, StatusSummary)>>,
     render: impl FnOnce(&Repository, &StatusEntries<'_>, &Relativizer<'_>) -> StatusResult<R>,
 ) -> StatusResult<R> {
     let repo = Repository::open(&project.repo_root)?;
@@ -244,7 +244,7 @@ pub fn assemble_status<R>(
         submodule_changes(&repo)?
     };
 
-    let raw_submods = submodule_statuses(&repo)?;
+    let raw_submods = submodule_statuses()?;
     // Per-submodule `submodule.<name>.ignore` only matters when the global
     // flag is unset (or `--ignore-submodules=none`). Any other global value
     // overrides everything, so skip the config scan.
@@ -295,7 +295,7 @@ pub fn status(
     // Send IPC request early so the server starts processing while we
     // do local work.
     let mut conn = if use_server {
-        Some(send_status_request(&project.repo_root)?)
+        Some(send_status_request(&project.repo_root, display_progress)?)
     } else {
         None
     };
@@ -316,10 +316,10 @@ pub fn status(
     assemble_status(
         project,
         opts,
-        |repo| match conn {
+        || match conn {
             Some(ref mut c) => Ok(recv_status_response(c, display_progress)?.0),
             None if kind.has_submodules() && ignore_submodules != IgnoreSubmodules::All => {
-                compute_local_statuses(&project.repo_root, repo)
+                compute_local_statuses(&project.repo_root)
             }
             None => Ok(Vec::new()),
         },

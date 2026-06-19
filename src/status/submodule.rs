@@ -4,7 +4,7 @@ use git2::Repository;
 
 use std::path::Path;
 
-use crate::{StatusSummary, git::parse_gitmodules, watch::LockFileGuard};
+use crate::{StatusSummary, git::parse_gitmodules};
 
 use super::{IgnoreSubmodules, StatusResult};
 
@@ -185,23 +185,20 @@ pub fn apply_ignore_submodules(
 ///
 /// # Errors
 ///
-/// Returns `StatusError` if the lock file cannot be acquired or git2 fails
-/// to read submodule status.
+/// Returns `StatusError` if git2 fails to read submodule status.
 ///
 /// # Panics
 ///
 /// Panics if a submodule path contains non-UTF-8.
-pub fn compute_local_statuses(
-    root_path: &Path,
-    repo: &Repository,
-) -> StatusResult<Vec<(String, StatusSummary)>> {
+pub fn compute_local_statuses(root_path: &Path) -> StatusResult<Vec<(String, StatusSummary)>> {
     use rayon::prelude::*;
 
-    let lock_path = repo.path().join("index.lock");
-    let gitmodule_entries = {
-        let _lock = LockFileGuard::acquire(&lock_path)?;
-        parse_gitmodules(root_path)?
-    };
+    // Read `.gitmodules` lock-free: git replaces it via an atomic rename, so a
+    // reader always sees a complete old-or-new file. Holding the root
+    // `index.lock` here would be unnecessary and actively harmful -- it makes
+    // concurrent git commands fail fast on the pre-existing lock. Mirrors the
+    // watch server's `populate_status_map`.
+    let gitmodule_entries = parse_gitmodules(root_path)?;
     let tl_repo = thread_local::ThreadLocal::new();
 
     let statuses: StatusResult<Vec<_>> = gitmodule_entries
@@ -268,8 +265,7 @@ mod tests {
         ]);
         git(&["-C", &root_str, "commit", "-m", "add submodule"]);
 
-        let repo = Repository::open(&root).unwrap();
-        let statuses = compute_local_statuses(&root, &repo).unwrap();
+        let statuses = compute_local_statuses(&root).unwrap();
         assert!(
             statuses.is_empty(),
             "clean repo should have no dirty submodules"
@@ -308,8 +304,7 @@ mod tests {
         // Dirty the submodule
         std::fs::write(root.join("my_sub").join("new.txt"), "untracked\n").unwrap();
 
-        let repo = Repository::open(&root).unwrap();
-        let statuses = compute_local_statuses(&root, &repo).unwrap();
+        let statuses = compute_local_statuses(&root).unwrap();
         assert_eq!(statuses.len(), 1);
         assert_eq!(statuses[0].0, "my_sub");
         assert!(statuses[0].1.contains(StatusSummary::UNTRACKED_CONTENT));
