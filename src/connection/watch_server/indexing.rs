@@ -16,7 +16,7 @@ use crate::{
         watch_server::{ROOT_WATCHER_COUNT, WatchListItem, WatchServer},
     },
     create_progress_bar,
-    git::parse_gitmodules,
+    git::{GitlinkKind, parse_gitlink, parse_gitmodules},
     watch::{LockFileGuard, WatchError, WatchResult},
 };
 
@@ -295,47 +295,19 @@ impl WatchServer {
         let dot_git_path = self.root_path.join(submod_rel_path).join(DOT_GIT);
         let dot_git_bytes = std::fs::read(&dot_git_path)?;
 
-        // The file content is "gitdir: ../../.git/modules/name\n". We only
-        // need the part after ".git/modules/", so find that marker directly
-        // on the raw bytes (the marker is ASCII) and UTF-8 validate only
-        // the suffix (the submodule name, which may contain non-ASCII).
-        // The marker never appears before byte 10 ("gitdir: ../"), so skip
-        // that prefix when searching.
-        #[expect(
-            clippy::items_after_statements,
-            reason = "constants are function-local"
-        )]
-        const MODULES_MARKER: &[u8] = b".git/modules/";
-        #[expect(
-            clippy::items_after_statements,
-            reason = "constants are function-local"
-        )]
-        const MIN_PREFIX_LEN: usize = "gitdir: ../".len();
-        let suffix_start = dot_git_bytes
-            .get(MIN_PREFIX_LEN..)
-            .and_then(|tail| {
-                tail.windows(MODULES_MARKER.len())
-                    .position(|w| w == MODULES_MARKER)
-            })
-            .ok_or_else(|| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!(
-                        "Expected {} to contain \".git/modules/\"",
-                        dot_git_path.display()
-                    ),
-                )
-            })?
-            + MIN_PREFIX_LEN
-            + MODULES_MARKER.len();
+        // `parse_gitlink` returns the submodule's path within `.git/modules/`
+        // (the bit after the marker) as raw bytes -- the name may contain
+        // non-UTF-8 bytes -- which we UTF-8 validate only for the `PathBuf` join.
+        let GitlinkKind::Submodule { modules_subpath } = parse_gitlink(&dot_git_bytes) else {
+            return Err(WatchError::NotSubmoduleGitlink(dot_git_path));
+        };
 
-        let suffix =
-            std::str::from_utf8(dot_git_bytes[suffix_start..].trim_ascii()).map_err(|e| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!("{}: {e}", dot_git_path.display()),
-                )
-            })?;
+        let suffix = std::str::from_utf8(modules_subpath).map_err(|error| {
+            WatchError::NonUtf8SubmoduleName {
+                path: dot_git_path,
+                error,
+            }
+        })?;
 
         Ok(self.root_modules_path.join(suffix))
     }

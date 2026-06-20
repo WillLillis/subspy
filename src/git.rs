@@ -25,6 +25,63 @@ pub fn configure_git2() {
     }
 }
 
+/// The `gitdir:` target path from a `.git` gitlink *file*'s raw bytes.
+///
+/// `dot_git_bytes` belongs to a submodule, linked worktree, or other gitlink
+/// `.git`. Returns `None` if the bytes aren't a `gitdir:` pointer (git writes the
+/// file as exactly `gitdir: <path>\n`).
+#[inline]
+#[must_use]
+pub fn gitlink_target(dot_git_bytes: &[u8]) -> Option<&[u8]> {
+    dot_git_bytes.trim_ascii().strip_prefix(b"gitdir: ")
+}
+
+/// What a `.git` gitlink *file* points at, from [`parse_gitlink`].
+pub enum GitlinkKind<'a> {
+    /// A submodule: its gitdir lives under a `.git/modules/` directory (or, when
+    /// the submodule is nested in a worktree, the worktree's private
+    /// `.git/worktrees/<wt>/modules/`). `modules_subpath` is the path within that
+    /// `modules/` directory -- the submodule's name, possibly multi-component
+    /// (`libs/foo`) and possibly non-UTF-8.
+    Submodule { modules_subpath: &'a [u8] },
+    /// A linked worktree: its gitdir is `.git/worktrees/<wt>`.
+    Worktree,
+    /// Anything else -- a `git init --separate-git-dir` repo, or an
+    /// unparseable/corrupt `.git` file.
+    Other,
+}
+
+/// Classifies a `.git` gitlink *file*'s raw bytes by anchoring on the
+/// `.git/modules/` and `.git/worktrees/` markers in its `gitdir:` target.
+#[must_use]
+pub fn parse_gitlink(dot_git_bytes: &[u8]) -> GitlinkKind<'_> {
+    let Some(target) = gitlink_target(dot_git_bytes) else {
+        return GitlinkKind::Other;
+    };
+    // `.git/modules/<name>`: a submodule of a normal superproject.
+    if let Some(modules_subpath) = after_marker(target, b".git/modules/") {
+        return GitlinkKind::Submodule { modules_subpath };
+    }
+    if let Some(after_worktree) = after_marker(target, b".git/worktrees/") {
+        // `.git/worktrees/<wt>/modules/<name>`: a submodule nested in a worktree
+        // `.git/worktrees/<wt>`: the worktree itself.
+        return after_marker(after_worktree, b"/modules/")
+            .map_or(GitlinkKind::Worktree, |modules_subpath| {
+                GitlinkKind::Submodule { modules_subpath }
+            });
+    }
+    GitlinkKind::Other
+}
+
+/// The bytes following the first occurrence of `marker` in `haystack`, or `None`
+/// if `marker` is absent. Allocation-free.
+fn after_marker<'a>(haystack: &'a [u8], marker: &[u8]) -> Option<&'a [u8]> {
+    haystack
+        .windows(marker.len())
+        .position(|window| window == marker)
+        .map(|start| &haystack[start + marker.len()..])
+}
+
 fn parse_ignore_mode(s: &str) -> Option<IgnoreSubmodules> {
     match s {
         "none" => Some(IgnoreSubmodules::None),

@@ -33,6 +33,13 @@ pub enum WatchError {
     Receive(#[from] crossbeam_channel::RecvError),
     #[error(transparent)]
     LockFileAcquire(#[from] LockFileError),
+    #[error("{} is not a submodule gitlink (its gitdir is not under .git/modules/)", .0.display())]
+    NotSubmoduleGitlink(PathBuf),
+    #[error("submodule name in {} is not valid UTF-8: {error}", path.display())]
+    NonUtf8SubmoduleName {
+        path: PathBuf,
+        error: std::str::Utf8Error,
+    },
 }
 
 #[derive(Debug, Error)]
