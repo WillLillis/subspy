@@ -42,19 +42,41 @@ pub enum RepoKind {
     /// locally like a superproject, but no watch server can run for it (the
     /// server can't watch a gitlink `.git`)
     SubmoduleWithSubmodules,
+    /// A linked worktree (its `.git` is a _file_ pointing into the main repo's
+    /// `.git/worktrees/`) with no submodules of its own.
+    Worktree,
+    /// A linked worktree whose checkout has submodules. Its statuses are
+    /// computed locally like a superproject, but the watch server doesn't
+    /// support worktrees yet.
+    WorktreeWithSubmodules,
+    /// A `.git` gitlink *file* we don't recognize as a submodule or worktree:
+    /// it points outside `.git/modules/` and `.git/worktrees/` (e.g. `git init
+    /// --separate-git-dir`), or it's unparseable/corrupt. The watch server can't
+    /// watch a gitlink; local computation still works for a valid one, while a
+    /// corrupt one fails at `Repository::open`.
+    OtherGitlink,
+    /// Like [`Self::OtherGitlink`], but with a `.gitmodules` file, so its
+    /// submodule statuses are computed locally like a superproject.
+    OtherGitlinkWithSubmodules,
 }
 
 impl RepoKind {
-    /// Whether this repo has submodules of its own (a top-level superproject
-    /// or a submodule that is itself one).
+    /// Whether this repo has submodules of its own
     #[must_use]
     pub const fn has_submodules(self) -> bool {
-        matches!(self, Self::WithSubmodules | Self::SubmoduleWithSubmodules)
+        matches!(
+            self,
+            Self::WithSubmodules
+                | Self::SubmoduleWithSubmodules
+                | Self::WorktreeWithSubmodules
+                | Self::OtherGitlinkWithSubmodules
+        )
     }
 
     /// Whether a watch server can run for this repo. Only a top-level
-    /// superproject qualifies. A submodule's `.git` is a gitlink file whose
-    /// real git dir lives under the parent, which the server can't watch.
+    /// superproject qualifies. A submodule's or linked worktree's `.git` is a
+    /// gitlink file whose real git dir lives elsewhere, which the server can't
+    /// watch yet
     #[must_use]
     pub const fn server_eligible(self) -> bool {
         matches!(self, Self::WithSubmodules)

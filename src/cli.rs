@@ -10,6 +10,7 @@ use crate::{
     DOT_GIT, DOT_GITMODULES, RepoKind,
     connection::watch_server::watch,
     debug::{DebugError, debug},
+    git::{GitlinkKind, parse_gitlink},
     list::{ListError, list},
     prompt::{PromptError, prompt},
     reindex::{ReindexError, reindex},
@@ -229,6 +230,10 @@ pub enum RunError {
         path: PathBuf,
         error: std::io::Error,
     },
+    #[error("A watch server is not yet supported for linked worktrees ({})", _0.display())]
+    Worktree(PathBuf),
+    #[error("A watch server needs .git to be a directory, but it's a gitlink to an external git directory ({})", _0.display())]
+    Gitlink(PathBuf),
     #[error(transparent)]
     Reindex(#[from] ReindexError),
     #[error(transparent)]
@@ -469,19 +474,56 @@ pub struct ProjectPath {
 }
 
 impl ProjectPath {
-    /// Returns `repo_root` for top-level submodule projects, the only
-    /// shape that admits a watch server.
+    /// Returns `repo_root` for a top-level superproject (`WithSubmodules`), the
+    /// only shape that admits a watch server.
     ///
     /// # Errors
     ///
-    /// Returns `RunError::ProjectPath` when `kind` is not
-    /// `RepoKind::WithSubmodules`.
+    /// Returns a `RunError` describing why the repo can't host a server: a linked
+    /// worktree ([`RunError::Worktree`]), a gitlink to an external git dir
+    /// ([`RunError::Gitlink`]), or anything else that isn't a non-recursive repo
+    /// with a `.gitmodules` file ([`RunError::ProjectPath`]).
     pub fn require_with_submodules(self) -> RunResult<PathBuf> {
         if self.kind.server_eligible() {
-            Ok(self.repo_root)
-        } else {
-            Err(RunError::server_path(self.repo_root))
+            return Ok(self.repo_root);
         }
+        Err(match self.kind {
+            RepoKind::Worktree | RepoKind::WorktreeWithSubmodules => {
+                RunError::Worktree(self.repo_root)
+            }
+            RepoKind::OtherGitlink | RepoKind::OtherGitlinkWithSubmodules => {
+                RunError::Gitlink(self.repo_root)
+            }
+            RepoKind::Normal
+            | RepoKind::WithSubmodules
+            | RepoKind::Submodule
+            | RepoKind::SubmoduleWithSubmodules => RunError::server_path(self.repo_root),
+        })
+    }
+}
+
+/// Classifies a repo from its `.git` gitlink contents and whether a
+/// `.gitmodules` file is present. `git_file_contents` is `None` when `.git` is a
+/// directory, or `Some(<file bytes>)` when it's a gitlink *file* (raw bytes,
+/// since the `gitdir:` target may contain non-UTF-8 path bytes).
+fn classify_repo(git_file_contents: Option<&[u8]>, has_gitmodules: bool) -> RepoKind {
+    let Some(contents) = git_file_contents else {
+        // `.git` is a real directory.
+        return if has_gitmodules {
+            RepoKind::WithSubmodules
+        } else {
+            RepoKind::Normal
+        };
+    };
+    let (plain, with_submodules) = match parse_gitlink(contents) {
+        GitlinkKind::Submodule { .. } => (RepoKind::Submodule, RepoKind::SubmoduleWithSubmodules),
+        GitlinkKind::Worktree => (RepoKind::Worktree, RepoKind::WorktreeWithSubmodules),
+        GitlinkKind::Other => (RepoKind::OtherGitlink, RepoKind::OtherGitlinkWithSubmodules),
+    };
+    if has_gitmodules {
+        with_submodules
+    } else {
+        plain
     }
 }
 
@@ -510,19 +552,22 @@ pub fn get_project_path(path: Option<PathBuf>) -> RunResult<ProjectPath> {
     loop {
         let dot_git_path = current_path.join(DOT_GIT);
         if dot_git_path.exists() {
-            // A `.gitmodules` file means this repo has submodules to show; a
-            // `.git` *file* means this repo is itself a submodule (gitlink).
-            // A submodule can also be a superproject, which still needs
-            // submodule handling even though it can't host a watch server.
-            let kind = match (
-                dot_git_path.is_file(),
-                current_path.join(DOT_GITMODULES).is_file(),
-            ) {
-                (false, false) => RepoKind::Normal,
-                (false, true) => RepoKind::WithSubmodules,
-                (true, false) => RepoKind::Submodule,
-                (true, true) => RepoKind::SubmoduleWithSubmodules,
+            // A `.git` *file* is a gitlink (a submodule, a linked worktree, or
+            // some other external git dir); read its `gitdir:` pointer so
+            // `classify_repo` can tell them apart (`None` means `.git` is a real
+            // directory).
+            let git_file_contents = if dot_git_path.is_file() {
+                let contents =
+                    std::fs::read(&dot_git_path).map_err(|error| RunError::ProjectPath {
+                        path: dot_git_path.clone(),
+                        error,
+                    })?;
+                Some(contents)
+            } else {
+                None
             };
+            let has_gitmodules = current_path.join(DOT_GITMODULES).is_file();
+            let kind = classify_repo(git_file_contents.as_deref(), has_gitmodules);
             return Ok(ProjectPath {
                 repo_root: current_path.to_path_buf(),
                 effective_cwd,
@@ -557,7 +602,9 @@ mod tests {
     }
 
     fn setup_git_file(path: &std::path::Path) {
-        std::fs::File::create(path.join(".git")).unwrap();
+        // A submodule gitlink: a `.git` *file* pointing into the parent's
+        // `.git/modules/`.
+        std::fs::write(path.join(".git"), "gitdir: ../.git/modules/sub\n").unwrap();
     }
 
     #[test]
@@ -643,5 +690,95 @@ mod tests {
 
         let project = get_project_path(Some(tmp.path().to_path_buf())).unwrap();
         assert_eq!(project.kind, RepoKind::Normal);
+    }
+
+    #[test]
+    fn classify_repo_maps_all_shapes() {
+        // `.git` is a directory:
+        assert_eq!(classify_repo(None, false), RepoKind::Normal);
+        assert_eq!(classify_repo(None, true), RepoKind::WithSubmodules);
+        // gitlink pointing at a submodule gitdir:
+        let submod = Some(b"gitdir: ../.git/modules/sub\n".as_slice());
+        assert_eq!(classify_repo(submod, false), RepoKind::Submodule);
+        assert_eq!(
+            classify_repo(submod, true),
+            RepoKind::SubmoduleWithSubmodules
+        );
+        // gitlink pointing at a linked worktree:
+        let wt = Some(b"gitdir: /main/.git/worktrees/wt\n".as_slice());
+        assert_eq!(classify_repo(wt, false), RepoKind::Worktree);
+        assert_eq!(classify_repo(wt, true), RepoKind::WorktreeWithSubmodules);
+    }
+
+    #[test]
+    fn classify_repo_submodule_nested_in_worktree_is_submodule() {
+        // A submodule inside a worktree points at `.git/worktrees/<wt>/modules/<name>`;
+        // anchoring on `.git` finds the inner `modules`, so it's a submodule.
+        let nested = Some(b"gitdir: /main/.git/worktrees/wt/modules/sub\n".as_slice());
+        assert_eq!(classify_repo(nested, false), RepoKind::Submodule);
+        assert_eq!(
+            classify_repo(nested, true),
+            RepoKind::SubmoduleWithSubmodules
+        );
+    }
+
+    #[test]
+    fn classify_repo_multi_component_submodule_name() {
+        // A submodule at path `libs/foo` has gitdir `.git/modules/libs/foo`, so the
+        // classifying `modules` isn't the leaf's immediate parent.
+        let sub = Some(b"gitdir: ../../.git/modules/libs/foo\n".as_slice());
+        assert_eq!(classify_repo(sub, false), RepoKind::Submodule);
+    }
+
+    #[test]
+    fn classify_repo_anchors_on_dot_git() {
+        // A coincidental `worktrees`/`modules` directory elsewhere in the gitdir
+        // path must not trigger a false match -- only the structure beneath the
+        // repo's own `.git` counts. `git init --separate-git-dir` into such a path:
+        let separate = Some(b"gitdir: /home/me/worktrees/myrepo\n".as_slice());
+        assert_eq!(classify_repo(separate, false), RepoKind::OtherGitlink);
+        assert_eq!(
+            classify_repo(separate, true),
+            RepoKind::OtherGitlinkWithSubmodules
+        );
+        // A submodule literally named `worktrees/foo` is still a submodule:
+        let sub = Some(b"gitdir: ../.git/modules/worktrees/foo\n".as_slice());
+        assert_eq!(classify_repo(sub, false), RepoKind::Submodule);
+    }
+
+    #[test]
+    fn classify_repo_unrecognized_gitlink_is_other() {
+        // An empty/garbage gitlink, or one pointing at an external git dir, is
+        // `OtherGitlink`.
+        assert_eq!(classify_repo(Some(b""), false), RepoKind::OtherGitlink);
+        assert_eq!(
+            classify_repo(Some(b"garbage"), true),
+            RepoKind::OtherGitlinkWithSubmodules
+        );
+        let external = Some(b"gitdir: /var/lib/git/myrepo.git\n".as_slice());
+        assert_eq!(classify_repo(external, false), RepoKind::OtherGitlink);
+    }
+
+    #[test]
+    fn server_commands_reject_worktree_and_gitlink() {
+        // start/stop/reindex/debug gate on `require_with_submodules`
+        let worktree = ProjectPath {
+            repo_root: PathBuf::from("/wt"),
+            effective_cwd: PathBuf::from("/wt"),
+            kind: RepoKind::WorktreeWithSubmodules,
+        };
+        assert!(matches!(
+            worktree.require_with_submodules(),
+            Err(RunError::Worktree(_))
+        ));
+        let external = ProjectPath {
+            repo_root: PathBuf::from("/ext"),
+            effective_cwd: PathBuf::from("/ext"),
+            kind: RepoKind::OtherGitlinkWithSubmodules,
+        };
+        assert!(matches!(
+            external.require_with_submodules(),
+            Err(RunError::Gitlink(_))
+        ));
     }
 }
