@@ -463,7 +463,7 @@ fn get_header_state(repo: &Repository, ahead_behind: bool) -> StatusResult<Heade
             }
         }
         _ => HeaderBody::Normal {
-            upstream: get_upstream_status(repo, head_ref, ahead_behind)?,
+            upstream: get_upstream_status(repo, &head_ref, ahead_behind)?,
         },
     };
 
@@ -711,54 +711,29 @@ fn detached_target(repo: &Repository, head_ref: &git2::Reference<'_>) -> (&'stat
 /// form. With matched OIDs we still emit the "up to date" message.
 fn get_upstream_status(
     repo: &Repository,
-    head_ref: git2::Reference<'_>,
+    head_ref: &git2::Reference<'_>,
     ahead_behind: bool,
 ) -> StatusResult<Option<(String, &'static str)>> {
-    if !head_ref.is_branch() {
-        return Ok(None);
-    }
-
-    // Captured before `Branch::wrap` consumes `head_ref`, for the
-    // upstream-gone lookup below.
-    let local_ref_name = head_ref.name().ok().map(str::to_owned);
-
-    let local_branch = git2::Branch::wrap(head_ref);
-    let Ok(upstream_branch) = local_branch.upstream() else {
-        // Distinguish "no upstream configured" from "configured but gone"
-        // (typical after `git fetch --prune` removes the remote branch).
-        if let Some(name) = local_ref_name
-            && let Some(short) = super::configured_upstream_short_name(repo, &name)
-        {
+    let (name, divergence) = match super::upstream_status(repo, head_ref, ahead_behind)? {
+        super::UpstreamStatus::None => return Ok(None),
+        super::UpstreamStatus::Gone { name } => {
             return Ok(Some((
-                format!("Your branch is based on '{short}', but the upstream is gone."),
+                format!("Your branch is based on '{name}', but the upstream is gone."),
                 "(use \"git branch --unset-upstream\" to fixup)",
             )));
         }
-        return Ok(None);
+        super::UpstreamStatus::Tracking { name, divergence } => (name, divergence),
     };
 
-    let name = String::from_utf8_lossy(upstream_branch.get().shorthand_bytes());
-
-    // Get local and upstream commit OIDs
-    let local_oid = local_branch.get().peel_to_commit()?.id();
-    let upstream_oid = upstream_branch.get().peel_to_commit()?.id();
-
-    if local_oid == upstream_oid {
-        return Ok(Some((
-            format!("Your branch is up to date with '{name}'."),
-            "",
-        )));
-    }
-
-    if !ahead_behind {
-        return Ok(Some((
-            format!("Your branch and '{name}' refer to different commits."),
-            "(use \"git status --ahead-behind\" for details)",
-        )));
-    }
-
-    // Compare graphs
-    let (ahead, behind) = repo.graph_ahead_behind(local_oid, upstream_oid)?;
+    let (ahead, behind) = match divergence {
+        super::Divergence::Skipped => {
+            return Ok(Some((
+                format!("Your branch and '{name}' refer to different commits."),
+                "(use \"git status --ahead-behind\" for details)",
+            )));
+        }
+        super::Divergence::Counts(ahead, behind) => (ahead, behind),
+    };
 
     let commit_s = |n: usize| if n == 1 { "commit" } else { "commits" };
 
@@ -1171,7 +1146,7 @@ mod tests {
     #[test]
     fn upstream_up_to_date() {
         let (_tmp, repo) = init_repo_with_remote();
-        let (status_line, hint) = get_upstream_status(&repo, repo.head().unwrap(), true)
+        let (status_line, hint) = get_upstream_status(&repo, &repo.head().unwrap(), true)
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -1190,7 +1165,7 @@ mod tests {
         git(&["-C", &local, "commit", "-m", "local commit"]);
 
         let repo = Repository::open(repo.workdir().unwrap()).unwrap();
-        let (status_line, hint) = get_upstream_status(&repo, repo.head().unwrap(), true)
+        let (status_line, hint) = get_upstream_status(&repo, &repo.head().unwrap(), true)
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -1223,7 +1198,7 @@ mod tests {
         git(&["-C", &local, "fetch"]);
 
         let repo = Repository::open(repo.workdir().unwrap()).unwrap();
-        let (status_line, hint) = get_upstream_status(&repo, repo.head().unwrap(), true)
+        let (status_line, hint) = get_upstream_status(&repo, &repo.head().unwrap(), true)
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -1259,7 +1234,7 @@ mod tests {
         git(&["-C", &local, "fetch"]);
 
         let repo = Repository::open(repo.workdir().unwrap()).unwrap();
-        let (status_line, hint) = get_upstream_status(&repo, repo.head().unwrap(), true)
+        let (status_line, hint) = get_upstream_status(&repo, &repo.head().unwrap(), true)
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -1277,7 +1252,7 @@ mod tests {
     fn upstream_none_without_remote() {
         let (_tmp, repo) = init_repo();
         assert!(
-            get_upstream_status(&repo, repo.head().unwrap(), true)
+            get_upstream_status(&repo, &repo.head().unwrap(), true)
                 .unwrap()
                 .is_none()
         );
