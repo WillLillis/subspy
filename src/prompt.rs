@@ -19,7 +19,7 @@ use crate::{
     },
     git::parse_gitmodules,
     status::compute_local_statuses,
-    template::{TemplateError, expand_template, validate_template},
+    template::{Template, TemplateError},
     watch::spawn_daemon,
 };
 
@@ -56,13 +56,7 @@ pub fn prompt(
     format: Option<&str>,
     timeout: Duration,
 ) -> PromptResult<()> {
-    let template = match format {
-        Some(t) => {
-            validate_template(t, &PLACEHOLDERS)?;
-            t
-        }
-        None => DEFAULT_FORMAT,
-    };
+    let template = Template::parse(format.unwrap_or(DEFAULT_FORMAT), &PLACEHOLDERS)?;
     let (statuses, total) = if use_server {
         let Some((statuses, total)) = try_get_statuses(root_path, timeout) else {
             return Ok(());
@@ -99,9 +93,7 @@ pub fn prompt(
     }
 
     let no_widths = [0; 5];
-    let output = expand_template(
-        template,
-        &PLACEHOLDERS,
+    let output = template.expand(
         |name| {
             let value: u32 = match name {
                 "dirty" => dirty,
@@ -109,7 +101,7 @@ pub fn prompt(
                 "new_commits" => new_commits,
                 "clean" => total.saturating_sub(statuses.len()) as u32,
                 "total" => total as u32,
-                _ => unreachable!("validated by validate_template"),
+                _ => unreachable!("validated by Template::parse"),
             };
             Cow::Owned(value.to_string())
         },
@@ -190,6 +182,6 @@ mod tests {
 
     #[test]
     fn default_format_is_valid() {
-        validate_template(DEFAULT_FORMAT, &PLACEHOLDERS).unwrap();
+        Template::parse(DEFAULT_FORMAT, &PLACEHOLDERS).unwrap();
     }
 }

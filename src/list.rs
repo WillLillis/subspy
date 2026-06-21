@@ -13,9 +13,7 @@ use crate::{
         client::{recv_status_response, send_status_request},
     },
     git::parse_gitmodules,
-    template::{
-        TemplateError, expand_template, find_placeholder, find_unescaped, validate_template,
-    },
+    template::{Template, TemplateError},
 };
 
 pub type ListResult<T> = Result<T, ListError>;
@@ -122,19 +120,6 @@ const IDX_HEAD: usize = 4;
 const IDX_HEAD_LONG: usize = 5;
 const IDX_HEAD_BRANCH: usize = 7;
 const IDX_STATUS: usize = 8;
-
-/// Pre-computed `used` array for [`DEFAULT_FORMAT`].
-const DEFAULT_USED: [bool; 9] = [
-    true,  // name
-    true,  // path
-    true,  // commit
-    false, // commit_long
-    true,  // head
-    false, // head_long
-    true,  // branch
-    true,  // head_branch
-    true,  // status
-];
 
 /// Resolves the `.git` directory for a submodule. Handles both `.git`
 /// directories (normal repos) and `.git` files containing a `gitdir:` pointer
@@ -290,31 +275,13 @@ fn gather_info(
 /// the header label length and all data values, plus any literal overhead
 /// characters inside the braces. Only placeholders that appear in `template`
 /// are measured; unused placeholders keep a width of zero (no padding).
-fn compute_placeholder_widths(template: &str, submod_info: &[SubmoduleInfo]) -> [usize; 9] {
+fn compute_placeholder_widths(
+    template: &Template<'_, 9>,
+    submod_info: &[SubmoduleInfo],
+) -> [usize; 9] {
     let mut widths = [0usize; 9];
-    let mut overhead = [0usize; 9];
-    let mut used = [false; 9];
-
-    let bytes = template.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'\\' && i + 1 < bytes.len() {
-            i += 2;
-        } else if bytes[i] == b'{' {
-            let start = i + 1;
-            // Safety: template was validated by `validate_template`
-            let end = find_unescaped(&template[start..], '}').unwrap();
-            let content = &template[start..start + end];
-            if let Some((idx, name)) = find_placeholder(content, &PLACEHOLDERS) {
-                used[idx] = true;
-                // NOTE:  `name.len()` is fine here since all placeholders are ASCII
-                overhead[idx] = content.chars().count() - name.len();
-            }
-            i = start + end + 1;
-        } else {
-            i += 1;
-        }
-    }
+    let used = template.used();
+    let overhead = template.overhead();
 
     // Header names (ASCII, so uppercase has the same byte length)
     for (idx, &placeholder) in PLACEHOLDERS.iter().enumerate() {
@@ -339,7 +306,11 @@ fn compute_placeholder_widths(template: &str, submod_info: &[SubmoduleInfo]) -> 
 /// Formats all submodule info through `template`. When `header` is true,
 /// computes column widths and prepends a header row with uppercased
 /// placeholder names.
-fn format_output(submod_info: &[SubmoduleInfo], template: &str, header: bool) -> String {
+fn format_output(
+    submod_info: &[SubmoduleInfo],
+    template: &Template<'_, 9>,
+    header: bool,
+) -> String {
     let mut output = String::new();
     let widths = if header {
         compute_placeholder_widths(template, submod_info)
@@ -347,20 +318,10 @@ fn format_output(submod_info: &[SubmoduleInfo], template: &str, header: bool) ->
         [0; 9]
     };
     if header {
-        output.push_str(&expand_template(
-            template,
-            &PLACEHOLDERS,
-            |name| Cow::Owned(name.to_ascii_uppercase()),
-            &widths,
-        ));
+        output.push_str(&template.expand(|name| Cow::Owned(name.to_ascii_uppercase()), &widths));
     }
     for info in submod_info {
-        output.push_str(&expand_template(
-            template,
-            &PLACEHOLDERS,
-            |name| info.resolve_placeholder(name),
-            &widths,
-        ));
+        output.push_str(&template.expand(|name| info.resolve_placeholder(name), &widths));
     }
     output
 }
@@ -377,12 +338,10 @@ pub fn list(
     header: bool,
     no_server: bool,
 ) -> ListResult<()> {
-    // Skip validation for the default template. It's verified and `DEFAULT_USED`
-    // captures which placeholders are used.
-    let (template, used) = match format {
-        Some(t) => (t, validate_template(t, &PLACEHOLDERS)?),
-        None => (DEFAULT_FORMAT, DEFAULT_USED),
-    };
+    // Parse once up front; `used` drives which fields we fetch and whether to
+    // contact the server.
+    let template = Template::parse(format.unwrap_or(DEFAULT_FORMAT), &PLACEHOLDERS)?;
+    let used = *template.used();
 
     // Only contact (and possibly cold-start) the watch server when the format
     // template actually references `{status}`; otherwise the statuses are
@@ -403,7 +362,7 @@ pub fn list(
         need_submod_head,
         need_local_status,
     )?;
-    let output = format_output(&infos, template, header);
+    let output = format_output(&infos, &template, header);
     print!("{output}");
     Ok(())
 }
@@ -471,12 +430,6 @@ mod tests {
             status_text(status),
             "modified content, untracked content, new commits, staged"
         );
-    }
-
-    #[test]
-    fn default_format_matches_precomputed_used() {
-        let used = validate_template(DEFAULT_FORMAT, &PLACEHOLDERS).unwrap();
-        assert_eq!(used, DEFAULT_USED);
     }
 
     #[test]
@@ -635,20 +588,30 @@ mod tests {
         }
     }
 
+    /// Parses a list template (9 placeholders) for the format tests.
+    fn tmpl(source: &str) -> Template<'_, 9> {
+        Template::parse(source, &PLACEHOLDERS).unwrap()
+    }
+
+    #[test]
+    fn default_format_parses() {
+        Template::parse(DEFAULT_FORMAT, &PLACEHOLDERS).expect("DEFAULT_FORMAT must be valid");
+    }
+
     #[test]
     fn format_output_no_header() {
         let infos = vec![
             make_info("a", "libs/a", None),
             make_info("b", "libs/b", None),
         ];
-        let output = format_output(&infos, "{name}\n", false);
+        let output = format_output(&infos, &tmpl("{name}\n"), false);
         assert_eq!(output, "a\nb\n");
     }
 
     #[test]
     fn format_output_with_header() {
         let infos = vec![make_info("sub", "sub", None)];
-        let output = format_output(&infos, "{name}\n", true);
+        let output = format_output(&infos, &tmpl("{name}\n"), true);
         let lines: Vec<&str> = output.lines().collect();
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[0].trim(), "NAME");
@@ -662,7 +625,7 @@ mod tests {
             "sub",
             Some(StatusSummary::MODIFIED_CONTENT),
         )];
-        let output = format_output(&infos, "{name}: {status}\n", false);
+        let output = format_output(&infos, &tmpl("{name}: {status}\n"), false);
         assert_eq!(output, "sub: modified content\n");
     }
 
@@ -672,7 +635,7 @@ mod tests {
             make_info("short", "short", None),
             make_info("much_longer_name", "much_longer_name", None),
         ];
-        let widths = compute_placeholder_widths("{name}\n", &infos);
+        let widths = compute_placeholder_widths(&tmpl("{name}\n"), &infos);
         // "much_longer_name" is 16 chars, "NAME" header is 4; max is 16
         assert_eq!(widths[0], 16);
     }
@@ -680,7 +643,7 @@ mod tests {
     #[test]
     fn compute_widths_unused_placeholder_is_zero() {
         let infos = vec![make_info("sub", "sub", None)];
-        let widths = compute_placeholder_widths("{name}\n", &infos);
+        let widths = compute_placeholder_widths(&tmpl("{name}\n"), &infos);
         // "path" (index 1) is not in the template
         assert_eq!(widths[1], 0);
     }
