@@ -40,8 +40,8 @@ impl QuoteMode {
 
 /// Returns whether `path` contains any byte that requires C-style quoting
 /// under the given `mode`.
-pub fn needs_quoting(path: &str, mode: QuoteMode) -> bool {
-    path.bytes().any(|b| {
+pub fn needs_quoting(path: &[u8], mode: QuoteMode) -> bool {
+    path.iter().any(|&b| {
         is_always_special(b) || (mode.quote_path && b >= 0x80) || (mode.quote_space && b == b' ')
     })
 }
@@ -57,8 +57,8 @@ pub fn needs_quoting(path: &str, mode: QuoteMode) -> bool {
 /// # Errors
 ///
 /// Returns any `io::Error` raised by writing.
-pub fn write_escaped<W: io::Write>(out: &mut W, path: &str, mode: QuoteMode) -> io::Result<()> {
-    for &b in path.as_bytes() {
+pub fn write_escaped<W: io::Write>(out: &mut W, path: &[u8], mode: QuoteMode) -> io::Result<()> {
+    for &b in path {
         match b {
             b'\\' => out.write_all(br"\\")?,
             b'"' => out.write_all(b"\\\"")?,
@@ -85,44 +85,52 @@ const fn is_always_special(b: u8) -> bool {
 mod tests {
     use super::*;
 
-    /// Convenience wrapper: write into a `Vec<u8>` so test assertions can
-    /// compare strings directly. The output is always ASCII so UTF-8
-    /// validation is infallible.
-    fn quoted(path: &str) -> String {
-        quoted_with(path, QuoteMode::STANDARD)
-    }
-
-    fn quoted_with(path: &str, mode: QuoteMode) -> String {
-        let mut out: Vec<u8> = Vec::with_capacity(path.len() + 2);
+    /// Quotes raw path bytes, wrapping in `"..."`. The escaped output is
+    /// always ASCII, so UTF-8 validation for the assertion is infallible even
+    /// when the input bytes aren't valid UTF-8.
+    fn quoted_raw(bytes: &[u8], mode: QuoteMode) -> String {
+        let mut out: Vec<u8> = Vec::with_capacity(bytes.len() + 2);
         out.push(b'"');
-        write_escaped(&mut out, path, mode).unwrap();
+        write_escaped(&mut out, bytes, mode).unwrap();
         out.push(b'"');
         String::from_utf8(out).unwrap()
     }
 
+    /// `&str` convenience wrappers so the readable test inputs stay strings;
+    /// they hand the bytes to the byte-level functions under test.
+    fn quoted(path: &str) -> String {
+        quoted_with(path, QuoteMode::STANDARD)
+    }
+    fn quoted_with(path: &str, mode: QuoteMode) -> String {
+        quoted_raw(path.as_bytes(), mode)
+    }
+    fn needs(path: &str, mode: QuoteMode) -> bool {
+        needs_quoting(path.as_bytes(), mode)
+    }
+
     #[test]
     fn no_quoting_for_plain_path() {
-        assert!(!needs_quoting("normal.txt", QuoteMode::STANDARD));
-        assert!(!needs_quoting("src/bin/foo.rs", QuoteMode::STANDARD));
-        assert!(!needs_quoting("with-dash_and.dots", QuoteMode::STANDARD));
+        assert!(!needs("normal.txt", QuoteMode::STANDARD));
+        assert!(!needs("src/bin/foo.rs", QuoteMode::STANDARD));
+        assert!(!needs("with-dash_and.dots", QuoteMode::STANDARD));
     }
 
     #[test]
     fn space_triggers_quoting_only_in_quote_space_mode() {
-        assert!(!needs_quoting("with space.txt", QuoteMode::STANDARD));
-        assert!(needs_quoting("with space.txt", QuoteMode::QUOTE_SPACE));
+        assert!(!needs("with space.txt", QuoteMode::STANDARD));
+        assert!(needs("with space.txt", QuoteMode::QUOTE_SPACE));
         assert_eq!(quoted("with space.txt"), "\"with space.txt\"");
     }
 
     #[test]
     fn double_quote_triggers_quoting() {
-        assert!(needs_quoting("a\"b.txt", QuoteMode::STANDARD));
+        assert!(needs("a\"b.txt", QuoteMode::STANDARD));
         assert_eq!(quoted("a\"b.txt"), r#""a\"b.txt""#);
     }
 
     #[test]
     fn backslash_triggers_quoting() {
-        assert!(needs_quoting("a\\b.txt", QuoteMode::STANDARD));
+        assert!(needs("a\\b.txt", QuoteMode::STANDARD));
         assert_eq!(quoted("a\\b.txt"), r#""a\\b.txt""#);
     }
 
@@ -132,7 +140,7 @@ mod tests {
             quote_space: false,
             quote_path: false,
         };
-        assert!(!needs_quoting("café.txt", mode));
+        assert!(!needs("café.txt", mode));
         // Even when wrapped (e.g. because of an escape elsewhere), the
         // high bytes themselves come out raw.
         assert_eq!(quoted_with("café.txt", mode), "\"café.txt\"");
@@ -145,7 +153,7 @@ mod tests {
             quote_path: false,
         };
         // High bytes don't trigger quoting, but backslash still does.
-        assert!(needs_quoting("a\\b.txt", mode));
+        assert!(needs("a\\b.txt", mode));
         // Control chars still escaped octally.
         assert_eq!(quoted_with("a\x01b", mode), r#""a\001b""#);
     }
@@ -177,17 +185,37 @@ mod tests {
     }
 
     #[test]
+    fn invalid_utf8_bytes_as_octal() {
+        // A genuinely non-UTF-8 filename (not valid UTF-8 at all): each high
+        // byte is octal-escaped per byte, exactly as git does.
+        assert!(needs_quoting(b"a\xff\xfeb", QuoteMode::STANDARD));
+        assert_eq!(
+            quoted_raw(b"a\xff\xfeb", QuoteMode::STANDARD),
+            r#""a\377\376b""#
+        );
+        // With quotepath=false those raw bytes pass through verbatim.
+        let no_quote = QuoteMode {
+            quote_space: false,
+            quote_path: false,
+        };
+        assert!(!needs_quoting(b"a\xff\xfeb", no_quote));
+        let mut verbatim = Vec::new();
+        write_escaped(&mut verbatim, b"a\xff\xfeb", no_quote).unwrap();
+        assert_eq!(verbatim, b"a\xff\xfeb");
+    }
+
+    #[test]
     fn standard_mode_triggers_on_high_bytes() {
         // Standard mode (porcelain v2) doesn't quote on space alone, but a
         // high byte (e.g. UTF-8 continuation) still trips needs_quoting.
-        assert!(needs_quoting("é.txt", QuoteMode::STANDARD));
+        assert!(needs("é.txt", QuoteMode::STANDARD));
         assert_eq!(quoted("é.txt"), r#""\303\251.txt""#);
     }
 
     #[test]
     fn plain_path_streams_verbatim() {
         let mut out: Vec<u8> = Vec::new();
-        write_escaped(&mut out, "src/bin/foo.rs", QuoteMode::STANDARD).unwrap();
+        write_escaped(&mut out, b"src/bin/foo.rs", QuoteMode::STANDARD).unwrap();
         assert_eq!(out, b"src/bin/foo.rs");
     }
 }

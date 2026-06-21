@@ -30,7 +30,7 @@ use super::quote::{QuoteMode, needs_quoting, write_escaped};
 /// relative to the repo root (empty when cwd == repo root, in which
 /// case streaming is a single pass-through write).
 pub struct Relativizer<'a> {
-    cwd_rel: &'a str,
+    cwd_rel: &'a [u8],
     /// Number of components in `cwd_rel` (i.e. count of `/` plus one for
     /// a non-empty value, zero for an empty value). Cached so each
     /// `write_to` call doesn't reslice.
@@ -46,11 +46,11 @@ impl<'a> Relativizer<'a> {
     /// cwd relative to the repo root, and the user's `core.quotepath`
     /// setting. Pass `""` for `cwd_rel` when the cwd is the repo root.
     #[must_use]
-    pub fn new(cwd_rel: &'a str, quote_path: bool) -> Self {
+    pub fn new(cwd_rel: &'a [u8], quote_path: bool) -> Self {
         let cwd_components = if cwd_rel.is_empty() {
             0
         } else {
-            cwd_rel.bytes().filter(|&b| b == b'/').count() + 1
+            memchr::memchr_iter(b'/', cwd_rel).count() + 1
         };
         Self {
             cwd_rel,
@@ -66,7 +66,7 @@ impl<'a> Relativizer<'a> {
     /// # Errors
     ///
     /// Returns any `io::Error` raised by writing.
-    pub fn write_to<W: io::Write>(&self, out: &mut W, path: &str) -> io::Result<()> {
+    pub fn write_to<W: io::Write>(&self, out: &mut W, path: &[u8]) -> io::Result<()> {
         let mode = QuoteMode {
             quote_space: false,
             quote_path: self.quote_path,
@@ -92,12 +92,12 @@ impl<'a> Relativizer<'a> {
     pub fn write_quoted<W: io::Write>(
         &self,
         out: &mut W,
-        path: &str,
+        path: &[u8],
         null_terminate: bool,
         mode: QuoteMode,
     ) -> io::Result<()> {
         if null_terminate {
-            return out.write_all(path.as_bytes());
+            return out.write_all(path);
         }
         let (ups, remaining) = self.split(path);
         let need_quote = needs_quoting(remaining, mode);
@@ -111,7 +111,7 @@ impl<'a> Relativizer<'a> {
         if need_quote {
             write_escaped(out, remaining, mode)?;
         } else {
-            out.write_all(remaining.as_bytes())?;
+            out.write_all(remaining)?;
         }
         if need_quote {
             out.write_all(b"\"")?;
@@ -122,7 +122,7 @@ impl<'a> Relativizer<'a> {
     /// Returns `(ups, remaining)`: the count of `..` to prepend, and
     /// the slice of `path` after the common prefix with `cwd_rel`.
     /// Walks both paths once, no allocations.
-    fn split<'p>(&self, path: &'p str) -> (usize, &'p str) {
+    fn split<'p>(&self, path: &'p [u8]) -> (usize, &'p [u8]) {
         if self.cwd_components == 0 {
             return (0, path);
         }
@@ -130,10 +130,9 @@ impl<'a> Relativizer<'a> {
         let mut path_cursor = 0;
         let mut matched = 0;
 
-        for cwd_part in self.cwd_rel.split('/') {
+        for cwd_part in self.cwd_rel.split(|&b| b == b'/') {
             let rest = &path[path_cursor..];
-            let (path_part, after) = rest
-                .find('/')
+            let (path_part, after) = memchr::memchr(b'/', rest)
                 .map_or((rest, path.len()), |i| (&rest[..i], path_cursor + i + 1));
             if path_part == cwd_part {
                 path_cursor = after;
@@ -152,9 +151,9 @@ mod tests {
     use super::*;
 
     fn formatted(cwd_rel: &str, path: &str) -> String {
-        let rel = Relativizer::new(cwd_rel, true);
+        let rel = Relativizer::new(cwd_rel.as_bytes(), true);
         let mut out: Vec<u8> = Vec::new();
-        rel.write_to(&mut out, path).unwrap();
+        rel.write_to(&mut out, path.as_bytes()).unwrap();
         String::from_utf8(out).unwrap()
     }
 
@@ -209,10 +208,10 @@ mod tests {
 
     #[test]
     fn cwd_components_count_matches_split_count() {
-        assert_eq!(Relativizer::new("", true).cwd_components, 0);
-        assert_eq!(Relativizer::new("a", true).cwd_components, 1);
-        assert_eq!(Relativizer::new("a/b", true).cwd_components, 2);
-        assert_eq!(Relativizer::new("a/b/c", true).cwd_components, 3);
+        assert_eq!(Relativizer::new(b"", true).cwd_components, 0);
+        assert_eq!(Relativizer::new(b"a", true).cwd_components, 1);
+        assert_eq!(Relativizer::new(b"a/b", true).cwd_components, 2);
+        assert_eq!(Relativizer::new(b"a/b/c", true).cwd_components, 3);
     }
 
     #[test]
@@ -237,5 +236,15 @@ mod tests {
         // Regression: the quoting switch must not wrap unremarkable paths.
         assert_eq!(formatted("", "main.rs"), "main.rs");
         assert_eq!(formatted("src", "src/main.rs"), "main.rs");
+    }
+
+    #[test]
+    fn non_utf8_path_relativizes_and_quotes() {
+        // An invalid-UTF-8 file path (which `entry.path()` would have dropped to
+        // empty) still strips the cwd prefix and octal-quotes byte-for-byte.
+        let rel = Relativizer::new(b"src", true);
+        let mut out: Vec<u8> = Vec::new();
+        rel.write_to(&mut out, b"src/\xff\xfe.bin").unwrap();
+        assert_eq!(out, br#""\377\376.bin""#);
     }
 }

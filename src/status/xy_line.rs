@@ -13,7 +13,6 @@
 
 use git2::Repository;
 use rustc_hash::FxHashMap;
-use std::borrow::Cow;
 use std::io::{self, Write};
 
 use anstyle::Style;
@@ -130,7 +129,7 @@ pub(super) fn display_xy_lines(
             // Y is blank.
             let x = XyChar::new('D', style.palette.map(|p| p.updated));
             let y = XyChar::new(' ', None);
-            write_xy_path(out, x, y, path, rel, null_terminate, style)
+            write_xy_path(out, x, y, path.as_bytes(), rel, null_terminate, style)
         }
         Row::Sub(SubRow::Renamed(rename)) => {
             // `R ` (staged submodule rename). With -z the new and old paths
@@ -141,9 +140,9 @@ pub(super) fn display_xy_lines(
             if null_terminate {
                 write!(out, "{new}\0{old}\0", new = rename.new, old = rename.old)
             } else {
-                write_path(out, &rename.old, rel, false, style)?;
+                write_path(out, rename.old.as_bytes(), rel, false, style)?;
                 out.write_all(b" -> ")?;
-                write_path(out, &rename.new, rel, false, style)?;
+                write_path(out, rename.new.as_bytes(), rel, false, style)?;
                 out.write_all(b"\n")
             }
         }
@@ -159,7 +158,7 @@ pub(super) fn display_xy_lines(
             out,
             untracked,
             untracked,
-            entry.path().unwrap_or(""),
+            entry.path_bytes(),
             rel,
             null_terminate,
             style,
@@ -177,7 +176,7 @@ pub(super) fn display_xy_lines(
             out,
             ignored,
             ignored,
-            entry.path().unwrap_or(""),
+            entry.path_bytes(),
             rel,
             null_terminate,
             style,
@@ -290,7 +289,7 @@ fn write_xy_prefix(out: &mut impl Write, x: XyChar, y: XyChar) -> io::Result<()>
 /// Writes `path` using the style's quote mode + relativizer.
 fn write_path(
     out: &mut impl Write,
-    path: &str,
+    path: &[u8],
     rel: &Relativizer<'_>,
     null_terminate: bool,
     style: &LineStyle,
@@ -306,7 +305,7 @@ fn write_xy_path(
     out: &mut impl Write,
     x: XyChar,
     y: XyChar,
-    path: &str,
+    path: &[u8],
     rel: &Relativizer<'_>,
     null_terminate: bool,
     style: &LineStyle,
@@ -335,7 +334,7 @@ fn write_ordinary(
     let (x, y) = regular_xy(entry.status());
     let (x_color, y_color) = ordinary_colors(style);
     write_xy_prefix(out, XyChar::new(x, x_color), XyChar::new(y, y_color))?;
-    write_path(out, entry.path().unwrap_or(""), rel, null_terminate, style)?;
+    write_path(out, entry.path_bytes(), rel, null_terminate, style)?;
     out.write_all(line_terminator(null_terminate).as_bytes())
 }
 
@@ -360,20 +359,23 @@ fn write_renamed(
     };
     let old_path = delta
         .as_ref()
-        .and_then(|d| d.old_file().path())
-        .map_or(Cow::Borrowed(""), |p| p.to_string_lossy());
+        .and_then(|d| d.old_file().path_bytes())
+        .unwrap_or(b"");
     let new_path = delta
         .as_ref()
-        .and_then(|d| d.new_file().path())
-        .map_or(Cow::Borrowed(""), |p| p.to_string_lossy());
+        .and_then(|d| d.new_file().path_bytes())
+        .unwrap_or(b"");
 
     write_xy_prefix(out, XyChar::new(x, x_color), XyChar::new(y, y_color))?;
     if null_terminate {
-        write!(out, "{new_path}\0{old_path}\0")
+        out.write_all(new_path)?;
+        out.write_all(b"\0")?;
+        out.write_all(old_path)?;
+        out.write_all(b"\0")
     } else {
-        write_path(out, &old_path, rel, false, style)?;
+        write_path(out, old_path, rel, false, style)?;
         out.write_all(b" -> ")?;
-        write_path(out, &new_path, rel, false, style)?;
+        write_path(out, new_path, rel, false, style)?;
         out.write_all(b"\n")
     }
 }
@@ -405,7 +407,7 @@ fn write_conflict(
     let color = style.palette.map(|p| p.unmerged);
     let x = XyChar::new(chars.next().unwrap(), color);
     let y = XyChar::new(chars.next().unwrap(), color);
-    write_xy_path(out, x, y, path, rel, null_terminate, style)
+    write_xy_path(out, x, y, entry.path_bytes(), rel, null_terminate, style)
 }
 
 /// Writes a submodule entry. XY derived from the [`StatusSummary`]
@@ -424,7 +426,7 @@ fn write_submodule(
         out,
         XyChar::new(x, x_color),
         XyChar::new(y, y_color),
-        path,
+        path.as_bytes(),
         rel,
         null_terminate,
         style,

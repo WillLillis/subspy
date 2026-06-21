@@ -38,6 +38,6 @@ pub fn display_porcelain_v1(
     };
     // Porcelain v1 always emits repo-root-relative paths regardless of
     // cwd, so the Relativizer is a no-op pass-through.
-    let rel = Relativizer::new("", opts.quote_path);
+    let rel = Relativizer::new(b"", opts.quote_path);
     display_xy_lines(out, repo, entries, &rel, opts, &style)
 }

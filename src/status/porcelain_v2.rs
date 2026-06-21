@@ -160,7 +160,7 @@ pub fn display_porcelain_v2(
         out.write_all(b"? ")?;
         render_opts.rel.write_quoted(
             out,
-            entry.path().unwrap_or(""),
+            entry.path_bytes(),
             render_opts.null_terminate,
             render_opts.quote_mode,
         )?;
@@ -175,7 +175,7 @@ pub fn display_porcelain_v2(
         out.write_all(b"! ")?;
         render_opts.rel.write_quoted(
             out,
-            entry.path().unwrap_or(""),
+            entry.path_bytes(),
             render_opts.null_terminate,
             render_opts.quote_mode,
         )?;
@@ -378,7 +378,7 @@ fn write_ordinary(
     )?;
     render_opts.rel.write_quoted(
         out,
-        entry.path().unwrap_or(""),
+        entry.path_bytes(),
         render_opts.null_terminate,
         render_opts.quote_mode,
     )?;
@@ -406,12 +406,12 @@ fn write_renamed(
     };
     let old_path = delta
         .as_ref()
-        .and_then(|d| d.old_file().path())
-        .map_or(Cow::Borrowed(""), |p| p.to_string_lossy());
+        .and_then(|d| d.old_file().path_bytes())
+        .unwrap_or(b"");
     let new_path = delta
         .as_ref()
-        .and_then(|d| d.new_file().path())
-        .map_or(Cow::Borrowed(""), |p| p.to_string_lossy());
+        .and_then(|d| d.new_file().path_bytes())
+        .unwrap_or(b"");
     let EntryModesAndOids {
         m_head,
         m_idx,
@@ -425,7 +425,7 @@ fn write_renamed(
     )?;
     render_opts.rel.write_quoted(
         out,
-        &new_path,
+        new_path,
         render_opts.null_terminate,
         render_opts.quote_mode,
     )?;
@@ -437,7 +437,7 @@ fn write_renamed(
     })?;
     render_opts.rel.write_quoted(
         out,
-        &old_path,
+        old_path,
         render_opts.null_terminate,
         render_opts.quote_mode,
     )?;
@@ -492,7 +492,7 @@ fn write_conflict(
     )?;
     render_opts.rel.write_quoted(
         out,
-        path,
+        entry.path_bytes(),
         render_opts.null_terminate,
         render_opts.quote_mode,
     )?;
@@ -549,7 +549,7 @@ fn write_submodule(
     )?;
     render_opts.rel.write_quoted(
         out,
-        path,
+        path.as_bytes(),
         render_opts.null_terminate,
         render_opts.quote_mode,
     )?;
@@ -576,7 +576,7 @@ fn write_deleted_submodule(
     )?;
     render_opts.rel.write_quoted(
         out,
-        path,
+        path.as_bytes(),
         render_opts.null_terminate,
         render_opts.quote_mode,
     )?;
@@ -601,7 +601,7 @@ fn write_renamed_submodule(
     )?;
     render_opts.rel.write_quoted(
         out,
-        &rename.new,
+        rename.new.as_bytes(),
         render_opts.null_terminate,
         render_opts.quote_mode,
     )?;
@@ -612,7 +612,7 @@ fn write_renamed_submodule(
     })?;
     render_opts.rel.write_quoted(
         out,
-        &rename.old,
+        rename.old.as_bytes(),
         render_opts.null_terminate,
         render_opts.quote_mode,
     )?;
