@@ -250,8 +250,7 @@ pub fn print_unmerged_paths(
             .as_ref()
             .or(conflict.their.as_ref())
             .or(conflict.ancestor.as_ref())
-            .and_then(|e| std::str::from_utf8(&e.path).ok())
-            .unwrap_or("<unknown path>");
+            .map_or(b"<unknown path>".as_slice(), |e| e.path.as_slice());
 
         // Padded to 17 chars to match git's column alignment
         #[allow(clippy::match_same_arms)]

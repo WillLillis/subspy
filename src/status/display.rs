@@ -176,24 +176,22 @@ fn print_staged_changes(
                 writeln!(stdout, "{staged_header}")?;
                 header = true;
             }
-            let old_path = index.old_file().path();
-            let new_path = index.new_file().path();
+            let old_path = index.old_file().path_bytes();
+            let new_path = index.new_file().path_bytes();
             match (old_path, new_path) {
                 (Some(old), Some(new)) if old != new => {
-                    let old_str = old.to_string_lossy();
-                    let new_str = new.to_string_lossy();
                     paint_into(stdout, GREEN, |out| {
                         write!(out, "\t{istatus}")?;
-                        rel.write_to(out, &old_str)?;
+                        rel.write_to(out, old)?;
                         out.write_all(b" -> ")?;
-                        rel.write_to(out, &new_str)
+                        rel.write_to(out, new)
                     })?;
                 }
                 (old, new) => {
-                    let path_str = old.or(new).unwrap().to_string_lossy();
+                    let path = old.or(new).unwrap();
                     paint_into(stdout, GREEN, |out| {
                         write!(out, "\t{istatus}")?;
-                        rel.write_to(out, &path_str)
+                        rel.write_to(out, path)
                     })?;
                 }
             }
@@ -206,7 +204,7 @@ fn print_staged_changes(
             }
             paint_into(stdout, GREEN, |out| {
                 write!(out, "\tdeleted:    ")?;
-                rel.write_to(out, path)
+                rel.write_to(out, path.as_bytes())
             })?;
             writeln!(stdout)
         }
@@ -217,9 +215,9 @@ fn print_staged_changes(
             }
             paint_into(stdout, GREEN, |out| {
                 write!(out, "\trenamed:    ")?;
-                rel.write_to(out, &rename.old)?;
+                rel.write_to(out, rename.old.as_bytes())?;
                 out.write_all(b" -> ")?;
-                rel.write_to(out, &rename.new)
+                rel.write_to(out, rename.new.as_bytes())
             })?;
             writeln!(stdout)
         }
@@ -231,7 +229,7 @@ fn print_staged_changes(
             let label = staged_label(st);
             paint_into(stdout, GREEN, |out| {
                 write!(out, "\t{label}")?;
-                rel.write_to(out, submod_path)
+                rel.write_to(out, submod_path.as_bytes())
             })?;
             writeln!(stdout)
         }
@@ -297,24 +295,22 @@ fn print_unstaged_changes(
                 )?;
                 header = true;
             }
-            let old_path = workdir.old_file().path();
-            let new_path = workdir.new_file().path();
+            let old_path = workdir.old_file().path_bytes();
+            let new_path = workdir.new_file().path_bytes();
             match (old_path, new_path) {
                 (Some(old), Some(new)) if old != new => {
-                    let old_str = old.to_string_lossy();
-                    let new_str = new.to_string_lossy();
                     paint_into(stdout, RED, |out| {
                         write!(out, "\t{istatus}")?;
-                        rel.write_to(out, &old_str)?;
+                        rel.write_to(out, old)?;
                         out.write_all(b" -> ")?;
-                        rel.write_to(out, &new_str)
+                        rel.write_to(out, new)
                     })?;
                 }
                 (old, new) => {
-                    let path_str = old.or(new).unwrap().to_string_lossy();
+                    let path = old.or(new).unwrap();
                     paint_into(stdout, RED, |out| {
                         write!(out, "\t{istatus}")?;
-                        rel.write_to(out, &path_str)
+                        rel.write_to(out, path)
                     })?;
                 }
             }
@@ -332,7 +328,7 @@ fn print_unstaged_changes(
             let label = unstaged_label(submod_status);
             paint_into(stdout, RED, |out| {
                 write!(out, "\t{label}")?;
-                rel.write_to(out, submod_path)
+                rel.write_to(out, submod_path.as_bytes())
             })?;
             if has_status_info(submod_status) {
                 writeln!(stdout, " {submod_status}")
@@ -364,7 +360,7 @@ fn print_untracked_files(
     {
         let Some(file) = entry
             .index_to_workdir()
-            .and_then(|idx| idx.old_file().path())
+            .and_then(|idx| idx.old_file().path_bytes())
         else {
             continue;
         };
@@ -372,9 +368,8 @@ fn print_untracked_files(
             writeln!(stdout, "{UNTRACKED_HEADER}")?;
             header = true;
         }
-        let file_str = file.to_string_lossy();
         stdout.write_all(b"\t")?;
-        paint_into(stdout, RED, |out| rel.write_to(out, &file_str))?;
+        paint_into(stdout, RED, |out| rel.write_to(out, file))?;
         writeln!(stdout)?;
     }
     if header {
@@ -396,7 +391,7 @@ fn print_ignored_files(
     {
         let Some(file) = entry
             .index_to_workdir()
-            .and_then(|idx| idx.old_file().path())
+            .and_then(|idx| idx.old_file().path_bytes())
         else {
             continue;
         };
@@ -404,9 +399,8 @@ fn print_ignored_files(
             writeln!(stdout, "{IGNORED_HEADER}")?;
             header = true;
         }
-        let file_str = file.to_string_lossy();
         stdout.write_all(b"\t")?;
-        paint_into(stdout, RED, |out| rel.write_to(out, &file_str))?;
+        paint_into(stdout, RED, |out| rel.write_to(out, file))?;
         writeln!(stdout)?;
     }
     if header {

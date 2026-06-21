@@ -343,24 +343,34 @@ pub fn status(
     )
 }
 
-/// Returns `effective_cwd` expressed relative to `repo_root`, as a
-/// forward-slash separated str suitable for [`relativize::Relativizer::new`].
+/// Returns `effective_cwd` expressed relative to `repo_root`, as forward-slash
+/// separated bytes suitable for [`relativize::Relativizer::new`].
 ///
-/// Returns `Cow::Borrowed("")` when `effective_cwd == repo_root` or
-/// when the prefix relationship can't be computed - both cases produce a
-/// no-op `Relativizer`.
-fn cwd_relative_to_repo<'a>(repo_root: &Path, effective_cwd: &'a Path) -> Cow<'a, str> {
+/// Returns `Cow::Borrowed(b"")` when `effective_cwd == repo_root` or when the
+/// prefix relationship can't be computed - both cases produce a no-op
+/// `Relativizer`.
+fn cwd_relative_to_repo<'a>(repo_root: &Path, effective_cwd: &'a Path) -> Cow<'a, [u8]> {
     effective_cwd
         .strip_prefix(repo_root)
-        .ok()
-        .and_then(|p| p.to_str())
-        .map_or(Cow::Borrowed(""), |s| {
-            if cfg!(windows) && s.contains('\\') {
-                Cow::Owned(s.replace('\\', "/"))
-            } else {
-                Cow::Borrowed(s)
-            }
-        })
+        .map_or(Cow::Borrowed(b"".as_slice()), os_path_to_slash_bytes)
+}
+
+/// The bytes of `path` with platform separators normalized to `/`, for
+/// prefix-matching against git's path bytes.
+///
+/// On Unix this borrows the raw `OsStr` bytes, so a non-UTF-8 cwd component
+/// round-trips. On Windows paths are always valid Unicode (UTF-8 is lossless),
+/// and `\` separators are normalized to `/`.
+fn os_path_to_slash_bytes(path: &Path) -> Cow<'_, [u8]> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt as _;
+        Cow::Borrowed(path.as_os_str().as_bytes())
+    }
+    #[cfg(not(unix))]
+    {
+        Cow::Owned(path.to_string_lossy().replace('\\', "/").into_bytes())
+    }
 }
 
 /// Line terminator for porcelain output: NUL with `-z`, LF without.
