@@ -20,13 +20,13 @@ use anstyle::Style;
 use crate::{StatusSummary, paint::paint_into};
 
 use super::{
-    PorcelainOpts, StatusEntries, StatusResult, configured_upstream_short_name,
+    Divergence, PorcelainOpts, StatusEntries, StatusResult, UpstreamStatus,
     conflict::{ConflictEntry, build_conflict_map},
     interleave::{Row, SubRow, for_each_merged},
     line_terminator,
     quote::QuoteMode,
     relativize::Relativizer,
-    unborn_branch_name,
+    unborn_branch_name, upstream_status,
 };
 
 pub(super) struct LineStyle {
@@ -469,47 +469,22 @@ fn write_branch_header(
     out.write_all(b"## ")?;
     paint_str(out, &branch_display, style.palette.map(|p| p.local_branch))?;
 
-    let Ok(name) = head.shorthand() else {
-        out.write_all(b"\n")?;
-        return Ok(());
-    };
-    let Ok(local) = repo.find_branch(name, git2::BranchType::Local) else {
-        out.write_all(b"\n")?;
-        return Ok(());
-    };
-
-    let Ok(upstream) = local.upstream() else {
-        // Configured but gone? Emit `...origin/foo [gone]`; otherwise
-        // just close the line.
-        if let Ok(local_ref_name) = head.name()
-            && let Some(short) = configured_upstream_short_name(repo, local_ref_name)
-        {
+    match upstream_status(repo, &head, ahead_behind)? {
+        UpstreamStatus::None => {}
+        UpstreamStatus::Gone { name } => {
             out.write_all(b"...")?;
-            paint_str(out, &short, style.palette.map(|p| p.remote_branch))?;
-            out.write_all(b" [gone]\n")?;
-        } else {
-            out.write_all(b"\n")?;
+            paint_str(out, &name, style.palette.map(|p| p.remote_branch))?;
+            out.write_all(b" [gone]")?;
         }
-        return Ok(());
-    };
-    let upstream_name = String::from_utf8_lossy(upstream.get().shorthand_bytes());
-
-    out.write_all(b"...")?;
-    paint_str(out, &upstream_name, style.palette.map(|p| p.remote_branch))?;
-
-    let local_oid = local.get().peel_to_commit().ok().map(|c| c.id());
-    let upstream_oid = upstream.get().peel_to_commit().ok().map(|c| c.id());
-    if let (Some(l), Some(u)) = (local_oid, upstream_oid) {
-        if l == u {
-            // No divergence: no bracket suffix, no graph walk.
-        } else if !ahead_behind {
-            write!(out, " [different]")?;
-        } else if let Ok((ahead, behind)) = repo.graph_ahead_behind(l, u) {
-            match (ahead, behind) {
-                (0, 0) => {}
-                (a, 0) => write!(out, " [ahead {a}]")?,
-                (0, b) => write!(out, " [behind {b}]")?,
-                (a, b) => write!(out, " [ahead {a}, behind {b}]")?,
+        UpstreamStatus::Tracking { name, divergence } => {
+            out.write_all(b"...")?;
+            paint_str(out, &name, style.palette.map(|p| p.remote_branch))?;
+            match divergence {
+                Divergence::Counts(0, 0) => {}
+                Divergence::Counts(a, 0) => write!(out, " [ahead {a}]")?,
+                Divergence::Counts(0, b) => write!(out, " [behind {b}]")?,
+                Divergence::Counts(a, b) => write!(out, " [ahead {a}, behind {b}]")?,
+                Divergence::Skipped => write!(out, " [different]")?,
             }
         }
     }

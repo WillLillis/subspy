@@ -18,13 +18,13 @@ use std::{
 use crate::StatusSummary;
 
 use super::{
-    PorcelainOpts, StatusEntries, StatusResult, configured_upstream_short_name,
+    Divergence, PorcelainOpts, StatusEntries, StatusResult, UpstreamStatus,
     conflict::{ConflictEntry, build_conflict_map},
     interleave::{Row, SubRow, for_each_merged},
     line_terminator,
     quote::QuoteMode,
     relativize::Relativizer,
-    unborn_branch_name,
+    unborn_branch_name, upstream_status,
 };
 
 /// Per-call rendering constants shared by every `write_*` helper:
@@ -223,35 +223,16 @@ fn write_branch_headers(
     };
     writeln!(out, "# branch.head {branch_display}")?;
 
-    let branch_name = Some(&head)
-        .filter(|h| h.is_branch())
-        .and_then(|h| h.shorthand().ok());
-    if let Some(name) = branch_name
-        && let Ok(local) = repo.find_branch(name, git2::BranchType::Local)
-    {
-        match local.upstream() {
-            Ok(upstream) => {
-                let upstream_name = String::from_utf8_lossy(upstream.get().shorthand_bytes());
-                writeln!(out, "# branch.upstream {upstream_name}")?;
-                let local_oid = local.get().peel_to_commit().map(|c| c.id());
-                let up_oid = upstream.get().peel_to_commit().map(|c| c.id());
-                if let (Ok(l), Ok(u)) = (local_oid, up_oid) {
-                    if !ahead_behind && l != u {
-                        // Skip the graph walk and report only divergence.
-                        writeln!(out, "# branch.ab +? -?")?;
-                    } else if let Ok((ahead, behind)) = repo.graph_ahead_behind(l, u) {
-                        writeln!(out, "# branch.ab +{ahead} -{behind}")?;
-                    }
+    match upstream_status(repo, &head, ahead_behind)? {
+        UpstreamStatus::None => {}
+        UpstreamStatus::Gone { name } => writeln!(out, "# branch.upstream {name}")?,
+        UpstreamStatus::Tracking { name, divergence } => {
+            writeln!(out, "# branch.upstream {name}")?;
+            match divergence {
+                Divergence::Counts(ahead, behind) => {
+                    writeln!(out, "# branch.ab +{ahead} -{behind}")?;
                 }
-            }
-            Err(_) => {
-                // Configured but gone: emit `# branch.upstream` only;
-                // skip `# branch.ab` since there's nothing to compare.
-                if let Ok(local_ref_name) = head.name()
-                    && let Some(short) = configured_upstream_short_name(repo, local_ref_name)
-                {
-                    writeln!(out, "# branch.upstream {short}")?;
-                }
+                Divergence::Skipped => writeln!(out, "# branch.ab +? -?")?,
             }
         }
     }

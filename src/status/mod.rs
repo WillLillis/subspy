@@ -402,3 +402,70 @@ fn configured_upstream_short_name(repo: &Repository, local_ref_name: &str) -> Op
             .to_string(),
     )
 }
+
+/// How the current branch relates to its configured upstream. Resolved once by
+/// [`upstream_status`] and formatted per-renderer (long / short+v1 / porcelain-v2).
+enum UpstreamStatus {
+    /// No upstream configured (or `HEAD` isn't a resolvable local branch).
+    None,
+    /// An upstream is configured but its remote-tracking ref is gone (e.g. after
+    /// `git fetch --prune`); `name` is the configured short name.
+    Gone { name: String },
+    /// Upstream `name` exists; the branch diverges from it by `divergence`.
+    Tracking {
+        name: String,
+        divergence: Divergence,
+    },
+}
+
+/// The ahead/behind relationship of a branch to its upstream.
+enum Divergence {
+    /// Ahead/behind commit counts; `(0, 0)` means the tips are equal (up to date).
+    Counts(usize, usize),
+    /// The tips differ but the counts were skipped (`--no-ahead-behind`).
+    Skipped,
+}
+
+/// Resolves the [`UpstreamStatus`] of `head` (the current `HEAD` reference).
+///
+/// Callers handle the unborn- and detached-HEAD cases themselves; a non-branch
+/// `head` resolves to [`UpstreamStatus::None`].
+///
+/// # Errors
+///
+/// Propagates a `git2::Error` if a branch tip can't be peeled to a commit or the
+/// ahead/behind graph walk fails -- both indicate repository corruption (a
+/// missing/unreadable commit object), not merely a missing upstream.
+fn upstream_status(
+    repo: &Repository,
+    head: &git2::Reference<'_>,
+    ahead_behind: bool,
+) -> StatusResult<UpstreamStatus> {
+    let Ok(local_name) = head.shorthand() else {
+        return Ok(UpstreamStatus::None);
+    };
+    let Ok(local) = repo.find_branch(local_name, git2::BranchType::Local) else {
+        return Ok(UpstreamStatus::None);
+    };
+    let Ok(upstream) = local.upstream() else {
+        // No upstream resolved: distinguish "none configured" from "configured
+        // but gone" so renderers can show a `[gone]` marker.
+        let gone = head
+            .name()
+            .ok()
+            .and_then(|ref_name| configured_upstream_short_name(repo, ref_name));
+        return Ok(gone.map_or(UpstreamStatus::None, |name| UpstreamStatus::Gone { name }));
+    };
+    let name = String::from_utf8_lossy(upstream.get().shorthand_bytes()).into_owned();
+    let local_oid = local.get().peel_to_commit()?.id();
+    let upstream_oid = upstream.get().peel_to_commit()?.id();
+    let divergence = if local_oid == upstream_oid {
+        Divergence::Counts(0, 0)
+    } else if ahead_behind {
+        let (ahead, behind) = repo.graph_ahead_behind(local_oid, upstream_oid)?;
+        Divergence::Counts(ahead, behind)
+    } else {
+        Divergence::Skipped
+    };
+    Ok(UpstreamStatus::Tracking { name, divergence })
+}
