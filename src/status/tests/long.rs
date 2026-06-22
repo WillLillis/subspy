@@ -64,6 +64,18 @@ const CASES: &[Case] = &[
             subdir: "sub",
         },
     },
+    // Plain `mv` + edit, unstaged: `deleted: file.txt` + untracked `renamed.txt`,
+    // never `renamed:` (guards the `renames_index_to_workdir` fix).
+    Case {
+        name: "moved_modified_unstaged",
+        setup: Setup::Plain(setup_moved_modified_unstaged),
+    },
+    // Same move staged: must read `renamed:`, not `modified:` (guards the
+    // long-label ordering fix: RENAMED outranks MODIFIED).
+    Case {
+        name: "moved_modified_staged",
+        setup: Setup::Plain(setup_moved_modified_staged),
+    },
     Case {
         name: "untracked_files",
         setup: Setup::Plain(setup_untracked),

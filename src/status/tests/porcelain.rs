@@ -23,9 +23,9 @@ use crate::{
 
 use super::fixtures::{
     setup_clean, setup_deleted_staged, setup_deleted_workdir, setup_modified_workdir,
-    setup_renamed_staged, setup_staged_modified, setup_staged_new, setup_untracked,
-    setup_untracked_in_dir, setup_upstream_ahead, setup_upstream_behind, setup_upstream_diverged,
-    setup_upstream_gone, setup_upstream_up_to_date,
+    setup_moved_modified_unstaged, setup_renamed_staged, setup_staged_modified, setup_staged_new,
+    setup_untracked, setup_untracked_in_dir, setup_upstream_ahead, setup_upstream_behind,
+    setup_upstream_diverged, setup_upstream_gone, setup_upstream_up_to_date,
 };
 
 fn setup_empty_repo(root: &Path) {
@@ -177,6 +177,9 @@ const CASES: &[Case] = &[
     plain("deleted (staged)", setup_deleted_staged),
     plain("deleted (workdir)", setup_deleted_workdir),
     plain("renamed (staged)", setup_renamed_staged),
+    // Plain `mv` + edit, unstaged: must be `D old` + `?? new` like git, never a
+    // spurious worktree rename. Guards the `renames_index_to_workdir` fix.
+    plain("moved+modified (unstaged)", setup_moved_modified_unstaged),
     plain("untracked", setup_untracked),
     plain("untracked in dir", setup_untracked_in_dir),
     plain("path with space", setup_path_with_space),

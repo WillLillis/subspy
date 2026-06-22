@@ -72,6 +72,20 @@ const CASES: &[Case] = &[
         },
         branch: false,
     },
+    // Plain `mv` + edit, unstaged: ` D file.txt` + `?? renamed.txt`, never a
+    // worktree rename (guards the `renames_index_to_workdir` fix).
+    Case {
+        name: "moved_modified_unstaged",
+        setup: Setup::Plain(setup_moved_modified_unstaged),
+        branch: false,
+    },
+    // Same move staged: `R  file.txt -> renamed.txt`. git2 sets RENAMED+MODIFIED;
+    // the X char must be `R`, not `M` (guards the XY ordering fix).
+    Case {
+        name: "moved_modified_staged",
+        setup: Setup::Plain(setup_moved_modified_staged),
+        branch: false,
+    },
     Case {
         name: "untracked_files",
         setup: Setup::Plain(setup_untracked),

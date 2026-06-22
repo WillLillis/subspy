@@ -188,26 +188,30 @@ pub(super) fn display_xy_lines(
 
 /// Maps a `git2::Status` to its XY index/worktree characters. Space
 /// (not `.`) for the unmodified slot, matching the v1/short wire format.
+///
+/// `RENAMED` is checked before `MODIFIED`: git2 sets both on a rename that
+/// also changes content, and git renders that as `R` (the modification is
+/// part of the rename), never `M`.
 const fn regular_xy(st: git2::Status) -> (char, char) {
     let x = if st.contains(git2::Status::INDEX_NEW) {
         'A'
+    } else if st.contains(git2::Status::INDEX_RENAMED) {
+        'R'
     } else if st.contains(git2::Status::INDEX_MODIFIED) {
         'M'
     } else if st.contains(git2::Status::INDEX_DELETED) {
         'D'
-    } else if st.contains(git2::Status::INDEX_RENAMED) {
-        'R'
     } else if st.contains(git2::Status::INDEX_TYPECHANGE) {
         'T'
     } else {
         ' '
     };
-    let y = if st.contains(git2::Status::WT_MODIFIED) {
+    let y = if st.contains(git2::Status::WT_RENAMED) {
+        'R'
+    } else if st.contains(git2::Status::WT_MODIFIED) {
         'M'
     } else if st.contains(git2::Status::WT_DELETED) {
         'D'
-    } else if st.contains(git2::Status::WT_RENAMED) {
-        'R'
     } else if st.contains(git2::Status::WT_TYPECHANGE) {
         'T'
     } else {
