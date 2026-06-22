@@ -161,11 +161,13 @@ fn print_staged_changes(
 
     for_each_merged(files, submods, |row| match row {
         Row::File(entry) => {
+            // RENAMED before MODIFIED: git2 sets both on a rename that also
+            // changes content, and git labels it `renamed:`, not `modified:`.
             let istatus = match entry.status() {
                 s if s.contains(git2::Status::INDEX_NEW) => "new file:   ",
+                s if s.contains(git2::Status::INDEX_RENAMED) => "renamed:    ",
                 s if s.contains(git2::Status::INDEX_MODIFIED) => "modified:   ",
                 s if s.contains(git2::Status::INDEX_DELETED) => "deleted:    ",
-                s if s.contains(git2::Status::INDEX_RENAMED) => "renamed:    ",
                 s if s.contains(git2::Status::INDEX_TYPECHANGE) => "typechange: ",
                 _ => return Ok(()),
             };
@@ -280,10 +282,13 @@ fn print_unstaged_changes(
             let Some(workdir) = entry.index_to_workdir() else {
                 return Ok(());
             };
+            // RENAMED before MODIFIED, matching the staged section above. (git
+            // does not detect unstaged worktree renames, so WT_RENAMED does not
+            // arise in practice, but keep the ordering consistent and correct.)
             let istatus = match entry.status() {
+                s if s.contains(git2::Status::WT_RENAMED) => "renamed:    ",
                 s if s.contains(git2::Status::WT_MODIFIED) => "modified:   ",
                 s if s.contains(git2::Status::WT_DELETED) => "deleted:    ",
-                s if s.contains(git2::Status::WT_RENAMED) => "renamed:    ",
                 s if s.contains(git2::Status::WT_TYPECHANGE) => "typechange: ",
                 _ => return Ok(()),
             };

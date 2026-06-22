@@ -198,11 +198,17 @@ pub fn build_status_options(opts: OutputOpts, repo_kind: RepoKind) -> git2::Stat
     // Skip the redundant stat-cache refresh pass.
     st_opts.no_refresh(true);
 
-    // Match git's default `diff.renames=true` so renames render as
-    // `R old -> new` rather than separate `D old`/`A new` entries.
+    // Match git's default `diff.renames=true` so a staged move renders as
+    // `R old -> new` rather than separate `D old`/`A new` entries. This is
+    // intentionally only the HEAD->index (staged) diff. git does NOT detect
+    // renames in the index->workdir (unstaged) diff: an untracked file is never
+    // a rename target there, so a plain `mv` of a tracked file shows as `D old`
+    // + `?? new`. libgit2's `renames_index_to_workdir` would instead pair the
+    // deletion with the untracked file and emit a spurious worktree rename,
+    // diverging from git and producing porcelain a consumer can't parse (the
+    // old path lands in a record with no valid `XY ` prefix), so it stays off.
     st_opts
         .renames_head_to_index(true)
-        .renames_index_to_workdir(true)
         .renames_from_rewrites(true);
 
     // Exclude submodules from the plain status walk whenever subspy supplies

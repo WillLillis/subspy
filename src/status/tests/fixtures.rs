@@ -82,6 +82,39 @@ pub fn setup_renamed_staged_in_subdir(root: &Path) {
         .mv("sub/file.txt", "sub/renamed.txt");
 }
 
+/// A plain filesystem move (`mv`, not `git mv`) of a tracked file plus an edit,
+/// left UNSTAGED. git reports the old path deleted and the new path untracked --
+/// it never pairs a tracked deletion with an untracked file as a worktree
+/// rename, even though the bodies are similar. Guards against re-enabling
+/// `renames_index_to_workdir`, which made libgit2 emit a spurious worktree
+/// rename here (` R old -> new`), diverging from git and producing porcelain a
+/// consumer can't parse (the old path landed in a record with no `XY ` prefix).
+pub fn setup_moved_modified_unstaged(root: &Path) {
+    Repo::init(root)
+        .write(
+            "file.txt",
+            "line one\nline two\nline three\nline four\nline five\nline six\n",
+        )
+        .add_all()
+        .commit("initial")
+        // Plain move + edit; the new file stays similar enough that rename
+        // detection *would* pair it if it ran on the worktree diff.
+        .write(
+            "renamed.txt",
+            "line one\nline two CHANGED\nline three\nline four\nline five\nline six\n",
+        )
+        .rm_file("file.txt");
+}
+
+/// The same plain move + edit, then `git add`. It is now a staged rename whose
+/// content also changed, so git2 sets both `INDEX_RENAMED` and `INDEX_MODIFIED`.
+/// git renders this as `renamed:` / `R`, never `modified:` / `M`; guards the
+/// XY-character and long-label ordering (RENAMED must outrank MODIFIED).
+pub fn setup_moved_modified_staged(root: &Path) {
+    setup_moved_modified_unstaged(root);
+    Repo::new(root).add_all();
+}
+
 pub fn setup_unborn_empty(root: &Path) {
     Repo::init(root);
 }
