@@ -73,13 +73,14 @@ impl RepoKind {
         )
     }
 
-    /// Whether a watch server can run for this repo. Only a top-level
-    /// superproject qualifies. A submodule's or linked worktree's `.git` is a
-    /// gitlink file whose real git dir lives elsewhere, which the server can't
-    /// watch yet
+    /// Whether a watch server can run for this repo: a top-level superproject,
+    /// or a linked worktree of one. Both have submodules to watch and a git dir
+    /// the server can resolve (for a worktree, `.git/worktrees/<name>/`). A
+    /// submodule's own gitlink and an external (`--separate-git-dir`) gitlink
+    /// are not yet served.
     #[must_use]
     pub const fn server_eligible(self) -> bool {
-        matches!(self, Self::WithSubmodules)
+        matches!(self, Self::WithSubmodules | Self::WorktreeWithSubmodules)
     }
 }
 
