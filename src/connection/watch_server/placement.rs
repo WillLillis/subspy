@@ -114,6 +114,14 @@ impl WatchServer {
             watcher,
         ));
 
+        // `root_git_path` is the per-worktree git dir (for a linked worktree,
+        // `.git/worktrees/<name>/`), which holds the index, HEAD, the submodule
+        // gitdirs under `modules/`, and the lock/rebase markers. Its refs live
+        // in the shared common dir, which is NOT watched here: every real
+        // workflow that moves a branch (commit, reset, checkout) also touches
+        // the watched index or HEAD, so the re-read still fires. (Only a direct
+        // ref-only update to the worktree's branch would be missed, and a
+        // worktree's checked-out branch is exclusive to it.)
         let (rx, watcher) = match Self::place_watch(
             self.root_git_path.as_path(),
             notify::RecursiveMode::Recursive,

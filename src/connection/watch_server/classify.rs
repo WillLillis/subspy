@@ -306,7 +306,12 @@ mod tests {
         use notify::event::RenameMode;
 
         let (_tx, rx) = crossbeam_channel::unbounded();
-        let server = WatchServer::new(Path::new("/repo"), rx);
+        // A plain repo: git dir and common dir both `/repo/.git`.
+        let layout = super::super::layout::GitLayout::from_dirs(
+            Path::new("/repo/.git").to_path_buf(),
+            Path::new("/repo/.git").to_path_buf(),
+        );
+        let server = WatchServer::new(Path::new("/repo"), &layout, rx);
         for lock in ["index.lock", "HEAD.lock"] {
             let event = notify::Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::From)))
                 .add_path(PathBuf::from("/repo/.git").join(lock));

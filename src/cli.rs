@@ -230,8 +230,6 @@ pub enum RunError {
         path: PathBuf,
         error: std::io::Error,
     },
-    #[error("A watch server is not yet supported for linked worktrees ({})", _0.display())]
-    Worktree(PathBuf),
     #[error("A watch server needs .git to be a directory, but it's a gitlink to an external git directory ({})", _0.display())]
     Gitlink(PathBuf),
     #[error(transparent)]
@@ -474,30 +472,33 @@ pub struct ProjectPath {
 }
 
 impl ProjectPath {
-    /// Returns `repo_root` for a top-level superproject (`WithSubmodules`), the
-    /// only shape that admits a watch server.
+    /// Returns `repo_root` for a repo that can host a watch server: a top-level
+    /// superproject (`WithSubmodules`) or a linked worktree of one
+    /// (`WorktreeWithSubmodules`).
     ///
     /// # Errors
     ///
-    /// Returns a `RunError` describing why the repo can't host a server: a linked
-    /// worktree ([`RunError::Worktree`]), a gitlink to an external git dir
-    /// ([`RunError::Gitlink`]), or anything else that isn't a non-recursive repo
-    /// with a `.gitmodules` file ([`RunError::ProjectPath`]).
+    /// Returns a `RunError` describing why the repo can't host a server: a
+    /// gitlink to an external git dir ([`RunError::Gitlink`]), or anything else
+    /// that isn't a non-recursive repo with a `.gitmodules` file
+    /// ([`RunError::ProjectPath`]) -- including a worktree with no submodules.
     pub fn require_with_submodules(self) -> RunResult<PathBuf> {
         if self.kind.server_eligible() {
             return Ok(self.repo_root);
         }
         Err(match self.kind {
-            RepoKind::Worktree | RepoKind::WorktreeWithSubmodules => {
-                RunError::Worktree(self.repo_root)
-            }
             RepoKind::OtherGitlink | RepoKind::OtherGitlinkWithSubmodules => {
                 RunError::Gitlink(self.repo_root)
             }
+            // The server-eligible kinds (WithSubmodules, WorktreeWithSubmodules)
+            // are handled by the guard above; everything else -- including a
+            // worktree with no submodules -- has nothing for a server to watch.
             RepoKind::Normal
             | RepoKind::WithSubmodules
             | RepoKind::Submodule
-            | RepoKind::SubmoduleWithSubmodules => RunError::server_path(self.repo_root),
+            | RepoKind::SubmoduleWithSubmodules
+            | RepoKind::Worktree
+            | RepoKind::WorktreeWithSubmodules => RunError::server_path(self.repo_root),
         })
     }
 }
@@ -760,17 +761,23 @@ mod tests {
     }
 
     #[test]
-    fn server_commands_reject_worktree_and_gitlink() {
-        // start/stop/reindex/debug gate on `require_with_submodules`
+    fn worktree_with_submodules_is_server_eligible() {
+        // A linked worktree of a superproject can host a watch server.
         let worktree = ProjectPath {
             repo_root: PathBuf::from("/wt"),
             effective_cwd: PathBuf::from("/wt"),
             kind: RepoKind::WorktreeWithSubmodules,
         };
-        assert!(matches!(
-            worktree.require_with_submodules(),
-            Err(RunError::Worktree(_))
-        ));
+        assert_eq!(
+            worktree.require_with_submodules().unwrap(),
+            PathBuf::from("/wt")
+        );
+    }
+
+    #[test]
+    fn server_commands_reject_gitlink_and_bare_worktree() {
+        // start/stop/reindex/debug gate on `require_with_submodules`.
+        // An external (`--separate-git-dir`) gitlink is not served.
         let external = ProjectPath {
             repo_root: PathBuf::from("/ext"),
             effective_cwd: PathBuf::from("/ext"),
@@ -779,6 +786,16 @@ mod tests {
         assert!(matches!(
             external.require_with_submodules(),
             Err(RunError::Gitlink(_))
+        ));
+        // A worktree with no submodules has nothing for a server to watch.
+        let bare_worktree = ProjectPath {
+            repo_root: PathBuf::from("/wt"),
+            effective_cwd: PathBuf::from("/wt"),
+            kind: RepoKind::Worktree,
+        };
+        assert!(matches!(
+            bare_worktree.require_with_submodules(),
+            Err(RunError::ProjectPath { .. })
         ));
     }
 }

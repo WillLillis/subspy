@@ -44,6 +44,8 @@ pub const FIXTURE_TIME: i64 = 1_700_000_000;
 pub struct HarnessBuilder {
     submodule_names: Vec<String>,
     start_server: bool,
+    as_worktree: bool,
+    worktree_init_submodules: bool,
 }
 
 impl HarnessBuilder {
@@ -52,7 +54,29 @@ impl HarnessBuilder {
         Self {
             submodule_names: Vec::new(),
             start_server: true,
+            as_worktree: false,
+            worktree_init_submodules: true,
         }
+    }
+
+    /// Watch a linked worktree of the superproject instead of the superproject
+    /// itself. The superproject is built as usual, then a worktree is added and
+    /// its submodules checked out (their gitdirs land under
+    /// `.git/worktrees/<name>/modules/`); the server and all `Repo` ops target
+    /// the worktree.
+    pub const fn worktree(mut self) -> Self {
+        self.as_worktree = true;
+        self
+    }
+
+    /// Like [`worktree`](Self::worktree), but leaves the worktree's submodules
+    /// unchecked-out, the default state right after `git worktree add` (no
+    /// `submodule update --init`). The server must treat the absent submodule
+    /// working trees as clean.
+    pub const fn worktree_without_submodule_checkout(mut self) -> Self {
+        self.as_worktree = true;
+        self.worktree_init_submodules = false;
+        self
     }
 
     /// Add a submodule with the given relative path name.
@@ -88,8 +112,28 @@ impl HarnessBuilder {
         let submodule_paths =
             init_repo_with_submodules(temp_dir.path(), &root_path, &self.submodule_names);
 
+        // In worktree mode, add a linked worktree of the superproject and watch
+        // it instead. Its submodules are re-checked-out under the worktree's own
+        // git dir, so the server exercises the worktree path resolution.
+        let (active_root, submodule_paths) = if self.as_worktree {
+            let wt_path = setup_worktree(
+                temp_dir.path(),
+                &root_path,
+                &self.submodule_names,
+                self.worktree_init_submodules,
+            );
+            let wt_submods = self
+                .submodule_names
+                .iter()
+                .map(|name| (name.clone(), wt_path.join(name)))
+                .collect();
+            (wt_path, wt_submods)
+        } else {
+            (root_path, submodule_paths)
+        };
+
         let server_thread = if self.start_server {
-            Some(start_watch_server(&root_path))
+            Some(start_watch_server(&active_root))
         } else {
             None
         };
@@ -100,7 +144,7 @@ impl HarnessBuilder {
             .collect();
 
         let harness = TestHarness {
-            root: Repo::new(&root_path),
+            root: Repo::new(&active_root),
             server_thread,
             submodules,
             _temp_dir: temp_dir,
@@ -605,6 +649,38 @@ pub fn git_may_fail(args: &[&str]) -> std::process::Output {
 }
 
 /// Starts the watch server on a background thread. Returns the `JoinHandle`.
+/// Adds a linked worktree of the superproject at `super_root` (under
+/// `temp_dir`) and checks out its submodules, whose gitdirs land under
+/// `<super>/.git/worktrees/<name>/modules/`. Returns the canonicalized worktree
+/// path (matching how the CLI resolves project paths).
+fn setup_worktree(
+    temp_dir: &Path,
+    super_root: &Path,
+    submodule_names: &[String],
+    init_submodules: bool,
+) -> PathBuf {
+    let wt_path = temp_dir.join("worktree");
+    Repo::new(super_root).run_git(&[
+        "worktree",
+        "add",
+        "-q",
+        wt_path.to_str().expect("worktree path not UTF-8"),
+        "HEAD",
+    ]);
+    if init_submodules && !submodule_names.is_empty() {
+        // Local-path submodule URLs need the file-protocol opt-in on modern git.
+        Repo::new(&wt_path).run_git(&[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "update",
+            "--init",
+            "-q",
+        ]);
+    }
+    dunce::canonicalize(&wt_path).expect("canonicalize worktree path")
+}
+
 fn start_watch_server(root_path: &Path) -> JoinHandle<()> {
     let path = root_path.to_path_buf();
     std::thread::Builder::new()

@@ -6,6 +6,7 @@ mod debounce;
 mod debug;
 mod event_loop;
 mod indexing;
+mod layout;
 mod placement;
 mod update;
 
@@ -36,7 +37,7 @@ use interprocess::local_socket::traits::ListenerExt as _;
 use log::error;
 
 use crate::{
-    DOT_GIT, DOT_GITMODULES, StatusSummary,
+    DOT_GITMODULES, StatusSummary,
     bitset::BitSet,
     connection::{
         IpcStream, cleanup_socket, create_listener, ipc_connect, ipc_socket_path,
@@ -47,6 +48,7 @@ use crate::{
 
 use classify::EventType;
 use event_loop::HandleEventsExit;
+use layout::GitLayout;
 use update::InFlightTracker;
 
 use super::client_handler::handle_client_connection;
@@ -164,15 +166,25 @@ pub(super) enum ControlMessage {
 }
 
 impl WatchServer {
-    pub fn new(root_path: &Path, control_rx: crossbeam_channel::Receiver<ControlMessage>) -> Self {
-        let root_git_path = root_path.join(DOT_GIT);
-        let root_index_path = root_git_path.join("index");
-        let root_head_path = root_git_path.join("HEAD");
+    /// Builds a server for the working tree at `root_path` with its already
+    /// resolved [`GitLayout`]. Splitting resolution (fallible, opens the repo)
+    /// from construction keeps `new` infallible and lets the per-worktree git
+    /// dir differ from the shared common dir (see [`GitLayout`]).
+    pub fn new(
+        root_path: &Path,
+        layout: &GitLayout,
+        control_rx: crossbeam_channel::Receiver<ControlMessage>,
+    ) -> Self {
+        // Per-worktree paths come from the git dir; only refs are shared, so
+        // `root_refs_heads_path` is anchored on the common dir.
+        let root_git_path = layout.git_dir().to_path_buf();
+        let root_index_path = layout.index();
+        let root_head_path = layout.head();
         let root_gitmodules_path = root_path.join(DOT_GITMODULES);
-        let root_modules_path = root_git_path.join("modules");
-        let root_lock_path = root_git_path.join("index.lock");
-        let root_head_lock_path = root_git_path.join("HEAD.lock");
-        let root_refs_heads_path = root_git_path.join("refs").join("heads");
+        let root_modules_path = layout.modules();
+        let root_lock_path = layout.index_lock();
+        let root_head_lock_path = layout.head_lock();
+        let root_refs_heads_path = layout.refs_heads();
 
         Self {
             watchers: Vec::new(),
@@ -341,7 +353,10 @@ impl WatchServer {
 #[expect(clippy::significant_drop_tightening)]
 pub fn watch(root_dir: &Path, display_progress: bool) -> WatchResult<()> {
     let (control_tx, control_rx) = crossbeam_channel::unbounded();
-    let mut server = WatchServer::new(root_dir, control_rx);
+    // Resolve the git-dir layout once up front: a linked worktree keeps its
+    // index/HEAD/modules in `.git/worktrees/<name>/`, not `<root>/.git`.
+    let layout = GitLayout::resolve(root_dir)?;
+    let mut server = WatchServer::new(root_dir, &layout, control_rx);
 
     // Lock status map before accepting connections so clients block (with
     // progress updates) until initial indexing completes instead of reading
