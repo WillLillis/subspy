@@ -34,6 +34,26 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Polling interval between status checks.
 pub const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
+/// How long teardown waits for the server thread to exit after a shutdown
+/// request before declaring it wedged.
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Waits up to [`SHUTDOWN_TIMEOUT`] for `handle` to finish, polling
+/// [`JoinHandle::is_finished`] so a wedged event loop (e.g. a watcher deadlock)
+/// can't block teardown forever. Returns `Some(join_result)` if the thread
+/// exited, or `None` if it wedged (in which case the caller leaks it rather than
+/// hanging on `join()`.
+fn join_with_timeout(handle: JoinHandle<()>) -> Option<std::thread::Result<()>> {
+    let deadline = Instant::now() + SHUTDOWN_TIMEOUT;
+    while !handle.is_finished() {
+        if Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    Some(handle.join())
+}
+
 // Identity / time pins used by every fixture commit so SHAs are
 // byte-stable across runs - required by the long-format snapshot tests.
 pub const FIXTURE_NAME: &str = "Test";
@@ -336,10 +356,13 @@ impl TestHarness {
 
     /// Shut down the watch server and wait for the thread to exit.
     pub fn shutdown(&mut self) {
-        if self.server_thread.is_some() {
+        if let Some(handle) = self.server_thread.take() {
             request_shutdown(self.root.path()).expect("Shutdown request failed");
-            if let Some(handle) = self.server_thread.take() {
-                handle.join().expect("Watch server thread panicked");
+            match join_with_timeout(handle) {
+                Some(result) => result.expect("Watch server thread panicked"),
+                None => panic!(
+                    "watch server thread did not exit within {SHUTDOWN_TIMEOUT:?} of shutdown"
+                ),
             }
         }
     }
@@ -371,29 +394,42 @@ impl TestHarness {
 
 impl Drop for TestHarness {
     fn drop(&mut self) {
-        // Best-effort shutdown. Ignore errors (test may have already shut
-        // it down, or the server may have panicked).
-        if self.server_thread.is_some() {
+        // Best-effort shutdown. Ignore a thread panic (the test may already be
+        // unwinding), but bound the wait.
+        let wedged = if let Some(handle) = self.server_thread.take() {
             let _ = request_shutdown(self.root.path());
-            if let Some(handle) = self.server_thread.take() {
-                let _ = handle.join();
-            }
-        }
+            join_with_timeout(handle).is_none()
+        } else {
+            false
+        };
 
-        // The server thread is now joined, so every producer has quiesced and
-        // the captured trace is complete. Print it to stderr (where `libtest`
-        // attributes it to the failing test) if we are unwinding from a test
-        // failure; otherwise discard it. Compiled out without `trace_events`.
+        // Print the captured trace to stderr (where `libtest` attributes it to
+        // the test) when the test failed OR the server wedged on shutdown.
+        // Otherwise discard.
         #[cfg(trace_events)]
         {
             let root = self.root.path();
-            if std::thread::panicking() {
+            if std::thread::panicking() || wedged {
                 subspy::connection::watch_server::trace::dump_for(
                     root,
                     &root.display().to_string(),
                 );
             } else {
                 subspy::connection::watch_server::trace::discard_for(root);
+            }
+        }
+
+        // Surface a wedged server loudly so it fails fast and diagnosably. Only
+        // panic when not already unwinding (a second panic would abort the
+        // process and lose the trace we just dumped).
+        if wedged {
+            let msg = format!(
+                "watch server thread did not exit within {SHUTDOWN_TIMEOUT:?} of shutdown."
+            );
+            if std::thread::panicking() {
+                eprintln!("{msg}");
+            } else {
+                panic!("{msg}");
             }
         }
     }
