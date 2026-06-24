@@ -660,10 +660,14 @@ fn setup_worktree(
     init_submodules: bool,
 ) -> PathBuf {
     let wt_path = temp_dir.join("worktree");
+    // Create the worktree on its own branch (the common case for `git worktree
+    // add`) rather than a detached HEAD.
     Repo::new(super_root).run_git(&[
         "worktree",
         "add",
         "-q",
+        "-b",
+        "wt-branch",
         wt_path.to_str().expect("worktree path not UTF-8"),
         "HEAD",
     ]);

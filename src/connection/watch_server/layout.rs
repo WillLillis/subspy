@@ -46,16 +46,6 @@ impl GitLayout {
         })
     }
 
-    /// Builds a layout directly from a git dir and common dir, bypassing
-    /// libgit2. For tests that exercise path derivation without a real repo.
-    #[cfg(test)]
-    pub(super) const fn from_dirs(git_dir: PathBuf, common_dir: PathBuf) -> Self {
-        Self {
-            git_dir,
-            common_dir,
-        }
-    }
-
     /// The per-worktree git directory ([`Repository::path`]). The recursive
     /// watch target, and the anchor for index/HEAD/modules/locks/rebase markers.
     pub(super) fn git_dir(&self) -> &Path {
@@ -97,6 +87,18 @@ impl GitLayout {
 }
 
 #[cfg(test)]
+impl GitLayout {
+    /// Builds a layout directly from a git dir and common dir, bypassing
+    /// libgit2. For tests that exercise path derivation without a real repo.
+    pub const fn from_dirs(git_dir: PathBuf, common_dir: PathBuf) -> Self {
+        Self {
+            git_dir,
+            common_dir,
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::process::Command;
@@ -132,7 +134,10 @@ mod tests {
         let layout = GitLayout::resolve(root).unwrap();
         // For a plain repo the two coincide, and every per-worktree path sits
         // directly under `<root>/.git`.
-        assert_eq!(layout.git_dir(), layout.refs_heads().parent().unwrap().parent().unwrap());
+        assert_eq!(
+            layout.git_dir(),
+            layout.refs_heads().parent().unwrap().parent().unwrap()
+        );
         assert!(layout.index().ends_with(".git/index"));
         assert!(layout.head().ends_with(".git/HEAD"));
         assert!(layout.modules().ends_with(".git/modules"));
@@ -185,12 +190,7 @@ mod tests {
         // `.git` becomes a gitlink file.
         git(
             &work,
-            &[
-                "init",
-                "-q",
-                "--separate-git-dir",
-                gitdir.to_str().unwrap(),
-            ],
+            &["init", "-q", "--separate-git-dir", gitdir.to_str().unwrap()],
         );
 
         let layout = GitLayout::resolve(&work).unwrap();
