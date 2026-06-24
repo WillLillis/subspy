@@ -116,13 +116,8 @@ impl WatchServer {
 
         // `root_git_path` is the per-worktree git dir (for a linked worktree,
         // `.git/worktrees/<name>/`), which holds the index, HEAD, the submodule
-        // gitdirs under `modules/`, and the lock/rebase markers. Its refs live
-        // in the shared common dir, which is NOT watched here: every real
-        // workflow that moves a branch (commit, reset, checkout) also touches
-        // the watched index or HEAD, so the re-read still fires. (Only a direct
-        // ref-only update to the worktree's branch would be missed, and a
-        // worktree's checked-out branch is exclusive to it.)
-        let (rx, watcher) = match Self::place_watch(
+        // gitdirs under `modules/`, and the lock/rebase markers.
+        let (rx, mut watcher) = match Self::place_watch(
             self.root_git_path.as_path(),
             notify::RecursiveMode::Recursive,
         ) {
@@ -135,6 +130,31 @@ impl WatchServer {
                 Err(e)?
             }
         };
+
+        // In a linked worktree the refs live in the shared common dir, outside
+        // the per-worktree git dir. Watch the common dir's `refs/` on the same
+        // watcher and let `classify_event` filter to `refs/heads`, the same
+        // watch-broad-then-filter model as a normal repo.
+        //
+        // We watch `refs/`, not the whole common dir: the common dir is the main
+        // repo's `.git`, so it also holds the main repo's `objects/` and
+        // `modules/`. The worktree's own submodule gitdirs are already covered
+        // under its git dir. For a non-worktree repo `refs/` already sits under
+        // the git dir (common dir == git dir), so this is skipped.
+        let common_refs = self
+            .root_refs_heads_path
+            .parent()
+            .unwrap_or(self.root_refs_heads_path.as_path());
+        if !common_refs.starts_with(&self.root_git_path)
+            && let Err(e) = watcher.watch(common_refs, notify::RecursiveMode::Recursive)
+        {
+            error!(
+                "Failed to watch common-dir refs at `{}` - {e}",
+                common_refs.display()
+            );
+            Err(e)?;
+        }
+
         self.watchers.push(WatchListItem::new(
             DOT_GIT.to_owned(),
             self.root_git_path.clone(),
