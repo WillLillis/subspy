@@ -128,10 +128,10 @@ mod tests {
     #[test]
     fn normal_repo_git_dir_equals_common_dir() {
         let tmp = TempDir::new().unwrap();
-        let root = tmp.path();
-        init_repo(root);
+        let root = dunce::canonicalize(tmp.path()).unwrap();
+        init_repo(&root);
 
-        let layout = GitLayout::resolve(root).unwrap();
+        let layout = GitLayout::resolve(&root).unwrap();
         // For a plain repo the two coincide, and every per-worktree path sits
         // directly under `<root>/.git`.
         assert_eq!(
@@ -183,8 +183,9 @@ mod tests {
     #[test]
     fn separate_git_dir_resolves_external_git_dir() {
         let tmp = TempDir::new().unwrap();
-        let work = tmp.path().join("work");
-        let gitdir = tmp.path().join("external.git");
+        let tmp_path = dunce::canonicalize(tmp.path()).unwrap();
+        let work = tmp_path.join("work");
+        let gitdir = tmp_path.join("external.git");
         std::fs::create_dir_all(&work).unwrap();
         // `git init --separate-git-dir` puts the git dir outside the work tree;
         // `.git` becomes a gitlink file.
