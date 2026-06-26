@@ -109,7 +109,7 @@ struct WatchServer {
     /// Maps each submodule's **root-relative** working-directory path to its
     /// watcher index, sorted so a tripwire event on a directory `P` can find
     /// every submodule at or under `P` via a prefix range. Keys are relative so
-    /// thesecomparisons start at the distinguishing component instead of re-walking
+    /// these comparisons start at the distinguishing component instead of re-walking
     /// the identical repo-root prefix.
     workdir_to_index: BTreeMap<PathBuf, usize>,
     /// Watcher indices of submodules to skip updating (due to being in a rebase)
@@ -118,28 +118,29 @@ struct WatchServer {
     root_rebasing: bool,
 
     // NOTE: Commonly used paths are pre-computed and stored here to avoid redundant heap allocs
-    // in hot loops
-    /// Root path to the repository being watched
+    // in hot loops. They are derived from the repository's resolved `GitLayout`
+    /// Root path to the working tree being watched
     root_path: PathBuf,
     /// Shared handle to `root_path` for rayon tasks. Duplicated as an `Arc`
     /// so that `try_spawn_submod_update` can move a cheap refcount bump into
     /// `'static` closures instead of cloning the `PathBuf` on every spawn.
     root_path_shared: Arc<Path>,
-    /// `<root_path>/.git/index`
+    /// `<git_dir>/index`
     root_index_path: PathBuf,
-    /// `<root_path>/.git/HEAD`
+    /// `<git_dir>/HEAD`
     root_head_path: PathBuf,
-    /// `<root_path>/.gitmodules`
+    /// `<root_path>/.gitmodules` (a tracked file in the working tree)
     root_gitmodules_path: PathBuf,
-    /// `<root_path>/.git`
+    /// `<git_dir>` -- the per-worktree git dir (`Repository::path`); the
+    /// recursive watch target
     root_git_path: PathBuf,
-    /// `<root_path>/.git/modules`
+    /// `<git_dir>/modules` -- this working tree's submodule gitdirs
     root_modules_path: PathBuf,
-    /// `<root_path>/.git/index.lock`
+    /// `<git_dir>/index.lock`
     root_lock_path: PathBuf,
-    /// `<root_path>/.git/HEAD.lock`
+    /// `<git_dir>/HEAD.lock`
     root_head_lock_path: PathBuf,
-    /// `<root_path>/.git/refs/heads`
+    /// `<common_dir>/refs/heads` -- branch refs, shared across linked worktrees
     root_refs_heads_path: PathBuf,
 
     /// Receiver for control messages from the listener thread

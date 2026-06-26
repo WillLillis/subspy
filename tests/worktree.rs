@@ -144,6 +144,73 @@ fn worktree_uninitialized_submodule_is_clean(_run: u32) {
     harness.assert_all_clean();
 }
 
+// Root operations in a worktree exercise the per-worktree HEAD, index, and
+// rebase markers that come from `GitLayout::git_dir()`
+// (`.git/worktrees/<name>/`) -- the paths most likely to regress between a
+// normal repo and a linked worktree.
+
+#[apply(common::repeat)]
+fn worktree_checkout_moving_gitlink(_run: u32) {
+    let mut harness = common::HarnessBuilder::new()
+        .submodule("sub")
+        .worktree()
+        .no_server()
+        .build();
+
+    // On wt-branch, sub is at its initial commit. Make a `feature` branch whose
+    // gitlink points at a newer sub commit.
+    harness.root().branch("feature");
+    harness.submodule("sub").write("feature.txt", "work\n");
+    harness
+        .submodule("sub")
+        .add_all()
+        .commit("sub feature commit");
+    harness.root().add("sub");
+    harness.root().commit("bump sub on feature");
+
+    // Back to wt-branch, sub's workdir matching its (initial) gitlink, clean.
+    harness.root().checkout("wt-branch");
+    harness.root().run_git(&["submodule", "update"]);
+    harness.start_server();
+    harness.assert_all_clean();
+
+    // Checkout feature: the worktree's index gitlink and HEAD move (both under
+    // the per-worktree git dir), but sub's workdir is not updated -> NEW_COMMITS.
+    // Regresses to a stale status if the worktree's index/HEAD aren't watched.
+    harness.root().checkout("feature");
+    harness.assert_submodule_status("sub", StatusSummary::NEW_COMMITS);
+}
+
+#[apply(common::repeat)]
+fn worktree_root_rebase_completes_clean(_run: u32) {
+    let mut harness = common::HarnessBuilder::new()
+        .submodule("sub")
+        .worktree()
+        .no_server()
+        .build();
+
+    // Diverge `feature` and `wt-branch` on non-conflicting files.
+    harness.root().branch("feature");
+    harness.root().write("feature.txt", "f\n");
+    harness.root().add("feature.txt");
+    harness.root().commit("feature commit");
+
+    harness.root().checkout("wt-branch");
+    harness.root().write("base.txt", "b\n");
+    harness.root().add("base.txt");
+    harness.root().commit("base commit");
+
+    harness.root().checkout("feature");
+    harness.start_server();
+    harness.assert_all_clean();
+
+    // Rebase onto wt-branch. The rebase markers live under the worktree's git
+    // dir (`.git/worktrees/<name>/rebase-merge`); the server must detect their
+    // start/end there and settle back to clean.
+    harness.root().run_git(&["rebase", "wt-branch"]);
+    harness.assert_all_clean();
+}
+
 #[apply(common::repeat)]
 fn worktree_multiple_submodules(_run: u32) {
     let harness = common::HarnessBuilder::new()

@@ -32,27 +32,30 @@ pub const DOT_GIT: &str = ".git";
 pub enum RepoKind {
     /// A git repository with "just" a `.git` folder.
     Normal,
-    /// A top-level repository with a `.git` folder and a `.gitmodules` file:
-    /// the only shape a watch server can run for.
+    /// A top-level superproject: a `.git` folder plus a `.gitmodules` file. One
+    /// of the two server-eligible shapes (see [`Self::server_eligible`]).
     WithSubmodules,
     /// A submodule (its `.git` is a _file_ pointing into the parent's
     /// `.git/modules/`) with no submodules of its own.
     Submodule,
     /// A submodule that itself has submodules. Its statuses are computed
-    /// locally like a superproject, but no watch server can run for it (the
-    /// server can't watch a gitlink `.git`)
+    /// locally like a superproject, but it is not server-eligible: serving a
+    /// submodule's own superproject role is out of scope (unlike a linked
+    /// worktree, the other gitlink-file shape, which is served).
     SubmoduleWithSubmodules,
     /// A linked worktree (its `.git` is a _file_ pointing into the main repo's
     /// `.git/worktrees/`) with no submodules of its own.
     Worktree,
-    /// A linked worktree whose checkout has submodules. Its statuses are
-    /// computed locally like a superproject, but the watch server doesn't
-    /// support worktrees yet.
+    /// A linked worktree whose checkout has submodules. Server-eligible: the
+    /// watch server resolves its per-worktree git dir
+    /// (`.git/worktrees/<name>/`) and shared common dir via `Repository::path` /
+    /// `commondir`, then watches and reads status from those.
     WorktreeWithSubmodules,
-    /// A `.git` gitlink *file* we don't recognize as a submodule or worktree:
-    /// it points outside `.git/modules/` and `.git/worktrees/` (e.g. `git init
-    /// --separate-git-dir`), or it's unparseable/corrupt. The watch server can't
-    /// watch a gitlink; local computation still works for a valid one, while a
+    /// A `.git` gitlink *file* we recognize as neither a submodule nor a linked
+    /// worktree: it points outside `.git/modules/` and `.git/worktrees/` (e.g.
+    /// `git init --separate-git-dir`), or it's unparseable/corrupt. Not
+    /// server-eligible -- unlike a linked worktree, which is also a gitlink file
+    /// but is served. Local computation still works for a valid one, while a
     /// corrupt one fails at `Repository::open`.
     OtherGitlink,
     /// Like [`Self::OtherGitlink`], but with a `.gitmodules` file, so its
