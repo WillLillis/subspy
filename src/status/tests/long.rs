@@ -182,6 +182,13 @@ const CASES: &[Case] = &[
         },
     },
     Case {
+        name: "submodule_gitlink_conflict",
+        setup: Setup::WithSubmodules {
+            names: &["sub"],
+            setup: setup_submodule_gitlink_conflict,
+        },
+    },
+    Case {
         name: "upstream_up_to_date",
         setup: Setup::Plain(setup_upstream_up_to_date),
     },

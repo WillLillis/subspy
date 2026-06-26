@@ -2,6 +2,7 @@
 //! sections, summary footer, and submodule lock-failure errors.
 
 use git2::{Repository, Statuses};
+use rustc_hash::FxHashSet;
 
 use std::io::{self, Write};
 
@@ -12,6 +13,7 @@ use crate::{
 
 use super::{
     StatusEntries, StatusResult,
+    conflict::path_within_any,
     header::{print_header, print_unmerged_paths},
     interleave::{Row, SubRow, for_each_merged},
     relativize::Relativizer,
@@ -355,6 +357,7 @@ fn print_unstaged_changes(
 /// Prints the "Untracked files:" section. Returns `true` if any were printed.
 fn print_untracked_files(
     non_submod: &Statuses<'_>,
+    conflicted_paths: &FxHashSet<Vec<u8>>,
     rel: &Relativizer<'_>,
     stdout: &mut impl Write,
 ) -> Result<bool, io::Error> {
@@ -369,6 +372,12 @@ fn print_untracked_files(
         else {
             continue;
         };
+        // libgit2 reports a conflicted submodule's working tree as untracked
+        // (`sub/`, or `sub/...` under `-uall`); git shows it only under "Unmerged
+        // paths", so drop those rows.
+        if path_within_any(file, conflicted_paths) {
+            continue;
+        }
         if !header {
             writeln!(stdout, "{UNTRACKED_HEADER}")?;
             header = true;
@@ -505,6 +514,7 @@ pub fn display_status(
         submodules,
         deleted_submodules,
         renamed_submodules,
+        conflicted_paths,
     } = *entries;
 
     let is_unborn = repo
@@ -554,7 +564,7 @@ pub fn display_status(
     let has_conflicts = print_unmerged_paths(repo, rel, out)?;
     let changed_in_workdir =
         print_unstaged_changes(non_submod, submodules, rm_in_workdir, rel, out)?;
-    let has_untracked = print_untracked_files(non_submod, rel, out)?;
+    let has_untracked = print_untracked_files(non_submod, conflicted_paths, rel, out)?;
     print_ignored_files(non_submod, rel, out)?;
 
     print_summary(

@@ -447,6 +447,50 @@ pub fn setup_submodules_interleaved_staged(h: &TestHarness) {
     root.add("ppp");
 }
 
+/// `git rev-parse <refname>` in `repo`, trimmed. Used to branch from a captured
+/// commit rather than a branch name (so the default-branch name is irrelevant).
+fn rev_parse(repo: &Repo, refname: &str) -> String {
+    let out = repo.try_git(&["rev-parse", refname]);
+    assert!(out.status.success(), "git rev-parse {refname} failed");
+    String::from_utf8(out.stdout).unwrap().trim().to_string()
+}
+
+/// A submodule whose gitlink diverged on two branches and was then merged into
+/// an unmerged (conflicted) gitlink: `sub` ends up at index stages 1-3 with no
+/// stage 0. git shows it only under "Unmerged paths"; subspy must not also
+/// report it as a staged deletion (a conflicted gitlink reads as "missing from
+/// the index" when only stage 0 is consulted) nor as an untracked directory.
+pub fn setup_submodule_gitlink_conflict(h: &TestHarness) {
+    let sub = h.submodule("sub");
+    let sub_base = rev_parse(sub, "HEAD");
+    // Two divergent submodule commits, each on its own branch so both stay
+    // reachable in this clone.
+    sub.run_git(&["checkout", "-qb", "side_a"]);
+    sub.write("README.md", "side A\n")
+        .add_all()
+        .commit("sub side A");
+    sub.run_git(&["checkout", "-qb", "side_b", &sub_base]);
+    sub.write("README.md", "side B\n")
+        .add_all()
+        .commit("sub side B");
+
+    let root = h.root();
+    let root_base = rev_parse(root, "HEAD");
+    // branchA records the gitlink at side_a.
+    root.run_git(&["checkout", "-qb", "branchA", &root_base]);
+    sub.checkout("side_a");
+    root.add("sub");
+    root.commit("root: sub on side A");
+    // branchB (from the same base) records the gitlink at side_b.
+    root.run_git(&["checkout", "-qb", "branchB", &root_base]);
+    sub.checkout("side_b");
+    root.add("sub");
+    root.commit("root: sub on side B");
+    // Merging branchA leaves `sub` unmerged: the gitlink diverged on both sides
+    // (neither is an ancestor), so git cannot auto-resolve it.
+    root.try_git(&["merge", "branchA", "-m", "merge sub conflict"]);
+}
+
 // -- Upstream-tracking setups --
 //
 // We fake an upstream without a real remote: `update-ref` positions

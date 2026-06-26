@@ -6,7 +6,7 @@ use std::path::Path;
 
 use crate::{StatusSummary, git::parse_gitmodules};
 
-use super::{IgnoreSubmodules, StatusResult};
+use super::{IgnoreSubmodules, StatusResult, conflict::conflicted_paths};
 
 /// A submodule that was renamed (`git mv old new`) since HEAD: same
 /// gitlink OID, different path.
@@ -69,13 +69,28 @@ pub fn submodule_changes(repo: &Repository) -> StatusResult<SubmoduleChanges> {
         }
     })?;
 
-    // Subset of `head_gitlinks` whose path no longer exists in the
-    // index (`git rm` or `git mv` on a submodule).
+    // Subset of `head_gitlinks` with no stage-0 (merged) entry in the index:
+    // candidates for `git rm` / `git mv` on a submodule. This is the fast-path
+    // gate -- `get_path` is a per-path lookup, so the common clean case never
+    // scans the full index or touches conflict state.
     let mut missing: Vec<(String, git2::Oid)> = head_gitlinks
         .iter()
         .filter(|(path, _)| index.get_path(Path::new(path), 0).is_none())
         .cloned()
         .collect();
+
+    if missing.is_empty() {
+        return Ok(SubmoduleChanges::default());
+    }
+
+    // A gitlink can lack a stage-0 entry because it is *unmerged*, not deleted:
+    // a conflict (e.g. a rebase/merge where the submodule commit diverged) leaves
+    // it at stages 1-3 only, which git shows under "Unmerged paths". Drop those
+    // from `missing` so they aren't misreported as staged deletions. The conflict
+    // scan is paid only here, off the fast path, when something is actually
+    // missing from stage 0.
+    let conflicted = conflicted_paths(&index)?;
+    missing.retain(|(path, _)| !conflicted.contains(path.as_bytes()));
 
     if missing.is_empty() {
         return Ok(SubmoduleChanges::default());
@@ -97,6 +112,12 @@ pub fn submodule_changes(repo: &Repository) -> StatusResult<SubmoduleChanges> {
             continue;
         }
         let new_path_bytes: &[u8] = &entry.path;
+        // A conflict-stage gitlink (an add/add conflict at a fresh path) is
+        // unmerged, not a rename target, so it must not be matched against a
+        // missing entry's OID.
+        if conflicted.contains(new_path_bytes) {
+            continue;
+        }
         let in_head = head_gitlinks
             .iter()
             .any(|(p, _)| p.as_bytes() == new_path_bytes);

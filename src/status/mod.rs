@@ -31,6 +31,7 @@ mod tests;
 
 use clap::ValueEnum;
 use git2::Repository;
+use rustc_hash::FxHashSet;
 use thiserror::Error;
 
 use std::{borrow::Cow, io, path::Path};
@@ -166,6 +167,11 @@ pub struct StatusEntries<'a> {
     pub submodules: &'a [(String, StatusSummary)],
     pub deleted_submodules: &'a [String],
     pub renamed_submodules: &'a [SubmoduleRename],
+    /// Byte paths of unmerged (conflicted) entries. Renderers drop the phantom
+    /// untracked rows libgit2 emits for a conflicted submodule's working tree;
+    /// git reports such a path only under "Unmerged paths". Empty when the index
+    /// has no conflicts.
+    pub conflicted_paths: &'a FxHashSet<Vec<u8>>,
 }
 
 /// Builds the `git2::StatusOptions` used by production and tests. Kept
@@ -244,6 +250,20 @@ pub fn assemble_status<R>(
     let mut so = build_status_options(opts, project.kind);
     let non_submod = repo.statuses(Some(&mut so))?;
 
+    // libgit2 reports a conflicted submodule's working tree as an untracked
+    // directory (with no stage-0 gitlink, it no longer recognizes the path as a
+    // submodule), so the renderers need the conflicted paths to suppress those
+    // phantom rows. Build them only when the already-computed status set actually
+    // contains a conflict, so a conflict-free repo never re-reads the index.
+    let conflicted_paths = if non_submod
+        .iter()
+        .any(|e| e.status().contains(git2::Status::CONFLICTED))
+    {
+        conflict::conflicted_paths(&repo.index()?)?
+    } else {
+        FxHashSet::default()
+    };
+
     let submod_changes = if opts.ignore_submodules == IgnoreSubmodules::All {
         SubmoduleChanges::default()
     } else {
@@ -279,6 +299,7 @@ pub fn assemble_status<R>(
         submodules: &submods,
         deleted_submodules: &submod_changes.deleted,
         renamed_submodules: &submod_changes.renamed,
+        conflicted_paths: &conflicted_paths,
     };
 
     render(&repo, &entries, &rel)

@@ -21,7 +21,7 @@ use crate::{StatusSummary, paint::paint_into};
 
 use super::{
     Divergence, PorcelainOpts, StatusEntries, StatusResult, UpstreamStatus,
-    conflict::{ConflictEntry, build_conflict_map},
+    conflict::{ConflictEntry, build_conflict_map, path_within_any},
     interleave::{Row, SubRow, for_each_merged},
     line_terminator,
     quote::QuoteMode,
@@ -60,6 +60,7 @@ pub(super) struct Palette {
 /// Renders the full output: optional `## branch...` header followed by
 /// the five entry passes (tracked, submodules, deleted submodules,
 /// untracked, ignored).
+#[expect(clippy::too_many_lines)]
 pub(super) fn display_xy_lines(
     out: &mut impl Write,
     repo: &Repository,
@@ -85,17 +86,20 @@ pub(super) fn display_xy_lines(
     let index = repo.index()?;
     let conflicts = build_conflict_map(&index)?;
 
-    // git emits tracked changes (including submodules) in one path-sorted
-    // stream, then untracked, then ignored. libgit2 excludes submodules from
-    // `non_submod`, so interleave the submodule rows among the tracked file
-    // entries by path.
+    // git emits tracked changes (including submodules) in one path-sorted stream,
+    // then untracked, then ignored. libgit2 excludes submodules from `non_submod`,
+    // so interleave the submodule rows among the tracked file entries by path.
     let tracked = entries.non_submod.iter().filter(|entry| {
         let st = entry.status();
         st != git2::Status::CURRENT
             && st != git2::Status::WT_NEW
             && !st.contains(git2::Status::IGNORED)
     });
-    let mut submods: Vec<SubRow<'_>> = Vec::new();
+    let mut submods: Vec<SubRow<'_>> = Vec::with_capacity(
+        entries.submodules.len()
+            + entries.deleted_submodules.len()
+            + entries.renamed_submodules.len(),
+    );
     submods.extend(
         entries
             .submodules
@@ -125,8 +129,7 @@ pub(super) fn display_xy_lines(
             write_submodule(path, st, out, rel, null_terminate, style)
         }
         Row::Sub(SubRow::Deleted(path)) => {
-            // `D ` (staged deletion of a submodule). X gets the staged color,
-            // Y is blank.
+            // `D ` (staged deletion of a submodule). X gets the staged color, Y is blank.
             let x = XyChar::new('D', style.palette.map(|p| p.updated));
             let y = XyChar::new(' ', None);
             write_xy_path(out, x, y, path.as_bytes(), rel, null_terminate, style)
@@ -153,6 +156,9 @@ pub(super) fn display_xy_lines(
         .iter()
         .filter(|e| e.status() == git2::Status::WT_NEW)
     {
+        if path_within_any(entry.path_bytes(), entries.conflicted_paths) {
+            continue; // libgit2's phantom untracked row for a conflicted submodule
+        }
         let untracked = XyChar::new('?', style.palette.map(|p| p.untracked));
         write_xy_path(
             out,
@@ -170,7 +176,6 @@ pub(super) fn display_xy_lines(
         .iter()
         .filter(|e| e.status().contains(git2::Status::IGNORED))
     {
-        // Ignored entries get no color in git's default config.
         let ignored = XyChar::new('!', None);
         write_xy_path(
             out,

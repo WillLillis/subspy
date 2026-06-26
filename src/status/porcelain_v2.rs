@@ -19,7 +19,7 @@ use crate::StatusSummary;
 
 use super::{
     Divergence, PorcelainOpts, StatusEntries, StatusResult, UpstreamStatus,
-    conflict::{ConflictEntry, build_conflict_map},
+    conflict::{ConflictEntry, build_conflict_map, path_within_any},
     interleave::{Row, SubRow, for_each_merged},
     line_terminator,
     quote::QuoteMode,
@@ -157,6 +157,11 @@ pub fn display_porcelain_v2(
         .iter()
         .filter(|e| e.status() == git2::Status::WT_NEW)
     {
+        // Drop the phantom untracked row libgit2 emits for a conflicted
+        // submodule's working tree; git lists it only as an unmerged (`u`) entry.
+        if path_within_any(entry.path_bytes(), entries.conflicted_paths) {
+            continue;
+        }
         out.write_all(b"? ")?;
         render_opts.rel.write_quoted(
             out,

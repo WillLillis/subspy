@@ -159,6 +159,14 @@ const CASES: &[Case] = &[
         },
         branch: false,
     },
+    Case {
+        name: "submodule_gitlink_conflict",
+        setup: Setup::WithSubmodules {
+            names: &["sub"],
+            setup: setup_submodule_gitlink_conflict,
+        },
+        branch: false,
+    },
     // Branch-header cases (`-b` / `--branch`).
     Case {
         name: "branch_clean",
