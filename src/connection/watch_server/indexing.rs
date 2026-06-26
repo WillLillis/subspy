@@ -16,7 +16,7 @@ use crate::{
         watch_server::{ROOT_WATCHER_COUNT, WatchListItem, WatchServer},
     },
     create_progress_bar,
-    git::{GitlinkKind, parse_gitlink, parse_gitmodules},
+    git::{parse_gitmodules, submodule_modules_subpath},
     watch::{LockFileGuard, WatchError, WatchResult},
 };
 
@@ -295,10 +295,9 @@ impl WatchServer {
         let dot_git_path = self.root_path.join(submod_rel_path).join(DOT_GIT);
         let dot_git_bytes = std::fs::read(&dot_git_path)?;
 
-        // `parse_gitlink` returns the submodule's path within `.git/modules/`
-        // (the bit after the marker) as raw bytes -- the name may contain
-        // non-UTF-8 bytes -- which we UTF-8 validate only for the `PathBuf` join.
-        let GitlinkKind::Submodule { modules_subpath } = parse_gitlink(&dot_git_bytes) else {
+        // `submodule_modules_subpath` returns the submodule's path within
+        // `.git/modules/` (the bit after the marker).
+        let Some(modules_subpath) = submodule_modules_subpath(&dot_git_bytes) else {
             return Err(WatchError::NotSubmoduleGitlink(dot_git_path));
         };
 

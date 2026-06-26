@@ -36,41 +36,23 @@ pub fn gitlink_target(dot_git_bytes: &[u8]) -> Option<&[u8]> {
     dot_git_bytes.trim_ascii().strip_prefix(b"gitdir: ")
 }
 
-/// What a `.git` gitlink *file* points at, from [`parse_gitlink`].
-pub enum GitlinkKind<'a> {
-    /// A submodule: its gitdir lives under a `.git/modules/` directory (or, when
-    /// the submodule is nested in a worktree, the worktree's private
-    /// `.git/worktrees/<wt>/modules/`). `modules_subpath` is the path within that
-    /// `modules/` directory -- the submodule's name, possibly multi-component
-    /// (`libs/foo`) and possibly non-UTF-8.
-    Submodule { modules_subpath: &'a [u8] },
-    /// A linked worktree: its gitdir is `.git/worktrees/<wt>`.
-    Worktree,
-    /// Anything else -- a `git init --separate-git-dir` repo, or an
-    /// unparseable/corrupt `.git` file.
-    Other,
-}
-
-/// Classifies a `.git` gitlink *file*'s raw bytes by anchoring on the
-/// `.git/modules/` and `.git/worktrees/` markers in its `gitdir:` target.
+/// The submodule "modules subpath" (the path *within* a `.git/modules/`
+/// directory).
+///
+/// A submodule's gitdir lives under its superproject's `.git/modules/<name>`,
+/// or, when the submodule is nested in a linked worktree, under that worktree's
+/// private `.git/worktrees/<wt>/modules/<name>`. The returned subpath is the
+/// `<name>` portion.
 #[must_use]
-pub fn parse_gitlink(dot_git_bytes: &[u8]) -> GitlinkKind<'_> {
-    let Some(target) = gitlink_target(dot_git_bytes) else {
-        return GitlinkKind::Other;
-    };
+pub fn submodule_modules_subpath(dot_git_bytes: &[u8]) -> Option<&[u8]> {
+    let target = gitlink_target(dot_git_bytes)?;
     // `.git/modules/<name>`: a submodule of a normal superproject.
-    if let Some(modules_subpath) = after_marker(target, b".git/modules/") {
-        return GitlinkKind::Submodule { modules_subpath };
+    if let Some(subpath) = after_marker(target, b".git/modules/") {
+        return Some(subpath);
     }
-    if let Some(after_worktree) = after_marker(target, b".git/worktrees/") {
-        // `.git/worktrees/<wt>/modules/<name>`: a submodule nested in a worktree
-        // `.git/worktrees/<wt>`: the worktree itself.
-        return after_marker(after_worktree, b"/modules/")
-            .map_or(GitlinkKind::Worktree, |modules_subpath| {
-                GitlinkKind::Submodule { modules_subpath }
-            });
-    }
-    GitlinkKind::Other
+    // `.git/worktrees/<wt>/modules/<name>`: a submodule nested in a worktree.
+    let after_worktree = after_marker(target, b".git/worktrees/")?;
+    after_marker(after_worktree, b"/modules/")
 }
 
 /// The bytes following the first occurrence of `marker` in `haystack`, or `None`
@@ -80,6 +62,42 @@ fn after_marker<'a>(haystack: &'a [u8], marker: &[u8]) -> Option<&'a [u8]> {
         .windows(marker.len())
         .position(|window| window == marker)
         .map(|start| &haystack[start + marker.len()..])
+}
+
+/// Whether a `.git` gitlink *file* points at a **linked worktree**.
+///
+/// Git writes a `commondir` file into every linked worktree's private gitdir
+/// (`<main>/.git/worktrees/<id>/commondir`; see `gitrepository-layout(5)`),
+/// whereas a submodule's gitdir and a `--separate-git-dir` gitdir never have
+/// one.
+///
+/// `repo_root` is the directory holding the `.git` file; a relative `gitdir:`
+/// target resolves against it (git's rule for gitlink files), while an absolute
+/// one stands alone. Returns `false` if the bytes aren't a `gitdir:` pointer,
+/// the target can't be represented as a path on this platform, or the marker is
+/// absent or unreadable.
+#[must_use]
+pub fn gitlink_points_at_worktree(dot_git_bytes: &[u8], repo_root: &Path) -> bool {
+    gitlink_target(dot_git_bytes).is_some_and(|target| gitdir_has_commondir(repo_root, target))
+}
+
+/// Whether the gitdir named by `target` contains git's `commondir` marker.
+#[cfg(unix)]
+fn gitdir_has_commondir(repo_root: &Path, target: &[u8]) -> bool {
+    use std::os::unix::ffi::OsStrExt as _;
+    let gitdir = repo_root.join(std::ffi::OsStr::from_bytes(target));
+    gitdir.join("commondir").exists()
+}
+
+/// Whether the gitdir named by `target` contains git's `commondir` marker. Off
+/// Unix a gitdir path must be valid Unicode, so a non-UTF-8 `target` cannot be
+/// resolved and is reported as not-a-worktree.
+#[cfg(not(unix))]
+fn gitdir_has_commondir(repo_root: &Path, target: &[u8]) -> bool {
+    let Ok(target) = std::str::from_utf8(target) else {
+        return false;
+    };
+    repo_root.join(target).join("commondir").exists()
 }
 
 fn parse_ignore_mode(s: &str) -> Option<IgnoreSubmodules> {
@@ -216,6 +234,111 @@ mod tests {
 
     fn write_gitmodules(root: &Path, content: &str) {
         std::fs::write(root.join(".gitmodules"), content).unwrap();
+    }
+
+    #[test]
+    fn submodule_modules_subpath_extracts_name() {
+        // `.git/modules/<name>` (relative target, as git writes for submodules):
+        assert_eq!(
+            submodule_modules_subpath(b"gitdir: ../.git/modules/sub\n"),
+            Some(b"sub".as_slice())
+        );
+        // Multi-component submodule name:
+        assert_eq!(
+            submodule_modules_subpath(b"gitdir: ../../.git/modules/libs/foo\n"),
+            Some(b"libs/foo".as_slice())
+        );
+        // A submodule nested in a linked worktree.
+        assert_eq!(
+            submodule_modules_subpath(b"gitdir: /m/.git/worktrees/wt/modules/sub\n"),
+            Some(b"sub".as_slice())
+        );
+    }
+
+    #[test]
+    fn submodule_modules_subpath_rejects_non_submodules() {
+        // A linked worktree itself is not a submodule.
+        assert_eq!(
+            submodule_modules_subpath(b"gitdir: /m/.git/worktrees/wt\n"),
+            None
+        );
+        // An external (`--separate-git-dir`) gitdir.
+        assert_eq!(
+            submodule_modules_subpath(b"gitdir: /var/lib/git/x.git\n"),
+            None
+        );
+        // Not a `gitdir:` pointer at all.
+        assert_eq!(submodule_modules_subpath(b"garbage"), None);
+        assert_eq!(submodule_modules_subpath(b""), None);
+    }
+
+    #[test]
+    fn worktree_detected_by_commondir_marker() {
+        // A gitdir carrying the `commondir` marker is a linked worktree, found by
+        // resolving an absolute target.
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let gitdir = root.join("main").join(".git").join("worktrees").join("wt");
+        std::fs::create_dir_all(&gitdir).unwrap();
+        std::fs::write(gitdir.join("commondir"), "../..\n").unwrap();
+
+        let bytes = format!("gitdir: {}\n", gitdir.display());
+        assert!(gitlink_points_at_worktree(bytes.as_bytes(), root));
+    }
+
+    #[test]
+    fn worktree_detection_resolves_relative_target() {
+        // Submodules (and some worktrees) use a relative `gitdir:` resolved
+        // against the repo root holding `.git`.
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let gitdir = root.join("main").join(".git").join("worktrees").join("wt");
+        std::fs::create_dir_all(&gitdir).unwrap();
+        std::fs::write(gitdir.join("commondir"), "../..\n").unwrap();
+
+        assert!(gitlink_points_at_worktree(
+            b"gitdir: main/.git/worktrees/wt\n",
+            root
+        ));
+    }
+
+    #[test]
+    fn submodule_gitdir_is_not_a_worktree() {
+        // A submodule gitdir (no `commondir`) must not be taken for a worktree,
+        // even though its path contains `.git/...`.
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let gitdir = root.join(".git").join("modules").join("sub");
+        std::fs::create_dir_all(&gitdir).unwrap();
+
+        assert!(!gitlink_points_at_worktree(
+            b"gitdir: .git/modules/sub\n",
+            root
+        ));
+    }
+
+    #[test]
+    fn worktree_lookalike_without_commondir_is_not_a_worktree() {
+        // A `--separate-git-dir` whose path merely *looks* like a worktree
+        // (`.git/worktrees/...`) but has no `commondir` marker is not a worktree.
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        let gitdir = root
+            .join("other")
+            .join(".git")
+            .join("worktrees")
+            .join("proj");
+        std::fs::create_dir_all(&gitdir).unwrap(); // no `commondir`
+
+        let bytes = format!("gitdir: {}\n", gitdir.display());
+        assert!(!gitlink_points_at_worktree(bytes.as_bytes(), root));
+    }
+
+    #[test]
+    fn non_gitdir_bytes_are_not_a_worktree() {
+        let tmp = TempDir::new().unwrap();
+        assert!(!gitlink_points_at_worktree(b"garbage", tmp.path()));
+        assert!(!gitlink_points_at_worktree(b"", tmp.path()));
     }
 
     #[test]
