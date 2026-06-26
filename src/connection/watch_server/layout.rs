@@ -9,9 +9,9 @@
 //! "common dir"). A `--separate-git-dir` repository likewise keeps its git dir
 //! outside the working tree.
 //!
-//! [`GitLayout`] resolves both directories via libgit2 so the watch server
+//! [`GitLayout`] resolves these directories via libgit2 so the watch server
 //! places its watches and reads its lock/index/HEAD/refs state from the right
-//! locations regardless of which shape the repository takes.
+//! locations.
 
 use std::path::{Path, PathBuf};
 
@@ -180,6 +180,10 @@ mod tests {
         assert!(!layout.refs_heads().starts_with(layout.git_dir()));
     }
 
+    // Resolution-only coverage: `GitLayout` resolves a `--separate-git-dir`
+    // repo's external git dir correctly, but the CLI classifies such repos as
+    // `OtherGitlink` and does NOT serve them (see `RepoKind::server_eligible`).
+    // This guards the path math, not end-to-end watch-server support.
     #[test]
     fn separate_git_dir_resolves_external_git_dir() {
         let tmp = TempDir::new().unwrap();
