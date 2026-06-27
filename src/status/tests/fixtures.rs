@@ -491,6 +491,23 @@ pub fn setup_submodule_gitlink_conflict(h: &TestHarness) {
     root.try_git(&["merge", "branchA", "-m", "merge sub conflict"]);
 }
 
+/// Like [`setup_submodule_gitlink_conflict`], but the conflicted submodule's own
+/// working tree is also dirty: advanced past the "ours" gitlink (commit-changed)
+/// with modified and untracked content. git folds all of this into the single
+/// unmerged entry -- `SCMU` in porcelain v2 -- and never reports a separate
+/// dirty submodule row, which is what exercises the conflicted-submodule fold.
+pub fn setup_submodule_gitlink_conflict_dirty(h: &TestHarness) {
+    setup_submodule_gitlink_conflict(h);
+    let sub = h.submodule("sub");
+    // A new commit (commit-changed `C`)...
+    sub.write("README.md", "advance\n")
+        .add_all()
+        .commit("sub advance");
+    // ...plus modified (`M`) and untracked (`U`) working-tree content.
+    sub.write("README.md", "modified\n")
+        .write("untracked.txt", "x\n");
+}
+
 // -- Upstream-tracking setups --
 //
 // We fake an upstream without a real remote: `update-ref` positions

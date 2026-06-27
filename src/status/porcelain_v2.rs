@@ -130,7 +130,13 @@ pub fn display_porcelain_v2(
         Row::File(entry) => {
             let st = entry.status();
             if st.contains(git2::Status::CONFLICTED) {
-                write_conflict(&entry, &conflicts, out, &render_opts)
+                write_conflict(
+                    &entry,
+                    &conflicts,
+                    entries.conflicted_submodules,
+                    out,
+                    &render_opts,
+                )
             } else if st.intersects(git2::Status::INDEX_RENAMED | git2::Status::WT_RENAMED) {
                 write_renamed(&entry, out, &render_opts)
             } else {
@@ -300,6 +306,27 @@ fn submodule_xy(st: StatusSummary) -> (char, char) {
     (x, y)
 }
 
+/// The `c`/`m`/`u` characters of a submodule's porcelain v2 `S<C><M><U>`
+/// sub-field: commit changed, content modified, untracked content present.
+const fn submodule_cmu(st: StatusSummary) -> (char, char, char) {
+    let c = if st.contains(StatusSummary::NEW_COMMITS) {
+        'C'
+    } else {
+        '.'
+    };
+    let m = if st.contains(StatusSummary::MODIFIED_CONTENT) {
+        'M'
+    } else {
+        '.'
+    };
+    let u = if st.contains(StatusSummary::UNTRACKED_CONTENT) {
+        'U'
+    } else {
+        '.'
+    };
+    (c, m, u)
+}
+
 /// File modes and blob OIDs for the HEAD/index/workdir versions of a
 /// non-submodule entry, suitable for the porcelain v2 `1`/`2` lines.
 struct EntryModesAndOids {
@@ -433,21 +460,25 @@ fn write_renamed(
     out.write_all(line_terminator(render_opts.null_terminate).as_bytes())
 }
 
-/// Writes a conflicted entry as a porcelain v2 `u` line:
-/// `u XY N... <m1> <m2> <m3> <m_work> <h1> <h2> <h3> PATH`, where
+/// Writes an unmerged entry as a porcelain v2 `u` line:
+/// `u XY <sub> <m1> <m2> <m3> <m_work> <h1> <h2> <h3> PATH`, where
 /// `m1`/`h1` come from the ancestor stage, `m2`/`h2` from ours,
 /// `m3`/`h3` from theirs. `XY` decodes from which stages are present
 /// (AA/DD/DU/UD), falling back to `UU`.
+///
+/// `sub` is `N...` for a file. When the conflict is on a gitlink (the stage
+/// modes are `160000`) it is the submodule's `S<c><m><u>` field, with the
+/// folded state from `conflicted_submodules` and the gitlink workdir mode --
+/// matching git. (libgit2 would emit `N...` and a zero workdir mode here,
+/// because without a stage-0 gitlink it no longer sees the path as a submodule.)
 fn write_conflict(
     entry: &git2::StatusEntry<'_>,
     conflicts: &FxHashMap<String, ConflictEntry>,
+    conflicted_submodules: &FxHashMap<String, StatusSummary>,
     out: &mut impl Write,
     render_opts: &RenderOpts<'_>,
 ) -> Result<(), io::Error> {
     let path = entry.path().unwrap_or("");
-    let m_work = entry
-        .index_to_workdir()
-        .map_or(0u32, |d| u32::from(d.new_file().mode()));
     let (xy, m1, m2, m3, h1, h2, h3) = conflicts.get(path).map_or(
         (
             "UU",
@@ -475,9 +506,32 @@ fn write_conflict(
             (xy, m1, m2, m3, h1, h2, h3)
         },
     );
+    // A gitlink conflict (any stage mode is the gitlink mode) is an unmerged
+    // submodule: emit `S<c><m><u>` and the gitlink workdir mode rather than
+    // `N...`/`000000`. `conflicted_submodules` carries its folded state.
+    let gitlink_mode = u32::from(git2::FileMode::Commit);
+    let (s0, s1, s2, s3, m_work) = if m1 == gitlink_mode || m2 == gitlink_mode || m3 == gitlink_mode
+    {
+        let st = conflicted_submodules
+            .get(path)
+            .copied()
+            .unwrap_or_else(StatusSummary::clean);
+        let (c, m, u) = submodule_cmu(st);
+        let m_work = if st.contains(StatusSummary::DELETED_WORKDIR) {
+            0u32
+        } else {
+            0o160_000_u32
+        };
+        ('S', c, m, u, m_work)
+    } else {
+        let m_work = entry
+            .index_to_workdir()
+            .map_or(0u32, |d| u32::from(d.new_file().mode()));
+        ('N', '.', '.', '.', m_work)
+    };
     write!(
         out,
-        "u {xy} N... {m1:06o} {m2:06o} {m3:06o} {m_work:06o} {h1} {h2} {h3} ",
+        "u {xy} {s0}{s1}{s2}{s3} {m1:06o} {m2:06o} {m3:06o} {m_work:06o} {h1} {h2} {h3} ",
     )?;
     render_opts.rel.write_quoted(
         out,
@@ -506,21 +560,7 @@ fn write_submodule(
     // `x`/`y` mirror git's XY notation; `c`/`m`/`u` mirror the
     // porcelain v2 `S<C><M><U>` sub-field positions.
     let (x, y) = submodule_xy(st);
-    let c = if st.contains(StatusSummary::NEW_COMMITS) {
-        'C'
-    } else {
-        '.'
-    };
-    let m = if st.contains(StatusSummary::MODIFIED_CONTENT) {
-        'M'
-    } else {
-        '.'
-    };
-    let u = if st.contains(StatusSummary::UNTRACKED_CONTENT) {
-        'U'
-    } else {
-        '.'
-    };
+    let (c, m, u) = submodule_cmu(st);
     let m_head = if st.contains(StatusSummary::STAGED_NEW) {
         0u32
     } else {

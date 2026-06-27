@@ -3,7 +3,7 @@
 use git2::{Config, Repository};
 use rustc_hash::FxHashMap;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::status::IgnoreSubmodules;
 
@@ -81,7 +81,9 @@ pub fn gitlink_points_at_worktree(dot_git_bytes: &[u8], repo_root: &Path) -> boo
     gitlink_target(dot_git_bytes).is_some_and(|target| gitdir_has_commondir(repo_root, target))
 }
 
-/// Whether the gitdir named by `target` contains git's `commondir` marker.
+/// Whether the gitdir named by `target` (raw path bytes, resolved against
+/// `repo_root`) contains git's `commondir` marker. Unix paths are arbitrary
+/// bytes, so the target is used verbatim.
 #[cfg(unix)]
 fn gitdir_has_commondir(repo_root: &Path, target: &[u8]) -> bool {
     use std::os::unix::ffi::OsStrExt as _;
@@ -89,15 +91,92 @@ fn gitdir_has_commondir(repo_root: &Path, target: &[u8]) -> bool {
     gitdir.join("commondir").exists()
 }
 
-/// Whether the gitdir named by `target` contains git's `commondir` marker. Off
-/// Unix a gitdir path must be valid Unicode, so a non-UTF-8 `target` cannot be
-/// resolved and is reported as not-a-worktree.
+/// Whether the gitdir named by `target` (resolved against `repo_root`) contains
+/// git's `commondir` marker. Off Unix a gitdir path must be valid Unicode, so a
+/// non-UTF-8 `target` cannot be resolved and is reported as not-a-worktree.
 #[cfg(not(unix))]
 fn gitdir_has_commondir(repo_root: &Path, target: &[u8]) -> bool {
     let Ok(target) = std::str::from_utf8(target) else {
         return false;
     };
     repo_root.join(target).join("commondir").exists()
+}
+
+/// Resolves the `.git` directory for a submodule. Handles both `.git`
+/// directories (normal repos) and `.git` files containing a `gitdir:` pointer
+/// (e.g. `gitdir: ../../.git/modules/name`).
+fn resolve_git_dir(submod_path: &Path) -> Option<PathBuf> {
+    let dot_git = submod_path.join(".git");
+    if dot_git.is_dir() {
+        return Some(dot_git);
+    }
+    if !dot_git.is_file() {
+        return None;
+    }
+    // Read the gitlink as raw bytes (the gitdir path may be non-UTF-8 on Unix)
+    // and reuse `gitlink_target` rather than re-parsing the `gitdir: ` prefix.
+    let bytes = std::fs::read(&dot_git).ok()?;
+    let target = gitlink_target(&bytes)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt as _;
+        Some(submod_path.join(std::ffi::OsStr::from_bytes(target)))
+    }
+    #[cfg(not(unix))]
+    {
+        Some(submod_path.join(std::str::from_utf8(target).ok()?))
+    }
+}
+
+/// Resolves a git ref (e.g. `refs/heads/main`) to an OID by checking loose
+/// refs first, then falling back to `packed-refs`.
+///
+/// Does not follow symbolic refs (chains of `ref:` indirection). This is fine
+/// for branch tips under `refs/heads/`, which are always direct OIDs.
+fn resolve_ref(git_dir: &Path, ref_target: &str) -> Option<git2::Oid> {
+    // Loose ref
+    let ref_path = git_dir.join(ref_target);
+    if let Ok(content) = std::fs::read_to_string(&ref_path) {
+        return git2::Oid::from_str(content.trim_end()).ok();
+    }
+    // Packed refs
+    let packed = std::fs::read_to_string(git_dir.join("packed-refs")).ok()?;
+    for line in packed.lines() {
+        if line.starts_with('#') || line.starts_with('^') {
+            continue;
+        }
+        let Some((oid_str, name)) = line.split_once(' ') else {
+            continue;
+        };
+        if name == ref_target {
+            return git2::Oid::from_str(oid_str).ok();
+        }
+    }
+    None
+}
+
+/// Reads a submodule's HEAD to get its current OID and branch name (if on a
+/// branch). Returns `(None, None)` if the submodule isn't checked out.
+#[must_use]
+pub fn read_submodule_head(submod_path: &Path) -> (Option<git2::Oid>, Option<String>) {
+    let Some(git_dir) = resolve_git_dir(submod_path) else {
+        return (None, None);
+    };
+    let Ok(content) = std::fs::read_to_string(git_dir.join("HEAD")) else {
+        return (None, None);
+    };
+    let content = content.trim_end();
+    content.strip_prefix("ref: ").map_or_else(
+        // Detached HEAD -> raw OID
+        || (git2::Oid::from_str(content).ok(), None),
+        |ref_target| {
+            let branch = ref_target
+                .strip_prefix("refs/heads/")
+                .map(|s| s.to_string());
+            let oid = resolve_ref(&git_dir, ref_target);
+            (oid, branch)
+        },
+    )
 }
 
 fn parse_ignore_mode(s: &str) -> Option<IgnoreSubmodules> {
@@ -517,5 +596,136 @@ mod tests {
             .unwrap();
         let map = parse_per_submodule_ignore(&repo, tmp.path());
         assert_eq!(map.get("vendor/foo"), Some(&IgnoreSubmodules::Untracked));
+    }
+
+    // -- resolve_git_dir / resolve_ref / read_submodule_head --
+
+    fn git(args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .args(["-c", "user.name=Test", "-c", "user.email=test@test.com"])
+            .args(args)
+            .output()
+            .expect("failed to run git");
+        assert!(
+            output.status.success(),
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    /// Creates a repo with a single submodule checked out on `master`.
+    fn init_repo_with_submodule() -> (TempDir, PathBuf) {
+        let tmp = TempDir::new().unwrap();
+
+        // Source repo
+        let source = tmp.path().join("source");
+        std::fs::create_dir_all(&source).unwrap();
+        git(&["-C", &source.display().to_string(), "init"]);
+        std::fs::write(source.join("README.md"), "hello\n").unwrap();
+        git(&["-C", &source.display().to_string(), "add", "-A"]);
+        git(&[
+            "-C",
+            &source.display().to_string(),
+            "commit",
+            "-m",
+            "initial",
+        ]);
+
+        // Root repo with submodule
+        let root = tmp.path().join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        git(&["-C", &root.display().to_string(), "init"]);
+        git(&[
+            "-C",
+            &root.display().to_string(),
+            "commit",
+            "--allow-empty",
+            "-m",
+            "init",
+        ]);
+        git(&[
+            "-C",
+            &root.display().to_string(),
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            &source.display().to_string(),
+            "sub",
+        ]);
+        git(&["-C", &root.display().to_string(), "commit", "-m", "add sub"]);
+
+        let submod_path = root.join("sub");
+        (tmp, submod_path)
+    }
+
+    #[test]
+    fn resolve_git_dir_submodule() {
+        let (_tmp, submod_path) = init_repo_with_submodule();
+        let git_dir = resolve_git_dir(&submod_path).expect("should resolve");
+        // Submodule .git is a file pointing to ../../.git/modules/sub
+        assert!(git_dir.join("HEAD").exists());
+        assert!(git_dir.join("config").exists());
+    }
+
+    #[test]
+    fn resolve_git_dir_nonexistent() {
+        let tmp = TempDir::new().unwrap();
+        assert!(resolve_git_dir(tmp.path()).is_none());
+    }
+
+    #[test]
+    fn resolve_git_dir_normal_repo() {
+        let tmp = TempDir::new().unwrap();
+        git(&["-C", &tmp.path().display().to_string(), "init"]);
+        let git_dir = resolve_git_dir(tmp.path()).expect("should resolve");
+        assert!(git_dir.join("HEAD").exists());
+    }
+
+    #[test]
+    fn resolve_ref_loose() {
+        let (_tmp, submod_path) = init_repo_with_submodule();
+        let git_dir = resolve_git_dir(&submod_path).unwrap();
+        let oid = resolve_ref(&git_dir, "refs/heads/master");
+        assert!(oid.is_some(), "loose ref should resolve");
+    }
+
+    #[test]
+    fn resolve_ref_nonexistent() {
+        let (_tmp, submod_path) = init_repo_with_submodule();
+        let git_dir = resolve_git_dir(&submod_path).unwrap();
+        assert!(resolve_ref(&git_dir, "refs/heads/nonexistent").is_none());
+    }
+
+    #[test]
+    fn read_submodule_head_on_branch() {
+        let (_tmp, submod_path) = init_repo_with_submodule();
+        let (oid, branch) = read_submodule_head(&submod_path);
+        assert!(oid.is_some(), "should have an OID");
+        assert_eq!(branch.as_deref(), Some("master"));
+    }
+
+    #[test]
+    fn read_submodule_head_detached() {
+        let (_tmp, submod_path) = init_repo_with_submodule();
+        // Detach HEAD
+        git(&[
+            "-C",
+            &submod_path.display().to_string(),
+            "checkout",
+            "--detach",
+        ]);
+        let (oid, branch) = read_submodule_head(&submod_path);
+        assert!(oid.is_some(), "should have an OID");
+        assert!(branch.is_none(), "detached HEAD has no branch");
+    }
+
+    #[test]
+    fn read_submodule_head_nonexistent() {
+        let tmp = TempDir::new().unwrap();
+        let (oid, branch) = read_submodule_head(tmp.path());
+        assert!(oid.is_none());
+        assert!(branch.is_none());
     }
 }
