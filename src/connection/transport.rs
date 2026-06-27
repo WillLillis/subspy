@@ -80,11 +80,11 @@ pub(super) const MSG_PREFIX_LEN: usize = size_of::<u32>();
 /// use stack buffers rather than `Vec`s). Currently the largest is
 /// `ServerMessage::Indexing { u32, u32 }` at 12 bytes.
 ///
-/// [`write_full_message`] uses this to combine the length prefix and body
+/// [`write_full_message_fixed`] uses this to combine the length prefix and body
 /// into a single `write_all` call, requiring one syscall instead of two.
 pub(super) const MAX_FIXED_MSG_LEN: usize = 12;
 
-/// Stack buffer size for [`write_full_message`]'s single-write fast path.
+/// Stack buffer size for [`write_full_message_fixed`]'s single-write fast path.
 const INLINE_WRITE_BUF_LEN: usize = MSG_PREFIX_LEN + MAX_FIXED_MSG_LEN;
 
 /// Encodes `msg` into `buf` with a LE u32 length prefix and writes the

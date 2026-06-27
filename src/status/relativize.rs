@@ -35,7 +35,7 @@ pub struct Relativizer<'a> {
     /// a non-empty value, zero for an empty value). Cached so each
     /// `write_to` call doesn't reslice.
     cwd_components: usize,
-    /// `core.quotepath` (default `true`). Threaded through so [`write_to`]
+    /// `core.quotepath` (default `true`). Threaded through so [`Self::write_to`]
     /// (long-format path emission) can suppress octal escaping of high
     /// bytes when the user set `-c core.quotepath=false`.
     quote_path: bool,
