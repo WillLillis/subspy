@@ -1,10 +1,14 @@
 //! Submodule status computation and filtering.
 
 use git2::Repository;
+use rustc_hash::FxHashMap;
 
 use std::path::Path;
 
-use crate::{StatusSummary, git::parse_gitmodules};
+use crate::{
+    StatusSummary,
+    git::{parse_gitmodules, read_submodule_head},
+};
 
 use super::{IgnoreSubmodules, StatusResult, conflict::conflicted_paths};
 
@@ -137,6 +141,78 @@ pub fn submodule_changes(repo: &Repository) -> StatusResult<SubmoduleChanges> {
     changes.deleted = missing.into_iter().map(|(path, _)| path).collect();
 
     Ok(changes)
+}
+
+/// Folds each unmerged (conflicted-gitlink) submodule into a single status,
+/// keyed by submodule path. git reports such a submodule only through the
+/// unmerged machinery, never as a separate dirty row, so the renderers use this
+/// to (a) drop it from the normal submodule rows and (b) populate the porcelain
+/// v2 `u`-line's `S<c><m><u>` field.
+///
+/// The status carries:
+/// - `MODIFIED_CONTENT` / `UNTRACKED_CONTENT` / `DELETED_WORKDIR`: the
+///   submodule's own working-tree state, which libgit2 *does* compute (read from
+///   `dirty_submodules`, the already-gathered submodule statuses).
+/// - `NEW_COMMITS`: libgit2 can't compute this during a conflict (there is no
+///   stage-0 gitlink to compare against), so the submodule's HEAD is compared to
+///   the "ours" stage gitlink -- git's reference for the `c` flag.
+///
+/// Empty unless the index has gitlink conflicts. Callers gate on a conflict
+/// existing, so the conflict scan and the per-submodule HEAD read happen only
+/// then -- never on the clean happy path.
+///
+/// # Errors
+///
+/// Returns `Err` if the index or its conflict iterator cannot be read.
+pub fn conflicted_submodule_statuses(
+    repo: &Repository,
+    root_path: &Path,
+    dirty_submodules: &[(String, StatusSummary)],
+) -> StatusResult<FxHashMap<String, StatusSummary>> {
+    let gitlink_mode = u32::from(git2::FileMode::Commit);
+    let index = repo.index()?;
+    let mut map = FxHashMap::default();
+    for conflict in index.conflicts()? {
+        let conflict = conflict?;
+        // Any present stage carries the shared path and the gitlink mode; a
+        // non-gitlink (file) conflict is not a submodule.
+        let Some(any) = conflict
+            .our
+            .as_ref()
+            .or(conflict.their.as_ref())
+            .or(conflict.ancestor.as_ref())
+        else {
+            continue;
+        };
+        if any.mode != gitlink_mode {
+            continue;
+        }
+        let Ok(path) = std::str::from_utf8(&any.path) else {
+            continue;
+        };
+        let path = path.to_string();
+
+        // m/u (and a deleted workdir) from the submodule's own status.
+        let mut st = dirty_submodules.iter().find(|(p, _)| *p == path).map_or(
+            StatusSummary::clean(),
+            |(_, s)| {
+                *s & (StatusSummary::MODIFIED_CONTENT
+                    | StatusSummary::UNTRACKED_CONTENT
+                    | StatusSummary::DELETED_WORKDIR)
+            },
+        );
+
+        // c: the submodule advanced past the "ours" gitlink.
+        if let Some(ours) = &conflict.our {
+            let (head, _) = read_submodule_head(&root_path.join(&path));
+            if head.is_some_and(|h| h != ours.id) {
+                st |= StatusSummary::NEW_COMMITS;
+            }
+        }
+
+        map.insert(path, st);
+    }
+    Ok(map)
 }
 
 /// Drops submodule statuses whose path is the new side of a rename.

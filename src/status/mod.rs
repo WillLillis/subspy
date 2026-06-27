@@ -31,7 +31,7 @@ mod tests;
 
 use clap::ValueEnum;
 use git2::Repository;
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 use thiserror::Error;
 
 use std::{borrow::Cow, io, path::Path};
@@ -172,6 +172,11 @@ pub struct StatusEntries<'a> {
     /// git reports such a path only under "Unmerged paths". Empty when the index
     /// has no conflicts.
     pub conflicted_paths: &'a FxHashSet<Vec<u8>>,
+    /// Unmerged submodules and their folded status (modified/untracked/new
+    /// commits), keyed by path. Already excluded from `submodules` so they don't
+    /// render as a separate dirty row; porcelain v2 uses this for the `u`-line
+    /// `S<c><m><u>` field. Empty when the index has no gitlink conflicts.
+    pub conflicted_submodules: &'a FxHashMap<String, StatusSummary>,
 }
 
 /// Builds the `git2::StatusOptions` used by production and tests. Kept
@@ -250,15 +255,18 @@ pub fn assemble_status<R>(
     let mut so = build_status_options(opts, project.kind);
     let non_submod = repo.statuses(Some(&mut so))?;
 
+    // Conflicted submodules need special handling (see below). Both pieces are
+    // gated on this cheap check over the already-computed status set, so a
+    // conflict-free repo never re-reads the index or touches submodule HEADs.
+    let has_conflicts = non_submod
+        .iter()
+        .any(|e| e.status().contains(git2::Status::CONFLICTED));
+
     // libgit2 reports a conflicted submodule's working tree as an untracked
     // directory (with no stage-0 gitlink, it no longer recognizes the path as a
     // submodule), so the renderers need the conflicted paths to suppress those
-    // phantom rows. Build them only when the already-computed status set actually
-    // contains a conflict, so a conflict-free repo never re-reads the index.
-    let conflicted_paths = if non_submod
-        .iter()
-        .any(|e| e.status().contains(git2::Status::CONFLICTED))
-    {
+    // phantom rows.
+    let conflicted_paths = if has_conflicts {
         conflict::conflicted_paths(&repo.index()?)?
     } else {
         FxHashSet::default()
@@ -286,6 +294,19 @@ pub fn assemble_status<R>(
     );
     submodule::filter_rename_new_paths(&mut submods, &submod_changes.renamed);
 
+    // An unmerged submodule is reported once, through the conflict machinery,
+    // never also as a separate dirty row. Fold each into its conflict entry:
+    // drop it from the normal submodule rows (every format), and carry its
+    // state (modified/untracked from libgit2, plus a HEAD-vs-ours commit check
+    // libgit2 can't do during a conflict) for the porcelain v2 `u` line.
+    let conflicted_submodules = if has_conflicts {
+        let folded = submodule::conflicted_submodule_statuses(&repo, &project.repo_root, &submods)?;
+        submods.retain(|(path, _)| !folded.contains_key(path));
+        folded
+    } else {
+        FxHashMap::default()
+    };
+
     // Path-formatting policy by output mode:
     // - Porcelain v1: repo-root-relative regardless of cwd.
     // - Porcelain v2: cwd-relative without `-z`, repo-root-relative
@@ -300,6 +321,7 @@ pub fn assemble_status<R>(
         deleted_submodules: &submod_changes.deleted,
         renamed_submodules: &submod_changes.renamed,
         conflicted_paths: &conflicted_paths,
+        conflicted_submodules: &conflicted_submodules,
     };
 
     render(&repo, &entries, &rel)

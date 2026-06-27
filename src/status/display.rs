@@ -515,6 +515,10 @@ pub fn display_status(
         deleted_submodules,
         renamed_submodules,
         conflicted_paths,
+        // Long format renders an unmerged submodule via `print_unmerged_paths`
+        // and relies on it already being excluded from `submodules`; the folded
+        // `S<c><m><u>` status is a porcelain-v2-only concern.
+        conflicted_submodules: _,
     } = *entries;
 
     let is_unborn = repo
