@@ -404,8 +404,12 @@ fn write_ordinary(
 /// Writes a rename entry as a porcelain v2 `2` line:
 /// `2 XY <sub> <modes> <oids> R<score> NEW<sep>OLD`. The separator
 /// between paths is TAB (`\t`) without `-z` and NUL (`\0`) with `-z`,
-/// per `git-status(1)`. Similarity is always reported as `R100` -
-/// libgit2's rename detection returns the pair but not a score.
+/// per `git-status(1)`. The similarity is always reported as `R100`:
+/// exact for a pure rename (the common case), but git's real score for a
+/// rename+edit can't be reproduced. git's algorithm is GPLv2, and the
+/// score libgit2 computes uses a different algorithm that diverges (e.g.
+/// `R95` where git emits `R93`); git2 0.21 doesn't expose it regardless.
+/// See the README "Limitations" section.
 fn write_renamed(
     entry: &git2::StatusEntry<'_>,
     out: &mut impl Write,
