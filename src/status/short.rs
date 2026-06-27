@@ -3,7 +3,7 @@
 //! Same `XY PATH` line shape as porcelain v1, but with cwd-relative
 //! paths, `Standard` quoting (matching `core.quotePath=true`), and
 //! colors matching git's `WT_STATUS_*` palette. The actual line
-//! writing is shared with porcelain v1 via [`xy_line`].
+//! writing is shared with porcelain v1 via [`super::xy_line`].
 
 use git2::Repository;
 use std::io::Write;

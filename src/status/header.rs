@@ -638,7 +638,7 @@ fn print_header_state(state: &HeaderState, stdout: &mut impl Write) -> Result<()
     Ok(())
 }
 
-/// Returns the "On branch <name>" or "HEAD detached {at|from} <name>"
+/// Returns the `On branch <name>` or `HEAD detached {at|from} <name>`
 /// display string. The detached form mirrors git's reflog-driven naming:
 /// the most recent `checkout: moving from X to Y` entry gives `Y` (often
 /// a tag), and `at` switches to `from` once HEAD has moved past where
