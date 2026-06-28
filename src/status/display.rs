@@ -16,6 +16,7 @@ use super::{
     conflict::path_within_any,
     header::{print_header, print_unmerged_paths},
     interleave::{Row, SubRow, for_each_merged},
+    porcelain_v2::{TrackedOrSubRow, TrackedRow, for_each_tracked_row, normalized_tracked_rows},
     relativize::Relativizer,
 };
 
@@ -120,7 +121,7 @@ const fn has_status_info(st: StatusSummary) -> bool {
     reason = "interleaves files with three submodule row kinds, each rendered inline"
 )]
 fn print_staged_changes(
-    non_submod: &Statuses<'_>,
+    tracked_rows: Vec<TrackedRow<'_>>,
     submodule_statuses: &[(String, StatusSummary)],
     deleted_submodule_paths: &[String],
     renamed_submodules: &[super::SubmoduleRename],
@@ -136,17 +137,10 @@ fn print_staged_changes(
     };
 
     // git lists staged files and staged submodule changes (modified/new,
-    // deleted, renamed) in one path-sorted stream. libgit2 excludes submodules
-    // from `non_submod`, so interleave the submodule rows among the files.
-    let files = non_submod.iter().filter(|e| {
-        e.status().intersects(
-            git2::Status::INDEX_NEW
-                | git2::Status::INDEX_MODIFIED
-                | git2::Status::INDEX_DELETED
-                | git2::Status::INDEX_RENAMED
-                | git2::Status::INDEX_TYPECHANGE,
-        )
-    });
+    // deleted, renamed) in one path-sorted stream. The file rows come
+    // pre-classified (renames reconciled to match git) in `tracked_rows`;
+    // libgit2 excludes submodules from them, so interleave the submodule rows.
+    // Non-staged (worktree-only) entries fall through the `istatus` match below.
     let mut submods: Vec<SubRow<'_>> = Vec::new();
     submods.extend(
         deleted_submodule_paths
@@ -161,8 +155,8 @@ fn print_staged_changes(
             .map(|(path, st)| SubRow::Modified(path, *st)),
     );
 
-    for_each_merged(files, submods, |row| match row {
-        Row::File(entry) => {
+    for_each_tracked_row(tracked_rows, submods, |row| match row {
+        TrackedOrSubRow::File(TrackedRow::Entry(entry)) => {
             // RENAMED before MODIFIED: git2 sets both on a rename that also
             // changes content, and git labels it `renamed:`, not `modified:`.
             let istatus = match entry.status() {
@@ -171,6 +165,7 @@ fn print_staged_changes(
                 s if s.contains(git2::Status::INDEX_MODIFIED) => "modified:   ",
                 s if s.contains(git2::Status::INDEX_DELETED) => "deleted:    ",
                 s if s.contains(git2::Status::INDEX_TYPECHANGE) => "typechange: ",
+                // Worktree-only entry; rendered by the unstaged section instead.
                 _ => return Ok(()),
             };
             let Some(index) = entry.head_to_index() else {
@@ -201,7 +196,36 @@ fn print_staged_changes(
             }
             writeln!(stdout)
         }
-        Row::Sub(SubRow::Deleted(path)) => {
+        TrackedOrSubRow::File(TrackedRow::SyntheticOrdinary(row)) => {
+            let istatus = match row.x {
+                'A' => "new file:   ",
+                'D' => "deleted:    ",
+                _ => return Ok(()),
+            };
+            if !header {
+                writeln!(stdout, "{staged_header}")?;
+                header = true;
+            }
+            paint_into(stdout, GREEN, |out| {
+                write!(out, "\t{istatus}")?;
+                rel.write_to(out, &row.path)
+            })?;
+            writeln!(stdout)
+        }
+        TrackedOrSubRow::File(TrackedRow::SyntheticRename(row)) => {
+            if !header {
+                writeln!(stdout, "{staged_header}")?;
+                header = true;
+            }
+            paint_into(stdout, GREEN, |out| {
+                write!(out, "\trenamed:    ")?;
+                rel.write_to(out, &row.old.path)?;
+                out.write_all(b" -> ")?;
+                rel.write_to(out, &row.new.path)
+            })?;
+            writeln!(stdout)
+        }
+        TrackedOrSubRow::Sub(SubRow::Deleted(path)) => {
             if !header {
                 writeln!(stdout, "{staged_header}")?;
                 header = true;
@@ -212,7 +236,7 @@ fn print_staged_changes(
             })?;
             writeln!(stdout)
         }
-        Row::Sub(SubRow::Renamed(rename)) => {
+        TrackedOrSubRow::Sub(SubRow::Renamed(rename)) => {
             if !header {
                 writeln!(stdout, "{staged_header}")?;
                 header = true;
@@ -225,7 +249,7 @@ fn print_staged_changes(
             })?;
             writeln!(stdout)
         }
-        Row::Sub(SubRow::Modified(submod_path, st)) => {
+        TrackedOrSubRow::Sub(SubRow::Modified(submod_path, st)) => {
             if !header {
                 writeln!(stdout, "{staged_header}")?;
                 header = true;
@@ -559,8 +583,9 @@ pub fn display_status(
         .iter()
         .any(|(_, st)| st.contains(StatusSummary::DELETED_WORKDIR));
 
+    let tracked_rows = normalized_tracked_rows(repo, entries);
     let changes_in_index = print_staged_changes(
-        non_submod,
+        tracked_rows,
         submodules,
         deleted_submodules,
         renamed_submodules,
