@@ -327,31 +327,44 @@ fn collect_initial_tracked_rows<'a>(
                 h_idx,
             } = extract_modes_and_oids(&entry);
             let score = rename_similarity(repo, h_head, h_idx);
-            if score >= 50 {
-                rows.push(TrackedRow::Entry(entry));
-            } else if let Some((old, new)) = rename_sides(&entry) {
-                rows.push(TrackedRow::SyntheticOrdinary(SyntheticOrdinary {
-                    x: 'D',
-                    y: '.',
-                    m_head,
-                    m_idx: 0,
-                    m_work: 0,
-                    h_head,
-                    h_idx: git2::Oid::ZERO_SHA1,
-                    path: old.path,
-                }));
-                rows.push(TrackedRow::SyntheticOrdinary(SyntheticOrdinary {
-                    x: 'A',
-                    y: '.',
-                    m_head: 0,
-                    m_idx,
-                    m_work,
-                    h_head: git2::Oid::ZERO_SHA1,
-                    h_idx,
-                    path: new.path,
-                }));
-            } else {
-                rows.push(TrackedRow::Entry(entry));
+            match rename_sides(&entry) {
+                // Kept rename: carry the score we already computed so the v2
+                // writer doesn't recompute it. `SyntheticRename` renders the
+                // same `2` line a libgit2 rename entry would.
+                Some((old, new)) if score >= 50 => {
+                    rows.push(TrackedRow::SyntheticRename(SyntheticRename {
+                        y: regular_xy(st).1,
+                        old,
+                        new,
+                        score,
+                    }));
+                }
+                // Below git's 50% threshold: split into add + delete.
+                Some((old, new)) => {
+                    rows.push(TrackedRow::SyntheticOrdinary(SyntheticOrdinary {
+                        x: 'D',
+                        y: '.',
+                        m_head,
+                        m_idx: 0,
+                        m_work: 0,
+                        h_head,
+                        h_idx: git2::Oid::ZERO_SHA1,
+                        path: old.path,
+                    }));
+                    rows.push(TrackedRow::SyntheticOrdinary(SyntheticOrdinary {
+                        x: 'A',
+                        y: '.',
+                        m_head: 0,
+                        m_idx,
+                        m_work,
+                        h_head: git2::Oid::ZERO_SHA1,
+                        h_idx,
+                        path: new.path,
+                    }));
+                }
+                // No delta paths (e.g. non-UTF-8 with no bytes): fall back to the
+                // entry-based writer, which recomputes the score for display.
+                None => rows.push(TrackedRow::Entry(entry)),
             }
         } else if st == git2::Status::INDEX_NEW {
             if let Some(side) = added_side(&entry) {
