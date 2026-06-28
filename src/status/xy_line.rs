@@ -94,6 +94,8 @@ pub(super) fn display_xy_lines(
         st != git2::Status::CURRENT
             && st != git2::Status::WT_NEW
             && !st.contains(git2::Status::IGNORED)
+            && (entries.phantom_deletes.is_empty()
+                || !entries.phantom_deletes.contains(entry.path_bytes()))
     });
     let mut submods: Vec<SubRow<'_>> = Vec::with_capacity(
         entries.submodules.len()

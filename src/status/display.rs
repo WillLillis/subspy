@@ -249,6 +249,7 @@ fn print_staged_changes(
 /// and dirty-submodule entries. Returns `true` if anything was printed.
 fn print_unstaged_changes(
     non_submod: &Statuses<'_>,
+    phantom_deletes: &FxHashSet<Vec<u8>>,
     submodule_statuses: &[(String, StatusSummary)],
     rm_in_workdir: bool,
     rel: &Relativizer<'_>,
@@ -266,6 +267,7 @@ fn print_unstaged_changes(
     let files = non_submod.iter().filter(|e| {
         let st = e.status();
         !st.contains(git2::Status::CONFLICTED)
+            && (phantom_deletes.is_empty() || !phantom_deletes.contains(e.path_bytes()))
             && st.intersects(
                 git2::Status::WT_MODIFIED
                     | git2::Status::WT_DELETED
@@ -515,6 +517,7 @@ pub fn display_status(
         deleted_submodules,
         renamed_submodules,
         conflicted_paths,
+        phantom_deletes,
         // Long format renders an unmerged submodule via `print_unmerged_paths`
         // and relies on it already being excluded from `submodules`; the folded
         // `S<c><m><u>` status is a porcelain-v2-only concern.
@@ -549,12 +552,12 @@ pub fn display_status(
 
     print_header(repo, out, ahead_behind)?;
 
-    let rm_in_workdir = non_submod
+    let rm_in_workdir = non_submod.iter().any(|e| {
+        e.status().contains(git2::Status::WT_DELETED)
+            && (phantom_deletes.is_empty() || !phantom_deletes.contains(e.path_bytes()))
+    }) || submodules
         .iter()
-        .any(|e| e.status().contains(git2::Status::WT_DELETED))
-        || submodules
-            .iter()
-            .any(|(_, st)| st.contains(StatusSummary::DELETED_WORKDIR));
+        .any(|(_, st)| st.contains(StatusSummary::DELETED_WORKDIR));
 
     let changes_in_index = print_staged_changes(
         non_submod,
@@ -566,8 +569,14 @@ pub fn display_status(
         out,
     )?;
     let has_conflicts = print_unmerged_paths(repo, rel, out)?;
-    let changed_in_workdir =
-        print_unstaged_changes(non_submod, submodules, rm_in_workdir, rel, out)?;
+    let changed_in_workdir = print_unstaged_changes(
+        non_submod,
+        phantom_deletes,
+        submodules,
+        rm_in_workdir,
+        rel,
+        out,
+    )?;
     let has_untracked = print_untracked_files(non_submod, conflicted_paths, rel, out)?;
     print_ignored_files(non_submod, rel, out)?;
 
