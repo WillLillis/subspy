@@ -71,6 +71,20 @@ pub fn setup_renamed_staged(root: &Path) {
         .mv("file.txt", "renamed.txt");
 }
 
+/// A staged move whose content changed enough to score below git's 50% rename
+/// threshold (~41%: one shared line of two). git reports it as a separate
+/// add + delete, not a rename; subspy must reconcile libgit2's classification
+/// to match across every output format.
+pub fn setup_below_git_rename_threshold_staged(root: &Path) {
+    Repo::init(root)
+        .write("old.txt", "line-00\n")
+        .add_all()
+        .commit("initial")
+        .write("new.txt", "line-00\nadded-00\n")
+        .rm_file("old.txt")
+        .add_all();
+}
+
 pub fn setup_renamed_staged_in_subdir(root: &Path) {
     Repo::init(root)
         .write(

@@ -72,6 +72,13 @@ const CASES: &[Case] = &[
         },
         branch: false,
     },
+    // Sub-threshold staged move: git (and subspy) report it as add + delete,
+    // not a rename. Guards the v1/short synthetic-row rendering.
+    Case {
+        name: "rename_below_threshold_staged",
+        setup: Setup::Plain(setup_below_git_rename_threshold_staged),
+        branch: false,
+    },
     // Plain `mv` + edit, unstaged: ` D file.txt` + `?? renamed.txt`, never a
     // worktree rename (guards the `renames_index_to_workdir` fix).
     Case {

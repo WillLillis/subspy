@@ -64,6 +64,12 @@ const CASES: &[Case] = &[
             subdir: "sub",
         },
     },
+    // Sub-threshold staged move: git (and subspy) report "new file:" + "deleted:",
+    // not "renamed:". Guards the long-format synthetic-row rendering.
+    Case {
+        name: "rename_below_threshold_staged",
+        setup: Setup::Plain(setup_below_git_rename_threshold_staged),
+    },
     // Plain `mv` + edit, unstaged: `deleted: file.txt` + untracked `renamed.txt`,
     // never `renamed:` (guards the `renames_index_to_workdir` fix).
     Case {

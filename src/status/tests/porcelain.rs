@@ -22,7 +22,8 @@ use crate::{
 };
 
 use super::fixtures::{
-    setup_clean, setup_deleted_staged, setup_deleted_workdir, setup_modified_workdir,
+    setup_below_git_rename_threshold_staged, setup_clean, setup_deleted_staged,
+    setup_deleted_workdir, setup_modified_workdir,
     setup_moved_modified_staged, setup_moved_modified_unstaged, setup_renamed_staged,
     setup_staged_modified, setup_staged_new, setup_submodule_gitlink_conflict,
     setup_submodule_gitlink_conflict_dirty, setup_untracked, setup_untracked_in_dir,
@@ -74,16 +75,6 @@ fn setup_mixed(root: &Path) {
         .write("file.txt", "modified\n")
         .write("untracked.txt", "u\n")
         .write("hidden.log", "ignored\n");
-}
-
-fn setup_below_git_rename_threshold_staged(root: &Path) {
-    Repo::init(root)
-        .write("old.txt", "line-00\n")
-        .add_all()
-        .commit("initial")
-        .write("new.txt", "line-00\nadded-00\n")
-        .rm_file("old.txt")
-        .add_all();
 }
 
 fn setup_git_rename_long_record_staged(root: &Path) {
