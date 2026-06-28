@@ -202,11 +202,6 @@ subspy status  0.00s user 0.00s system 94% cpu 0.004 total
 need to increase the system limit (e.g. `sudo sysctl fs.inotify.max_user_watches=<value>`).
 - On Windows, AF_UNIX sockets are used for IPC, which requires Windows 10 version 1809 (October 2018 Update) or Windows
 Server 2019 or later.
-- `subspy status --porcelain=v2` always reports a rename's similarity score as `R100`. This is exact for a plain
-`git mv` (the common case), but a staged rename combined with an edit has a lower true score (git might show `R86`).
-Git's similarity algorithm is GPLv2 (incompatible with subspy's MIT license), and the score libgit2 computes uses a different
-algorithm that does not match git's. Only the porcelain v2 score field is affected; `-s`/`--short` and `--porcelain=v1`
-print only `R`, and the long format omits the score entirely.
 
 ### Future Improvements
 

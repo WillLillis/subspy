@@ -24,7 +24,7 @@ use super::{
     line_terminator,
     quote::QuoteMode,
     relativize::Relativizer,
-    unborn_branch_name, upstream_status,
+    rename_score, unborn_branch_name, upstream_status,
 };
 
 /// Per-call rendering constants shared by every `write_*` helper:
@@ -138,7 +138,7 @@ pub fn display_porcelain_v2(
                     &render_opts,
                 )
             } else if st.intersects(git2::Status::INDEX_RENAMED | git2::Status::WT_RENAMED) {
-                write_renamed(&entry, out, &render_opts)
+                write_renamed(repo, &entry, out, &render_opts)
             } else {
                 write_ordinary(&entry, out, &render_opts)
             }
@@ -404,13 +404,10 @@ fn write_ordinary(
 /// Writes a rename entry as a porcelain v2 `2` line:
 /// `2 XY <sub> <modes> <oids> R<score> NEW<sep>OLD`. The separator
 /// between paths is TAB (`\t`) without `-z` and NUL (`\0`) with `-z`,
-/// per `git-status(1)`. The similarity is always reported as `R100`:
-/// exact for a pure rename (the common case), but git's real score for a
-/// rename+edit can't be reproduced. git's algorithm is GPLv2, and the
-/// score libgit2 computes uses a different algorithm that diverges (e.g.
-/// `R95` where git emits `R93`); git2 0.21 doesn't expose it regardless.
-/// See the README "Limitations" section.
+/// per `git-status(1)`. The similarity is computed locally with the
+/// clean-room scorer in [`rename_score`].
 fn write_renamed(
+    repo: &Repository,
     entry: &git2::StatusEntry<'_>,
     out: &mut impl Write,
     render_opts: &RenderOpts<'_>,
@@ -439,9 +436,10 @@ fn write_renamed(
         h_head,
         h_idx,
     } = extract_modes_and_oids(entry);
+    let score = rename_similarity(repo, h_head, h_idx);
     write!(
         out,
-        "2 {x}{y} N... {m_head:06o} {m_idx:06o} {m_work:06o} {h_head} {h_idx} R100 ",
+        "2 {x}{y} N... {m_head:06o} {m_idx:06o} {m_work:06o} {h_head} {h_idx} R{score} ",
     )?;
     render_opts.rel.write_quoted(
         out,
@@ -462,6 +460,21 @@ fn write_renamed(
         render_opts.quote_mode,
     )?;
     out.write_all(line_terminator(render_opts.null_terminate).as_bytes())
+}
+
+fn rename_similarity(repo: &Repository, old_oid: git2::Oid, new_oid: git2::Oid) -> u8 {
+    if old_oid == new_oid {
+        return 100;
+    }
+
+    let Ok(old_blob) = repo.find_blob(old_oid) else {
+        return 100;
+    };
+    let Ok(new_blob) = repo.find_blob(new_oid) else {
+        return 100;
+    };
+
+    rename_score::score(old_blob.content(), new_blob.content())
 }
 
 /// Writes an unmerged entry as a porcelain v2 `u` line:

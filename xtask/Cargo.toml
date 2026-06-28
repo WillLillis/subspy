@@ -12,4 +12,6 @@ git2.workspace = true
 log.workspace = true
 rand = "0.9"
 subspy = { path = ".." }
+tempfile.workspace = true
 testutil = { path = "../testutil" }
+thiserror.workspace = true
