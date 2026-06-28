@@ -79,6 +79,13 @@ const CASES: &[Case] = &[
         setup: Setup::Plain(setup_below_git_rename_threshold_staged),
         branch: false,
     },
+    // Same sub-threshold move, new file modified again in the worktree: the
+    // split add side must keep the worktree status (`AM new.txt`, not `A `).
+    Case {
+        name: "rename_below_threshold_staged_wt_modified",
+        setup: Setup::Plain(setup_below_git_rename_threshold_staged_wt_modified),
+        branch: false,
+    },
     // Plain `mv` + edit, unstaged: ` D file.txt` + `?? renamed.txt`, never a
     // worktree rename (guards the `renames_index_to_workdir` fix).
     Case {

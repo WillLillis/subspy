@@ -85,6 +85,22 @@ pub fn setup_below_git_rename_threshold_staged(root: &Path) {
         .add_all();
 }
 
+/// The same sub-threshold staged move, but the new file is then modified again
+/// in the worktree. libgit2 keeps this as one `INDEX_RENAMED | WT_MODIFIED`
+/// entry; subspy splits it (clean-room score below 50) into `D old` + `A new`,
+/// and the added side must keep the worktree-modified `y` so git's `AM new.txt`
+/// is reproduced (not `A` with a blank worktree column).
+pub fn setup_below_git_rename_threshold_staged_wt_modified(root: &Path) {
+    Repo::init(root)
+        .write("old.txt", "line-00\n")
+        .add_all()
+        .commit("initial")
+        .write("new.txt", "line-00\nadded-00\n")
+        .rm_file("old.txt")
+        .add_all()
+        .write("new.txt", "line-00\nadded-00\nworktree-edit\n");
+}
+
 pub fn setup_renamed_staged_in_subdir(root: &Path) {
     Repo::init(root)
         .write(
