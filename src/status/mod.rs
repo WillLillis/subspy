@@ -14,6 +14,7 @@
 //! - [`relativize`]: cwd-relative path rewriting at write time
 //! - [`quote`]: C-style path quoting (the `core.quotePath` semantics)
 
+mod case_collision;
 mod conflict;
 mod display;
 mod header;
@@ -178,6 +179,12 @@ pub struct StatusEntries<'a> {
     /// render as a separate dirty row; porcelain v2 uses this for the `u`-line
     /// `S<c><m><u>` field. Empty when the index has no gitlink conflicts.
     pub conflicted_submodules: &'a FxHashMap<String, StatusSummary>,
+    /// Byte paths of libgit2's case-collision phantom deletes: a spurious
+    /// `WT_DELETED` for a path whose case-variant occupies the one working file
+    /// on a `core.ignorecase` filesystem. Renderers skip these; git collapses
+    /// the collision to a single line. Empty on case-sensitive filesystems and
+    /// whenever nothing is worktree-deleted. See [`case_collision`].
+    pub phantom_deletes: &'a FxHashSet<Vec<u8>>,
 }
 
 /// Builds the `git2::StatusOptions` used by production and tests. Kept
@@ -273,6 +280,24 @@ pub fn assemble_status<R>(
         FxHashSet::default()
     };
 
+    // libgit2 emits a phantom `WT_DELETED` for a case-collision (two index
+    // entries differing only in case, collapsed to one working file) that git
+    // reports as a single line. Only possible with `core.ignorecase`, and only
+    // when something is worktree-deleted, so the common case short-circuits on
+    // the cheap scan before ever reading config.
+    let phantom_deletes = if non_submod
+        .iter()
+        .any(|e| e.status().contains(git2::Status::WT_DELETED))
+        && repo
+            .config()
+            .and_then(|c| c.get_bool("core.ignorecase"))
+            .unwrap_or(false)
+    {
+        case_collision::phantom_deletes(&non_submod)
+    } else {
+        FxHashSet::default()
+    };
+
     let submod_changes = if opts.ignore_submodules == IgnoreSubmodules::All {
         SubmoduleChanges::default()
     } else {
@@ -323,6 +348,7 @@ pub fn assemble_status<R>(
         renamed_submodules: &submod_changes.renamed,
         conflicted_paths: &conflicted_paths,
         conflicted_submodules: &conflicted_submodules,
+        phantom_deletes: &phantom_deletes,
     };
 
     render(&repo, &entries, &rel)
