@@ -175,7 +175,11 @@ fn collect_initial_tracked_rows<'a>(
                         score,
                     }));
                 }
-                // Below git's 50% threshold: split into add + delete.
+                // Below git's 50% threshold: split into add + delete. The
+                // deleted (old) path has no worktree presence, so its `y` is
+                // always `.`; the added (new) path keeps the entry's worktree
+                // status (e.g. a rename whose new file was further modified in
+                // the worktree renders `AM`, matching git).
                 Some((old, new)) => {
                     rows.push(TrackedRow::SyntheticOrdinary(SyntheticOrdinary {
                         x: 'D',
@@ -189,7 +193,7 @@ fn collect_initial_tracked_rows<'a>(
                     }));
                     rows.push(TrackedRow::SyntheticOrdinary(SyntheticOrdinary {
                         x: 'A',
-                        y: '.',
+                        y: worktree_y(st),
                         m_head: 0,
                         m_idx,
                         m_work,

@@ -70,6 +70,12 @@ const CASES: &[Case] = &[
         name: "rename_below_threshold_staged",
         setup: Setup::Plain(setup_below_git_rename_threshold_staged),
     },
+    // Same sub-threshold move, new file modified again in the worktree: the long
+    // format lists "new file:" + "deleted:" staged and "modified:" unstaged.
+    Case {
+        name: "rename_below_threshold_staged_wt_modified",
+        setup: Setup::Plain(setup_below_git_rename_threshold_staged_wt_modified),
+    },
     // Plain `mv` + edit, unstaged: `deleted: file.txt` + untracked `renamed.txt`,
     // never `renamed:` (guards the `renames_index_to_workdir` fix).
     Case {
