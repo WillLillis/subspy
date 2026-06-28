@@ -22,8 +22,12 @@ use crate::{StatusSummary, paint::paint_into};
 use super::{
     Divergence, PorcelainOpts, StatusEntries, StatusResult, UpstreamStatus,
     conflict::{ConflictEntry, build_conflict_map, path_within_any},
-    interleave::{Row, SubRow, for_each_merged},
+    interleave::SubRow,
     line_terminator,
+    porcelain_v2::{
+        SyntheticOrdinary, SyntheticRename, TrackedOrSubRow, TrackedRow, for_each_tracked_row,
+        normalized_tracked_rows,
+    },
     quote::QuoteMode,
     relativize::Relativizer,
     unborn_branch_name, upstream_status,
@@ -87,16 +91,10 @@ pub(super) fn display_xy_lines(
     let conflicts = build_conflict_map(&index)?;
 
     // git emits tracked changes (including submodules) in one path-sorted stream,
-    // then untracked, then ignored. libgit2 excludes submodules from `non_submod`,
-    // so interleave the submodule rows among the tracked file entries by path.
-    let tracked = entries.non_submod.iter().filter(|entry| {
-        let st = entry.status();
-        st != git2::Status::CURRENT
-            && st != git2::Status::WT_NEW
-            && !st.contains(git2::Status::IGNORED)
-            && (entries.phantom_deletes.is_empty()
-                || !entries.phantom_deletes.contains(entry.path_bytes()))
-    });
+    // then untracked, then ignored. The tracked file rows come pre-classified
+    // (renames reconciled to match git) from `normalized_tracked_rows`; libgit2
+    // excludes submodules from `non_submod`, so interleave the submodule rows by path.
+    let tracked = normalized_tracked_rows(repo, entries);
     let mut submods: Vec<SubRow<'_>> = Vec::with_capacity(
         entries.submodules.len()
             + entries.deleted_submodules.len()
@@ -116,8 +114,8 @@ pub(super) fn display_xy_lines(
     );
     submods.extend(entries.renamed_submodules.iter().map(SubRow::Renamed));
 
-    for_each_merged(tracked, submods, |row| match row {
-        Row::File(entry) => {
+    for_each_tracked_row(tracked, submods, |row| match row {
+        TrackedOrSubRow::File(TrackedRow::Entry(entry)) => {
             let st = entry.status();
             if st.contains(git2::Status::CONFLICTED) {
                 write_conflict(&entry, &conflicts, out, rel, null_terminate, style)
@@ -127,16 +125,22 @@ pub(super) fn display_xy_lines(
                 write_ordinary(&entry, out, rel, null_terminate, style)
             }
         }
-        Row::Sub(SubRow::Modified(path, st)) => {
+        TrackedOrSubRow::File(TrackedRow::SyntheticOrdinary(row)) => {
+            write_synthetic_ordinary_line(&row, out, rel, null_terminate, style)
+        }
+        TrackedOrSubRow::File(TrackedRow::SyntheticRename(row)) => {
+            write_synthetic_rename_line(&row, out, rel, null_terminate, style)
+        }
+        TrackedOrSubRow::Sub(SubRow::Modified(path, st)) => {
             write_submodule(path, st, out, rel, null_terminate, style)
         }
-        Row::Sub(SubRow::Deleted(path)) => {
+        TrackedOrSubRow::Sub(SubRow::Deleted(path)) => {
             // `D ` (staged deletion of a submodule). X gets the staged color, Y is blank.
             let x = XyChar::new('D', style.palette.map(|p| p.updated));
             let y = XyChar::new(' ', None);
             write_xy_path(out, x, y, path.as_bytes(), rel, null_terminate, style)
         }
-        Row::Sub(SubRow::Renamed(rename)) => {
+        TrackedOrSubRow::Sub(SubRow::Renamed(rename)) => {
             // `R ` (staged submodule rename). With -z the new and old paths
             // are NUL-separated; otherwise rendered as `old -> new`.
             let x = XyChar::new('R', style.palette.map(|p| p.updated));
@@ -387,6 +391,55 @@ fn write_renamed(
         write_path(out, old_path, rel, false, style)?;
         out.write_all(b" -> ")?;
         write_path(out, new_path, rel, false, style)?;
+        out.write_all(b"\n")
+    }
+}
+
+/// Maps porcelain-v2's `.` unmodified slot (used by the shared synthetic rows)
+/// to the v1/short blank.
+const fn blank_dot(ch: char) -> char {
+    if ch == '.' { ' ' } else { ch }
+}
+
+/// Writes a synthetic ordinary row (a split or unpaired staged add/delete from
+/// rename reconciliation) as `XY PATH`.
+fn write_synthetic_ordinary_line(
+    row: &SyntheticOrdinary,
+    out: &mut impl Write,
+    rel: &Relativizer<'_>,
+    null_terminate: bool,
+    style: &LineStyle,
+) -> io::Result<()> {
+    let (x_color, y_color) = ordinary_colors(style);
+    let x = XyChar::new(row.x, x_color);
+    let y = XyChar::new(blank_dot(row.y), y_color);
+    write_xy_path(out, x, y, &row.path, rel, null_terminate, style)
+}
+
+/// Writes a synthetic rename (a subspy-paired staged add/delete) the same way as
+/// a libgit2 rename: `XY <old> -> <new>` (or `XY <new>\0<old>\0` under `-z`).
+fn write_synthetic_rename_line(
+    row: &SyntheticRename,
+    out: &mut impl Write,
+    rel: &Relativizer<'_>,
+    null_terminate: bool,
+    style: &LineStyle,
+) -> io::Result<()> {
+    let (x_color, y_color) = ordinary_colors(style);
+    write_xy_prefix(
+        out,
+        XyChar::new('R', x_color),
+        XyChar::new(blank_dot(row.y), y_color),
+    )?;
+    if null_terminate {
+        out.write_all(&row.new.path)?;
+        out.write_all(b"\0")?;
+        out.write_all(&row.old.path)?;
+        out.write_all(b"\0")
+    } else {
+        write_path(out, &row.old.path, rel, false, style)?;
+        out.write_all(b" -> ")?;
+        write_path(out, &row.new.path, rel, false, style)?;
         out.write_all(b"\n")
     }
 }
