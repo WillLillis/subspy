@@ -8,31 +8,67 @@
 
 use rustc_hash::FxHashMap;
 
+/// A blob's span multiset, computed once and reused across every candidate
+/// pairing. Mirrors git's signature cache: each file is hashed a single time,
+/// not once per comparison, which is what keeps O(adds x deletes) rename
+/// detection affordable.
+pub(super) struct Signature {
+    /// Span bytes -> occurrence count.
+    spans: FxHashMap<Box<[u8]>, u32>,
+    size: usize,
+}
+
+impl Signature {
+    pub(super) fn new(bytes: &[u8]) -> Self {
+        let mut spans: FxHashMap<Box<[u8]>, u32> = FxHashMap::default();
+        for span in Spans::new(bytes) {
+            *spans.entry(Box::from(span)).or_default() += 1;
+        }
+        Self {
+            spans,
+            size: bytes.len(),
+        }
+    }
+
+    pub(super) const fn size(&self) -> usize {
+        self.size
+    }
+}
+
+/// Similarity score (0-100) between two precomputed signatures: the floor of
+/// copied bytes (spans common to both, weighted by length) as a percent of the
+/// larger blob. Non-destructive, so a `Signature` is reusable across pairings.
 #[must_use]
-pub(super) fn score(old: &[u8], new: &[u8]) -> u8 {
-    let max_size = old.len().max(new.len());
+pub(super) fn score_sigs(old: &Signature, new: &Signature) -> u8 {
+    let max_size = old.size.max(new.size);
     if max_size == 0 {
         return 100;
     }
 
-    let mut new_counts: FxHashMap<&[u8], usize> = FxHashMap::default();
-    for span in Spans::new(new) {
-        *new_counts.entry(span).or_default() += 1;
-    }
-
-    let mut copied = 0usize;
-    for span in Spans::new(old) {
-        if let Some(count) = new_counts.get_mut(span)
-            && *count > 0
-        {
-            copied += span.len();
-            *count -= 1;
+    // copied = sum over shared spans of min(old_count, new_count) * span_len.
+    // Iterate the smaller map and look up in the larger.
+    let (small, large) = if old.spans.len() <= new.spans.len() {
+        (&old.spans, &new.spans)
+    } else {
+        (&new.spans, &old.spans)
+    };
+    let mut copied = 0u64;
+    for (span, &count) in small {
+        if let Some(&other) = large.get(span) {
+            copied += u64::from(count.min(other)) * span.len() as u64;
         }
     }
 
     // u64 math: on a 32-bit target `copied * 100` would overflow `usize`
     // for a renamed file larger than ~42 MB.
-    ((copied as u64 * 100) / max_size as u64).min(100) as u8
+    ((copied * 100) / max_size as u64).min(100) as u8
+}
+
+/// Convenience for a single comparison (no signature reuse): builds both
+/// signatures, then scores.
+#[must_use]
+pub(super) fn score(old: &[u8], new: &[u8]) -> u8 {
+    score_sigs(&Signature::new(old), &Signature::new(new))
 }
 
 struct Spans<'a> {

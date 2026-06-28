@@ -76,6 +76,26 @@ fn setup_mixed(root: &Path) {
         .write("hidden.log", "ignored\n");
 }
 
+fn setup_below_git_rename_threshold_staged(root: &Path) {
+    Repo::init(root)
+        .write("old.txt", "line-00\n")
+        .add_all()
+        .commit("initial")
+        .write("new.txt", "line-00\nadded-00\n")
+        .rm_file("old.txt")
+        .add_all();
+}
+
+fn setup_git_rename_long_record_staged(root: &Path) {
+    Repo::init(root)
+        .write("old.txt", &"a".repeat(65))
+        .add_all()
+        .commit("initial")
+        .write("new.txt", &format!("{}b", "a".repeat(65)))
+        .rm_file("old.txt")
+        .add_all();
+}
+
 fn setup_detached_head(root: &Path) {
     setup_clean(root);
     Repo::new(root)
@@ -587,6 +607,52 @@ fn v2_z() {
     );
     for c in CASES {
         run_case(c, opts);
+    }
+}
+
+#[test]
+fn v2_rename_classification_matches_git_score_threshold() {
+    let opts = opts_with(
+        PorcelainVersion::V2,
+        false,
+        false,
+        UntrackedFiles::No,
+        IgnoredFiles::No,
+    );
+    for case in [
+        plain(
+            "below git rename threshold (staged)",
+            setup_below_git_rename_threshold_staged,
+        ),
+        plain(
+            "git rename long record (staged)",
+            setup_git_rename_long_record_staged,
+        ),
+    ] {
+        run_case(&case, opts);
+    }
+}
+
+#[test]
+fn v2_z_rename_classification_matches_git_score_threshold() {
+    let opts = opts_with(
+        PorcelainVersion::V2,
+        true,
+        false,
+        UntrackedFiles::No,
+        IgnoredFiles::No,
+    );
+    for case in [
+        plain(
+            "below git rename threshold (staged)",
+            setup_below_git_rename_threshold_staged,
+        ),
+        plain(
+            "git rename long record (staged)",
+            setup_git_rename_long_record_staged,
+        ),
+    ] {
+        run_case(&case, opts);
     }
 }
 

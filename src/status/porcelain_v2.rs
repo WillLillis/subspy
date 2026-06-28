@@ -11,6 +11,7 @@ use rustc_hash::FxHashMap;
 
 use std::{
     borrow::Cow,
+    cmp::Reverse,
     io::{self, Write},
     path::Path,
 };
@@ -20,7 +21,7 @@ use crate::StatusSummary;
 use super::{
     Divergence, PorcelainOpts, StatusEntries, StatusResult, UpstreamStatus,
     conflict::{ConflictEntry, build_conflict_map, path_within_any},
-    interleave::{Row, SubRow, for_each_merged},
+    interleave::SubRow,
     line_terminator,
     quote::QuoteMode,
     relativize::Relativizer,
@@ -35,6 +36,47 @@ struct RenderOpts<'a> {
     rel: &'a Relativizer<'a>,
     null_terminate: bool,
     quote_mode: QuoteMode,
+}
+
+enum TrackedRow<'a> {
+    Entry(git2::StatusEntry<'a>),
+    SyntheticOrdinary(SyntheticOrdinary),
+    SyntheticRename(SyntheticRename),
+}
+
+impl TrackedRow<'_> {
+    fn key(&self) -> &[u8] {
+        match self {
+            Self::Entry(entry) => entry_sort_key(entry),
+            Self::SyntheticOrdinary(row) => &row.path,
+            Self::SyntheticRename(row) => &row.new.path,
+        }
+    }
+}
+
+struct SyntheticOrdinary {
+    x: char,
+    y: char,
+    m_head: u32,
+    m_idx: u32,
+    m_work: u32,
+    h_head: git2::Oid,
+    h_idx: git2::Oid,
+    path: Vec<u8>,
+}
+
+#[derive(Clone)]
+struct RenameSide {
+    path: Vec<u8>,
+    mode: u32,
+    oid: git2::Oid,
+}
+
+struct SyntheticRename {
+    y: char,
+    old: RenameSide,
+    new: RenameSide,
+    score: u8,
 }
 
 /// Renders the full porcelain v2 output to `out`: optional `# branch.*`
@@ -91,15 +133,8 @@ pub fn display_porcelain_v2(
     // git emits tracked changes (ordinary/renamed/conflicted, including
     // submodules) in one path-sorted stream, then untracked, then ignored.
     // libgit2 excludes submodules from `non_submod`, so interleave the
-    // submodule rows among the tracked file entries by path.
-    let tracked = entries.non_submod.iter().filter(|entry| {
-        let st = entry.status();
-        st != git2::Status::CURRENT
-            && st != git2::Status::WT_NEW
-            && !st.contains(git2::Status::IGNORED)
-            && (entries.phantom_deletes.is_empty()
-                || !entries.phantom_deletes.contains(entry.path_bytes()))
-    });
+    // submodule rows among the tracked file rows by path.
+    let tracked = normalized_tracked_rows(repo, entries);
     let mut submods: Vec<SubRow<'_>> = Vec::new();
     submods.extend(
         entries
@@ -128,30 +163,34 @@ pub fn display_porcelain_v2(
             .map_or(git2::Oid::ZERO_SHA1, |e| e.id)
     };
 
-    for_each_merged(tracked, submods, |row| match row {
-        Row::File(entry) => {
-            let st = entry.status();
-            if st.contains(git2::Status::CONFLICTED) {
-                write_conflict(
-                    &entry,
-                    &conflicts,
-                    entries.conflicted_submodules,
-                    out,
-                    &render_opts,
-                )
-            } else if st.intersects(git2::Status::INDEX_RENAMED | git2::Status::WT_RENAMED) {
-                write_renamed(repo, &entry, out, &render_opts)
-            } else {
-                write_ordinary(&entry, out, &render_opts)
+    for_each_tracked_row(tracked, submods, |row| match row {
+        TrackedOrSubRow::File(row) => match row {
+            TrackedRow::Entry(entry) => {
+                let st = entry.status();
+                if st.contains(git2::Status::CONFLICTED) {
+                    write_conflict(
+                        &entry,
+                        &conflicts,
+                        entries.conflicted_submodules,
+                        out,
+                        &render_opts,
+                    )
+                } else if st.intersects(git2::Status::INDEX_RENAMED | git2::Status::WT_RENAMED) {
+                    write_renamed(repo, &entry, out, &render_opts)
+                } else {
+                    write_ordinary(&entry, out, &render_opts)
+                }
             }
-        }
-        Row::Sub(SubRow::Modified(path, st)) => {
+            TrackedRow::SyntheticOrdinary(row) => write_synthetic_ordinary(&row, out, &render_opts),
+            TrackedRow::SyntheticRename(row) => write_synthetic_rename(&row, out, &render_opts),
+        },
+        TrackedOrSubRow::Sub(SubRow::Modified(path, st)) => {
             write_submodule(path, st, head_oid(path), index_oid(path), out, &render_opts)
         }
-        Row::Sub(SubRow::Deleted(path)) => {
+        TrackedOrSubRow::Sub(SubRow::Deleted(path)) => {
             write_deleted_submodule(path, head_oid(path), out, &render_opts)
         }
-        Row::Sub(SubRow::Renamed(rename)) => write_renamed_submodule(
+        TrackedOrSubRow::Sub(SubRow::Renamed(rename)) => write_renamed_submodule(
             rename,
             head_oid(&rename.old),
             index_oid(&rename.new),
@@ -196,6 +235,312 @@ pub fn display_porcelain_v2(
     }
 
     Ok(())
+}
+
+enum TrackedOrSubRow<'a> {
+    File(TrackedRow<'a>),
+    Sub(SubRow<'a>),
+}
+
+const fn sub_row_key<'a>(row: &'a SubRow<'_>) -> &'a [u8] {
+    match row {
+        SubRow::Modified(path, _) | SubRow::Deleted(path) => path.as_bytes(),
+        SubRow::Renamed(rename) => rename.new.as_bytes(),
+    }
+}
+
+fn for_each_tracked_row<'a, E>(
+    mut files: Vec<TrackedRow<'a>>,
+    mut submods: Vec<SubRow<'a>>,
+    mut on_row: impl FnMut(TrackedOrSubRow<'a>) -> Result<(), E>,
+) -> Result<(), E> {
+    files.sort_by(|x, y| x.key().cmp(y.key()));
+    submods.sort_by(|x, y| sub_row_key(x).cmp(sub_row_key(y)));
+
+    let mut files = files.into_iter();
+    let mut submods = submods.into_iter();
+    let mut pending_file = files.next();
+    let mut pending_sub = submods.next();
+    loop {
+        match (pending_file.take(), pending_sub.take()) {
+            (Some(file), Some(sub)) => {
+                if sub_row_key(&sub) < file.key() {
+                    on_row(TrackedOrSubRow::Sub(sub))?;
+                    pending_file = Some(file);
+                    pending_sub = submods.next();
+                } else {
+                    on_row(TrackedOrSubRow::File(file))?;
+                    pending_sub = Some(sub);
+                    pending_file = files.next();
+                }
+            }
+            (Some(file), None) => {
+                on_row(TrackedOrSubRow::File(file))?;
+                pending_file = files.next();
+            }
+            (None, Some(sub)) => {
+                on_row(TrackedOrSubRow::Sub(sub))?;
+                pending_sub = submods.next();
+            }
+            (None, None) => break,
+        }
+    }
+    Ok(())
+}
+
+fn normalized_tracked_rows<'a>(
+    repo: &Repository,
+    entries: &StatusEntries<'a>,
+) -> Vec<TrackedRow<'a>> {
+    let mut rows = Vec::new();
+    let mut additions = Vec::new();
+    let mut deletions = Vec::new();
+    collect_initial_tracked_rows(repo, entries, &mut rows, &mut additions, &mut deletions);
+    pair_unmatched_adds_and_deletes(repo, &mut rows, additions, deletions);
+    rows
+}
+
+fn collect_initial_tracked_rows<'a>(
+    repo: &Repository,
+    entries: &StatusEntries<'a>,
+    rows: &mut Vec<TrackedRow<'a>>,
+    additions: &mut Vec<RenameSide>,
+    deletions: &mut Vec<RenameSide>,
+) {
+    for entry in entries.non_submod.iter().filter(|entry| {
+        let st = entry.status();
+        st != git2::Status::CURRENT
+            && st != git2::Status::WT_NEW
+            && !st.contains(git2::Status::IGNORED)
+            && (entries.phantom_deletes.is_empty()
+                || !entries.phantom_deletes.contains(entry.path_bytes()))
+    }) {
+        let st = entry.status();
+        if st.contains(git2::Status::CONFLICTED) {
+            rows.push(TrackedRow::Entry(entry));
+        } else if st.intersects(git2::Status::INDEX_RENAMED | git2::Status::WT_RENAMED) {
+            let EntryModesAndOids {
+                m_head,
+                m_idx,
+                m_work,
+                h_head,
+                h_idx,
+            } = extract_modes_and_oids(&entry);
+            let score = rename_similarity(repo, h_head, h_idx);
+            if score >= 50 {
+                rows.push(TrackedRow::Entry(entry));
+            } else if let Some((old, new)) = rename_sides(&entry) {
+                rows.push(TrackedRow::SyntheticOrdinary(SyntheticOrdinary {
+                    x: 'D',
+                    y: '.',
+                    m_head,
+                    m_idx: 0,
+                    m_work: 0,
+                    h_head,
+                    h_idx: git2::Oid::ZERO_SHA1,
+                    path: old.path,
+                }));
+                rows.push(TrackedRow::SyntheticOrdinary(SyntheticOrdinary {
+                    x: 'A',
+                    y: '.',
+                    m_head: 0,
+                    m_idx,
+                    m_work,
+                    h_head: git2::Oid::ZERO_SHA1,
+                    h_idx,
+                    path: new.path,
+                }));
+            } else {
+                rows.push(TrackedRow::Entry(entry));
+            }
+        } else if st == git2::Status::INDEX_NEW {
+            if let Some(side) = added_side(&entry) {
+                additions.push(side);
+            } else {
+                rows.push(TrackedRow::Entry(entry));
+            }
+        } else if st == git2::Status::INDEX_DELETED {
+            if let Some(side) = deleted_side(&entry) {
+                deletions.push(side);
+            } else {
+                rows.push(TrackedRow::Entry(entry));
+            }
+        } else {
+            rows.push(TrackedRow::Entry(entry));
+        }
+    }
+}
+
+/// git's default when `diff.renameLimit` is unset or non-positive.
+const DEFAULT_RENAME_LIMIT: usize = 1000;
+
+fn rename_limit(repo: &Repository) -> usize {
+    repo.config()
+        .and_then(|c| c.get_i32("diff.renameLimit"))
+        .ok()
+        .and_then(|v| usize::try_from(v).ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(DEFAULT_RENAME_LIMIT)
+}
+
+/// git's `estimate_similarity` size gate: a pair cannot reach the 50% rename
+/// threshold once the size delta exceeds half the larger blob, so skip such a
+/// pair before reading or hashing any content.
+fn size_allows_rename(a: usize, b: usize) -> bool {
+    let max = a.max(b) as u64;
+    let delta = a.abs_diff(b) as u64;
+    // max * (100 - threshold) >= delta * 100, with threshold = 50.
+    max * 50 >= delta * 100
+}
+
+fn blob_signature(repo: &Repository, oid: git2::Oid) -> Option<rename_score::Signature> {
+    let blob = repo.find_blob(oid).ok()?;
+    Some(rename_score::Signature::new(blob.content()))
+}
+
+fn push_synthetic_delete(rows: &mut Vec<TrackedRow<'_>>, old: RenameSide) {
+    rows.push(TrackedRow::SyntheticOrdinary(SyntheticOrdinary {
+        x: 'D',
+        y: '.',
+        m_head: old.mode,
+        m_idx: 0,
+        m_work: 0,
+        h_head: old.oid,
+        h_idx: git2::Oid::ZERO_SHA1,
+        path: old.path,
+    }));
+}
+
+fn push_synthetic_add(rows: &mut Vec<TrackedRow<'_>>, new: RenameSide) {
+    rows.push(TrackedRow::SyntheticOrdinary(SyntheticOrdinary {
+        x: 'A',
+        y: '.',
+        m_head: 0,
+        m_idx: new.mode,
+        m_work: new.mode,
+        h_head: git2::Oid::ZERO_SHA1,
+        h_idx: new.oid,
+        path: new.path,
+    }));
+}
+
+fn pair_unmatched_adds_and_deletes(
+    repo: &Repository,
+    rows: &mut Vec<TrackedRow<'_>>,
+    additions: Vec<RenameSide>,
+    deletions: Vec<RenameSide>,
+) {
+    // Nothing to pair, or too many candidates: git skips inexact rename
+    // detection once `adds * deletes` exceeds `diff.renameLimit` squared and
+    // reports plain add/delete. Match that instead of doing the cross-product.
+    if additions.is_empty()
+        || deletions.is_empty()
+        || additions.len().saturating_mul(deletions.len()) > rename_limit(repo).saturating_pow(2)
+    {
+        for old in deletions {
+            push_synthetic_delete(rows, old);
+        }
+        for new in additions {
+            push_synthetic_add(rows, new);
+        }
+        return;
+    }
+
+    // Hash each candidate blob once (git's signature cache), then compare from
+    // the cache with a size short-circuit, so the cross-product stays cheap.
+    let del_sigs: Vec<Option<rename_score::Signature>> = deletions
+        .iter()
+        .map(|old| blob_signature(repo, old.oid))
+        .collect();
+    let add_sigs: Vec<Option<rename_score::Signature>> = additions
+        .iter()
+        .map(|new| blob_signature(repo, new.oid))
+        .collect();
+
+    let mut pairs = Vec::new();
+    for (delete_idx, del_sig) in del_sigs.iter().enumerate() {
+        let Some(del_sig) = del_sig else { continue };
+        for (add_idx, add_sig) in add_sigs.iter().enumerate() {
+            let Some(add_sig) = add_sig else { continue };
+            if !size_allows_rename(del_sig.size(), add_sig.size()) {
+                continue;
+            }
+            let score = rename_score::score_sigs(del_sig, add_sig);
+            if score >= 50 {
+                pairs.push((score, delete_idx, add_idx));
+            }
+        }
+    }
+
+    let mut used_additions = vec![false; additions.len()];
+    let mut used_deletions = vec![false; deletions.len()];
+    pairs.sort_by_key(|pair| Reverse(pair.0));
+    for (score, delete_idx, add_idx) in pairs {
+        if used_deletions[delete_idx] || used_additions[add_idx] {
+            continue;
+        }
+        used_deletions[delete_idx] = true;
+        used_additions[add_idx] = true;
+        rows.push(TrackedRow::SyntheticRename(SyntheticRename {
+            y: '.',
+            old: deletions[delete_idx].clone(),
+            new: additions[add_idx].clone(),
+            score,
+        }));
+    }
+
+    for (idx, old) in deletions.into_iter().enumerate() {
+        if !used_deletions[idx] {
+            push_synthetic_delete(rows, old);
+        }
+    }
+    for (idx, new) in additions.into_iter().enumerate() {
+        if !used_additions[idx] {
+            push_synthetic_add(rows, new);
+        }
+    }
+}
+
+fn entry_sort_key<'e>(entry: &'e git2::StatusEntry<'_>) -> &'e [u8] {
+    entry
+        .head_to_index()
+        .or_else(|| entry.index_to_workdir())
+        .and_then(|delta| delta.new_file().path_bytes())
+        .unwrap_or_else(|| entry.path_bytes())
+}
+
+fn added_side(entry: &git2::StatusEntry<'_>) -> Option<RenameSide> {
+    let delta = entry.head_to_index()?;
+    Some(RenameSide {
+        path: delta.new_file().path_bytes()?.to_vec(),
+        mode: u32::from(delta.new_file().mode()),
+        oid: delta.new_file().id(),
+    })
+}
+
+fn deleted_side(entry: &git2::StatusEntry<'_>) -> Option<RenameSide> {
+    let delta = entry.head_to_index()?;
+    Some(RenameSide {
+        path: delta.old_file().path_bytes()?.to_vec(),
+        mode: u32::from(delta.old_file().mode()),
+        oid: delta.old_file().id(),
+    })
+}
+
+fn rename_sides(entry: &git2::StatusEntry<'_>) -> Option<(RenameSide, RenameSide)> {
+    let delta = entry.head_to_index().or_else(|| entry.index_to_workdir())?;
+    Some((
+        RenameSide {
+            path: delta.old_file().path_bytes()?.to_vec(),
+            mode: u32::from(delta.old_file().mode()),
+            oid: delta.old_file().id(),
+        },
+        RenameSide {
+            path: delta.new_file().path_bytes()?.to_vec(),
+            mode: u32::from(delta.new_file().mode()),
+            oid: delta.new_file().id(),
+        },
+    ))
 }
 
 /// Writes the `# branch.*` header lines for porcelain v2 output.
@@ -403,6 +748,34 @@ fn write_ordinary(
     out.write_all(line_terminator(render_opts.null_terminate).as_bytes())
 }
 
+fn write_synthetic_ordinary(
+    row: &SyntheticOrdinary,
+    out: &mut impl Write,
+    render_opts: &RenderOpts<'_>,
+) -> Result<(), io::Error> {
+    let SyntheticOrdinary {
+        x,
+        y,
+        m_head,
+        m_idx,
+        m_work,
+        h_head,
+        h_idx,
+        path,
+    } = row;
+    write!(
+        out,
+        "1 {x}{y} N... {m_head:06o} {m_idx:06o} {m_work:06o} {h_head} {h_idx} ",
+    )?;
+    render_opts.rel.write_quoted(
+        out,
+        path,
+        render_opts.null_terminate,
+        render_opts.quote_mode,
+    )?;
+    out.write_all(line_terminator(render_opts.null_terminate).as_bytes())
+}
+
 /// Writes a rename entry as a porcelain v2 `2` line:
 /// `2 XY <sub> <modes> <oids> R<score> NEW<sep>OLD`. The separator
 /// between paths is TAB (`\t`) without `-z` and NUL (`\0`) with `-z`,
@@ -458,6 +831,42 @@ fn write_renamed(
     render_opts.rel.write_quoted(
         out,
         old_path,
+        render_opts.null_terminate,
+        render_opts.quote_mode,
+    )?;
+    out.write_all(line_terminator(render_opts.null_terminate).as_bytes())
+}
+
+fn write_synthetic_rename(
+    row: &SyntheticRename,
+    out: &mut impl Write,
+    render_opts: &RenderOpts<'_>,
+) -> Result<(), io::Error> {
+    write!(
+        out,
+        "2 R{y} N... {m_head:06o} {m_idx:06o} {m_work:06o} {h_head} {h_idx} R{score} ",
+        y = row.y,
+        m_head = row.old.mode,
+        m_idx = row.new.mode,
+        m_work = row.new.mode,
+        h_head = row.old.oid,
+        h_idx = row.new.oid,
+        score = row.score,
+    )?;
+    render_opts.rel.write_quoted(
+        out,
+        &row.new.path,
+        render_opts.null_terminate,
+        render_opts.quote_mode,
+    )?;
+    out.write_all(if render_opts.null_terminate {
+        b"\0"
+    } else {
+        b"\t"
+    })?;
+    render_opts.rel.write_quoted(
+        out,
+        &row.old.path,
         render_opts.null_terminate,
         render_opts.quote_mode,
     )?;

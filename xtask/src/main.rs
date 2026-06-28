@@ -1252,10 +1252,11 @@ fn run_rename_score_corpus(args: &RenameScoreCorpusArgs) -> Result<(), XtaskErro
     for (idx, case) in cases.iter().enumerate() {
         let repo_owner = CaseRepo::new(keep_root.as_deref(), idx, &case.name)?;
         let observation = observe_git_rename_score(repo_owner.path(), case, args.threshold)?;
-        let repo_path = keep_root
-            .is_some()
-            .then(|| repo_owner.path().display().to_string())
-            .unwrap_or_default();
+        let repo_path = if keep_root.is_some() {
+            repo_owner.path().display().to_string()
+        } else {
+            Default::default()
+        };
         writeln!(
             out,
             "{},{},{},{},{},{},{},{},{},{}",
