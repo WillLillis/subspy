@@ -38,7 +38,7 @@ struct RenderOpts<'a> {
     quote_mode: QuoteMode,
 }
 
-enum TrackedRow<'a> {
+pub(super) enum TrackedRow<'a> {
     Entry(git2::StatusEntry<'a>),
     SyntheticOrdinary(SyntheticOrdinary),
     SyntheticRename(SyntheticRename),
@@ -54,29 +54,29 @@ impl TrackedRow<'_> {
     }
 }
 
-struct SyntheticOrdinary {
-    x: char,
-    y: char,
-    m_head: u32,
-    m_idx: u32,
-    m_work: u32,
-    h_head: git2::Oid,
-    h_idx: git2::Oid,
-    path: Vec<u8>,
+pub(super) struct SyntheticOrdinary {
+    pub x: char,
+    pub y: char,
+    pub m_head: u32,
+    pub m_idx: u32,
+    pub m_work: u32,
+    pub h_head: git2::Oid,
+    pub h_idx: git2::Oid,
+    pub path: Vec<u8>,
 }
 
 #[derive(Clone)]
-struct RenameSide {
-    path: Vec<u8>,
-    mode: u32,
-    oid: git2::Oid,
+pub(super) struct RenameSide {
+    pub path: Vec<u8>,
+    pub mode: u32,
+    pub oid: git2::Oid,
 }
 
-struct SyntheticRename {
-    y: char,
-    old: RenameSide,
-    new: RenameSide,
-    score: u8,
+pub(super) struct SyntheticRename {
+    pub y: char,
+    pub old: RenameSide,
+    pub new: RenameSide,
+    pub score: u8,
 }
 
 /// Renders the full porcelain v2 output to `out`: optional `# branch.*`
@@ -237,7 +237,7 @@ pub fn display_porcelain_v2(
     Ok(())
 }
 
-enum TrackedOrSubRow<'a> {
+pub(super) enum TrackedOrSubRow<'a> {
     File(TrackedRow<'a>),
     Sub(SubRow<'a>),
 }
@@ -249,7 +249,7 @@ const fn sub_row_key<'a>(row: &'a SubRow<'_>) -> &'a [u8] {
     }
 }
 
-fn for_each_tracked_row<'a, E>(
+pub(super) fn for_each_tracked_row<'a, E>(
     mut files: Vec<TrackedRow<'a>>,
     mut submods: Vec<SubRow<'a>>,
     mut on_row: impl FnMut(TrackedOrSubRow<'a>) -> Result<(), E>,
@@ -288,7 +288,7 @@ fn for_each_tracked_row<'a, E>(
     Ok(())
 }
 
-fn normalized_tracked_rows<'a>(
+pub(super) fn normalized_tracked_rows<'a>(
     repo: &Repository,
     entries: &StatusEntries<'a>,
 ) -> Vec<TrackedRow<'a>> {
