@@ -22,6 +22,7 @@ mod porcelain_v1;
 mod porcelain_v2;
 mod quote;
 mod relativize;
+mod rename_score;
 mod short;
 mod submodule;
 mod xy_line;
