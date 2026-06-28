@@ -26,6 +26,7 @@ mod relativize;
 mod rename_score;
 mod short;
 mod submodule;
+mod tracked;
 mod xy_line;
 
 #[cfg(test)]
