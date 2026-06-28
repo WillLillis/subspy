@@ -24,12 +24,12 @@ use super::{
     conflict::{ConflictEntry, build_conflict_map, path_within_any},
     interleave::SubRow,
     line_terminator,
-    porcelain_v2::{
+    quote::QuoteMode,
+    relativize::Relativizer,
+    tracked::{
         SyntheticOrdinary, SyntheticRename, TrackedOrSubRow, TrackedRow, for_each_tracked_row,
         normalized_tracked_rows,
     },
-    quote::QuoteMode,
-    relativize::Relativizer,
     unborn_branch_name, upstream_status,
 };
 

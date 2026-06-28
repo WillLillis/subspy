@@ -23,12 +23,11 @@ use crate::{
 
 use super::fixtures::{
     setup_below_git_rename_threshold_staged, setup_clean, setup_deleted_staged,
-    setup_deleted_workdir, setup_modified_workdir,
-    setup_moved_modified_staged, setup_moved_modified_unstaged, setup_renamed_staged,
-    setup_staged_modified, setup_staged_new, setup_submodule_gitlink_conflict,
-    setup_submodule_gitlink_conflict_dirty, setup_untracked, setup_untracked_in_dir,
-    setup_upstream_ahead, setup_upstream_behind, setup_upstream_diverged, setup_upstream_gone,
-    setup_upstream_up_to_date,
+    setup_deleted_workdir, setup_modified_workdir, setup_moved_modified_staged,
+    setup_moved_modified_unstaged, setup_renamed_staged, setup_staged_modified, setup_staged_new,
+    setup_submodule_gitlink_conflict, setup_submodule_gitlink_conflict_dirty, setup_untracked,
+    setup_untracked_in_dir, setup_upstream_ahead, setup_upstream_behind, setup_upstream_diverged,
+    setup_upstream_gone, setup_upstream_up_to_date,
 };
 
 fn setup_empty_repo(root: &Path) {

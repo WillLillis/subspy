@@ -16,8 +16,8 @@ use super::{
     conflict::path_within_any,
     header::{print_header, print_unmerged_paths},
     interleave::{Row, SubRow, for_each_merged},
-    porcelain_v2::{TrackedOrSubRow, TrackedRow, for_each_tracked_row, normalized_tracked_rows},
     relativize::Relativizer,
+    tracked::{TrackedOrSubRow, TrackedRow, for_each_tracked_row, normalized_tracked_rows},
 };
 
 const STAGED_HEADER: &str = "Changes to be committed:
