@@ -74,6 +74,9 @@ each with its own renderer. Long stands alone; short + porcelain v1 share an
 | `relativize.rs` | `Relativizer`: streams repo-root-relative paths as cwd-relative, applies C-style quoting via `QuoteMode` |
 | `quote.rs` | Path quoting primitives (`needs_quoting`, `write_escaped`, `QuoteMode::{Standard, QuoteSpace}`) consumed by `Relativizer::write_quoted` |
 | `conflict.rs` | Shared conflict-index parsing for XY-line and porcelain v2 entries |
+| `tracked.rs` | Rename reconciliation: `normalized_tracked_rows` builds the shared `TrackedRow` stream (exact + inexact rename pairing in git's order) that all four renderers consume |
+| `rename_score.rs` | Clean-room git rename-similarity scoring (`Signature`, `Similarity`, `score_sigs`, inverted-index `overlapping_pairs`) |
+| `case_collision.rs` | Drops libgit2's case-collision phantom deletes on `core.ignorecase` filesystems |
 | `submodule.rs` | `compute_local_statuses`, `deleted_submodule_paths`, `apply_ignore_submodules` |
 | `tests/` | Output-format verification tests (see [Snapshot tests](#snapshot-tests)). Submodules: `long.rs` + `short.rs` (snapshot-based), `porcelain.rs` (live `git status` oracle), `fixtures.rs` (shared `setup_*` helpers) |
 | `snapshots/{long,short}/*.snapshot` | Committed snapshot fixtures for the long- and short-format tests |
@@ -139,6 +142,50 @@ bump `IPC_VERSION` and update the expected bytes.
 **`StatusSummary` bitflags over structured types.** Submodule status is a compact `u8`
 bitmask (`MODIFIED_CONTENT`, `UNTRACKED_CONTENT`, `NEW_COMMITS`, `STAGED`, `STAGED_NEW`,
 `LOCK_FAILURE`). This keeps IPC payloads small and comparisons cheap.
+
+**Rename detection runs in SubSpy, not libgit2.** `build_status_options` leaves
+libgit2's rename detection off; `status/tracked.rs` reconciles renames from the raw
+add/delete set instead. libgit2's detection is both slower (it has no separate
+exact-rename pass, so even a pure `git mv` goes through an O(targets x sources)
+similarity loop) and divergent from git: it ignores git's global `diff.renameLimit`
+skip and breaks ties differently. We mirror git's pipeline:
+
+- Exact (same-blob) renames first, with no rename limit, paired in git's
+  parallel-sorted order (sorted sources zipped with sorted destinations).
+- Then inexact (similarity) renames, only if the post-exact matrix fits under
+  `diff.renameLimit`. Over the limit, edited renames collapse to add+delete (git
+  skips inexact detection wholesale there but still finds exact renames).
+  Candidates are ordered as git's `diffcore-rename` does (`assign_renames`): higher
+  similarity, then matching basename (git's name-score tie-break), then lowest
+  source path, then lowest destination path.
+
+**The similarity score is clean-room.** `status/rename_score.rs` reproduces git's
+score - `floor(copied_bytes * 100 / max(len))`, with "copied" counted over content
+spans (newline-terminated records, long records split every 64 bytes) - inferred
+purely from black-box `git diff --raw -M` observations (`cargo xtask
+rename-score-corpus`), never from git's or libgit2's GPLv2 source. `Similarity` keeps
+the exact `copied/max` ratio rather than the rounded percent, so candidates order the
+way git's finer internal score does (two pairs that both display `R83` tie only at
+exactly-equal ratios); the percent is display-only.
+
+**Inexact pairing uses an inverted index.** git walks the full deletions x additions
+matrix; `rename_score::overlapping_pairs` indexes the additions by span and only
+scores pairs that actually share content (most pairs share none). On 1000 inexact
+renames this is ~8ms versus git's ~51ms.
+
+**Equal-similarity ties can differ from git (accepted).** When several candidates
+score identically (byte-identical near-duplicate files), git's pick is driven by its
+internal `rename_src` array order through an unstable `qsort`: undocumented, dependent
+on unrelated diff entries, and not portable across git's platforms. SubSpy uses a
+deterministic basename-then-path tie-break, so it can differ from a given git build on
+these adversarial cases (~3% of a near-duplicate ambiguity fuzz). Both pairings are
+valid renames; matching git here would mean reimplementing glibc's `qsort`, so we
+don't.
+
+**Unstaged (index->workdir) rename detection stays off.** git never pairs a tracked
+deletion with an untracked file - a plain `mv` shows `D old` + `?? new`, not a rename.
+libgit2's `renames_index_to_workdir` would pair them and emit a worktree rename whose
+old path lands in a record with no valid `XY ` prefix, which consumers can't parse.
 
 **`parse_gitmodules` over `repo.submodules()`.** Calling `repo.submodules()` takes ~100ms
 due to libgit2 overhead. Our custom `.gitmodules` parser takes ~600us when measured on
