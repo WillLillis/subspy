@@ -101,6 +101,106 @@ pub fn setup_below_git_rename_threshold_staged_wt_modified(root: &Path) {
         .write("new.txt", "line-00\nadded-00\nworktree-edit\n");
 }
 
+/// A staged rename whose new file is then deleted from the worktree. git keeps
+/// the staged rename and flags the worktree delete: `2 RD ... <m_work=0>` in
+/// porcelain v2. Guards that the synthetic rename carries the new side's
+/// worktree status and a zero workdir mode (libgit2 reports the index mode).
+pub fn setup_renamed_then_worktree_deleted(root: &Path) {
+    Repo::init(root)
+        .write("old.txt", "line one\nline two\nline three\nline four\n")
+        .add_all()
+        .commit("initial")
+        .mv("old.txt", "new.txt")
+        .rm_file("new.txt");
+}
+
+/// `count` newline-terminated lines, the last one optionally edited so the file
+/// is an inexact (but >50% similar) match of its `edited = false` sibling.
+fn rename_body(tag: usize, count: usize, edited: bool) -> String {
+    let mut lines: Vec<String> = (0..count - 1).map(|n| format!("f{tag}-line{n}")).collect();
+    lines.push(if edited {
+        format!("f{tag}-edited")
+    } else {
+        format!("f{tag}-line{}", count - 1)
+    });
+    let mut body = lines.join("\n");
+    body.push('\n');
+    body
+}
+
+/// More inexact (edited) staged renames than `diff.renameLimit` allows. git
+/// skips similarity rename detection wholesale once over the limit and reports
+/// plain add + delete; libgit2 still pairs them, so subspy must honor the limit
+/// and split. (renameLimit=2 with 3 edited renames: 3*3 > 2*2.)
+pub fn setup_rename_limit_exceeded_staged(root: &Path) {
+    let repo = Repo::init(root);
+    repo.run_git(&["config", "diff.renameLimit", "2"]);
+    for i in 0..3 {
+        repo.write(&format!("old_{i}.txt"), &rename_body(i, 8, false));
+    }
+    repo.add_all().commit("initial");
+    for i in 0..3 {
+        repo.rm_file(&format!("old_{i}.txt"))
+            .write(&format!("new_{i}.txt"), &rename_body(i, 8, true));
+    }
+    repo.add_all();
+}
+
+/// Exact and inexact staged renames together, over `diff.renameLimit`. git
+/// matches exact (same-blob) renames in a separate, unlimited pass, so they
+/// survive and do not count toward the limit; the inexact ones collapse to
+/// add + delete. (renameLimit=2: 2 exact + 3 inexact, the 3 inexact exceed it.)
+pub fn setup_rename_limit_mixed_staged(root: &Path) {
+    let repo = Repo::init(root);
+    repo.run_git(&["config", "diff.renameLimit", "2"]);
+    for i in 0..2 {
+        repo.write(&format!("exact_old_{i}.txt"), &rename_body(i, 8, false));
+    }
+    for i in 0..3 {
+        repo.write(
+            &format!("inexact_old_{i}.txt"),
+            &rename_body(100 + i, 8, false),
+        );
+    }
+    repo.add_all().commit("initial");
+    for i in 0..2 {
+        repo.mv(&format!("exact_old_{i}.txt"), &format!("exact_new_{i}.txt"));
+    }
+    for i in 0..3 {
+        repo.rm_file(&format!("inexact_old_{i}.txt")).write(
+            &format!("inexact_new_{i}.txt"),
+            &rename_body(100 + i, 8, true),
+        );
+    }
+    repo.add_all();
+}
+
+/// A `diff.renameLimit` low enough, with enough candidates, that libgit2 (which
+/// applies the limit to all of its rename detection at once) abandons it
+/// entirely and reports even an exact rename as add + delete. git still finds
+/// the exact (same-blob) rename in its unlimited exact pass, so subspy must
+/// recover it from the raw add/delete pool while the inexact renames stay split.
+pub fn setup_rename_limit_drops_exact_staged(root: &Path) {
+    let repo = Repo::init(root);
+    repo.run_git(&["config", "diff.renameLimit", "1"]);
+    repo.write("exact_old.txt", &rename_body(0, 8, false));
+    for i in 0..3 {
+        repo.write(
+            &format!("inexact_old_{i}.txt"),
+            &rename_body(100 + i, 8, false),
+        );
+    }
+    repo.add_all().commit("initial");
+    repo.mv("exact_old.txt", "exact_new.txt");
+    for i in 0..3 {
+        repo.rm_file(&format!("inexact_old_{i}.txt")).write(
+            &format!("inexact_new_{i}.txt"),
+            &rename_body(100 + i, 8, true),
+        );
+    }
+    repo.add_all();
+}
+
 pub fn setup_renamed_staged_in_subdir(root: &Path) {
     Repo::init(root)
         .write(
