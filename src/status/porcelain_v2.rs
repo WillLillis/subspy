@@ -457,10 +457,10 @@ fn write_synthetic_rename(
     write!(
         out,
         "2 R{y} N... {m_head:06o} {m_idx:06o} {m_work:06o} {h_head} {h_idx} R{score} ",
-        y = row.y,
+        y = row.new.wt_y,
         m_head = row.old.mode,
         m_idx = row.new.mode,
-        m_work = row.new.mode,
+        m_work = row.new.wt_mode,
         h_head = row.old.oid,
         h_idx = row.new.oid,
         score = row.score,

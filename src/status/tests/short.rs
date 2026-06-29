@@ -64,6 +64,12 @@ const CASES: &[Case] = &[
         setup: Setup::Plain(setup_renamed_staged),
         branch: false,
     },
+    // Staged rename, new file then deleted from the worktree: `RD old -> new`.
+    Case {
+        name: "renamed_then_worktree_deleted",
+        setup: Setup::Plain(setup_renamed_then_worktree_deleted),
+        branch: false,
+    },
     Case {
         name: "renamed_staged_in_subdir",
         setup: Setup::Subdir {

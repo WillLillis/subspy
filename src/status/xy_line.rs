@@ -429,7 +429,7 @@ fn write_synthetic_rename_line(
     write_xy_prefix(
         out,
         XyChar::new('R', x_color),
-        XyChar::new(blank_dot(row.y), y_color),
+        XyChar::new(blank_dot(row.new.wt_y), y_color),
     )?;
     if null_terminate {
         out.write_all(&row.new.path)?;

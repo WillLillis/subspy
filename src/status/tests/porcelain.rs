@@ -24,7 +24,9 @@ use crate::{
 use super::fixtures::{
     setup_below_git_rename_threshold_staged, setup_below_git_rename_threshold_staged_wt_modified,
     setup_clean, setup_deleted_staged, setup_deleted_workdir, setup_modified_workdir,
-    setup_moved_modified_staged, setup_moved_modified_unstaged, setup_renamed_staged,
+    setup_moved_modified_staged, setup_moved_modified_unstaged,
+    setup_rename_limit_drops_exact_staged, setup_rename_limit_exceeded_staged,
+    setup_rename_limit_mixed_staged, setup_renamed_staged, setup_renamed_then_worktree_deleted,
     setup_staged_modified, setup_staged_new, setup_submodule_gitlink_conflict,
     setup_submodule_gitlink_conflict_dirty, setup_untracked, setup_untracked_in_dir,
     setup_upstream_ahead, setup_upstream_behind, setup_upstream_diverged, setup_upstream_gone,
@@ -190,6 +192,12 @@ const CASES: &[Case] = &[
     plain("deleted (staged)", setup_deleted_staged),
     plain("deleted (workdir)", setup_deleted_workdir),
     plain("renamed (staged)", setup_renamed_staged),
+    // Staged rename, then the new file deleted from the worktree: `2 RD` with a
+    // zero workdir mode. Guards the synthetic rename's worktree status + m_work.
+    plain(
+        "renamed then worktree-deleted",
+        setup_renamed_then_worktree_deleted,
+    ),
     // Plain `mv` + edit, unstaged: must be `D old` + `?? new` like git, never a
     // spurious worktree rename. Guards the `renames_index_to_workdir` fix.
     plain("moved+modified (unstaged)", setup_moved_modified_unstaged),
@@ -652,6 +660,39 @@ fn v2_z_rename_classification_matches_git_score_threshold() {
         ),
     ] {
         run_case(&case, opts);
+    }
+}
+
+/// git honors `diff.renameLimit`: past it, similarity rename detection is
+/// skipped wholesale (edited renames become add + delete) while exact (same
+/// blob) renames still survive. libgit2 ignores the limit, so subspy reconciles
+/// to match. Live oracle in both v2 and v2 -z (the fixtures set the config).
+#[test]
+fn v2_rename_limit_matches_git() {
+    for null_terminate in [false, true] {
+        let opts = opts_with(
+            PorcelainVersion::V2,
+            null_terminate,
+            false,
+            UntrackedFiles::No,
+            IgnoredFiles::No,
+        );
+        for case in [
+            plain(
+                "inexact renames over rename limit",
+                setup_rename_limit_exceeded_staged,
+            ),
+            plain(
+                "exact + inexact renames over rename limit",
+                setup_rename_limit_mixed_staged,
+            ),
+            plain(
+                "rename limit makes libgit2 drop an exact rename",
+                setup_rename_limit_drops_exact_staged,
+            ),
+        ] {
+            run_case(&case, opts);
+        }
     }
 }
 

@@ -57,6 +57,12 @@ const CASES: &[Case] = &[
         name: "renamed_staged",
         setup: Setup::Plain(setup_renamed_staged),
     },
+    // Staged rename, new file then deleted from the worktree: long format shows
+    // "renamed:" staged and "deleted:" unstaged.
+    Case {
+        name: "renamed_then_worktree_deleted",
+        setup: Setup::Plain(setup_renamed_then_worktree_deleted),
+    },
     Case {
         name: "renamed_staged_in_subdir",
         setup: Setup::Subdir {
