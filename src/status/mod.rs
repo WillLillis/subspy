@@ -218,18 +218,17 @@ pub fn build_status_options(opts: OutputOpts, repo_kind: RepoKind) -> git2::Stat
     // Skip the redundant stat-cache refresh pass.
     st_opts.no_refresh(true);
 
-    // Match git's default `diff.renames=true` so a staged move renders as
-    // `R old -> new` rather than separate `D old`/`A new` entries. This is
-    // intentionally only the HEAD->index (staged) diff. git does NOT detect
-    // renames in the index->workdir (unstaged) diff: an untracked file is never
-    // a rename target there, so a plain `mv` of a tracked file shows as `D old`
-    // + `?? new`. libgit2's `renames_index_to_workdir` would instead pair the
-    // deletion with the untracked file and emit a spurious worktree rename,
-    // diverging from git and producing porcelain a consumer can't parse (the
-    // old path lands in a record with no valid `XY ` prefix), so it stays off.
-    st_opts
-        .renames_head_to_index(true)
-        .renames_from_rewrites(true);
+    // libgit2's own rename detection stays OFF; `tracked.rs` reconciles renames
+    // from the raw add/delete set instead. libgit2 has no separate exact-rename
+    // pass (it runs an O(targets x sources) similarity loop even for pure moves)
+    // and ignores git's global `diff.renameLimit` skip, so leaning on it is both
+    // slower than git on the common case and divergent over the limit. Our
+    // pairing mirrors git's phases: exact (same-blob) renames by OID in O(n),
+    // then inexact similarity only under the limit, with git's basename + path
+    // tie-break. Worktree (index->workdir) renames must stay off regardless: git
+    // never pairs a tracked deletion with an untracked file (a plain `mv` shows
+    // `D old` + `?? new`), but libgit2's `renames_index_to_workdir` would, on a
+    // record with no valid `XY ` prefix.
 
     // Exclude submodules from the plain status walk whenever subspy supplies
     // their statuses itself -- the watch server at the top level, or local

@@ -12,8 +12,6 @@
 use git2::Repository;
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use std::cmp::Reverse;
-
 use super::{StatusEntries, interleave::SubRow, rename_score};
 
 /// git's default when `diff.renameLimit` is unset or non-positive.
@@ -140,14 +138,19 @@ pub(super) fn for_each_tracked_row<'a, E>(
 /// Reconciles `entries`' tracked changes into a stream of [`TrackedRow`]s whose
 /// rename classification matches git.
 ///
-/// Mirrors git's phases. libgit2 instead applies `diff.renameLimit` to all of
-/// its rename detection at once (dropping even exact renames once over it) and
-/// keeps renames git splits near the 50% threshold, so we redo the
-/// classification on top of its output:
-///   1. collect raw changes (keeping exact libgit2 renames, pooling the rest);
+/// Renames are reconciled from the raw add/delete set (libgit2's own rename
+/// detection is off; see [`super::build_status_options`]), mirroring git's
+/// phases:
+///   1. collect raw changes (additions, deletions, everything else as entries);
 ///   2. pair exact (same-blob) renames with no limit, as git does;
 ///   3. only if the remaining inexact matrix fits under `diff.renameLimit`,
 ///      pair inexact renames by similarity.
+///
+/// What this cannot match: git breaks ties among equal-similarity candidates
+/// using its internal `rename_src` array order through an unstable `qsort`. That
+/// is undocumented, depends on unrelated diff entries, and is not portable
+/// across git's platforms, so a handful of adversarial near-duplicate cases (all
+/// pairings equally valid renames) may pick a different equal blob than git.
 pub(super) fn normalized_tracked_rows<'a>(
     repo: &Repository,
     entries: &StatusEntries<'a>,
@@ -155,50 +158,15 @@ pub(super) fn normalized_tracked_rows<'a>(
     let mut rows = Vec::new();
     let mut additions = Vec::new();
     let mut deletions = Vec::new();
-    let mut inexact_renames = Vec::new();
-    collect_initial_tracked_rows(
-        entries,
-        &mut rows,
-        &mut additions,
-        &mut deletions,
-        &mut inexact_renames,
-    );
+    collect_initial_tracked_rows(entries, &mut rows, &mut additions, &mut deletions);
 
     // git's exact rename pass runs with no rename limit, so do it first and
     // unconditionally; it also shrinks the inexact matrix the limit applies to.
     pair_exact_renames(&mut rows, &mut additions, &mut deletions);
 
-    // The rename limit bounds the *inexact* matrix: the remaining standalone
-    // candidates plus the renames libgit2 detected inexactly (each one source
-    // and one destination).
-    let sources = deletions.len() + inexact_renames.len();
-    let destinations = additions.len() + inexact_renames.len();
-    let over_limit = over_rename_limit(sources, destinations, rename_limit(repo));
-
-    // Resolve libgit2's inexact renames: over the limit git skips inexact
-    // detection (split to add + delete, and skip the score's blob reads); under
-    // it the clean-room score decides (a rename below 50% also splits).
-    for (old, new) in inexact_renames {
-        let score = if over_limit {
-            0
-        } else {
-            rename_similarity(repo, old.oid, new.oid)
-        };
-        if score >= 50 {
-            rows.push(TrackedRow::SyntheticRename(SyntheticRename {
-                old,
-                new,
-                score,
-            }));
-        } else {
-            push_synthetic_delete(&mut rows, old);
-            push_synthetic_add(&mut rows, new);
-        }
-    }
-
-    // Similarity-pair the remaining standalone candidates, unless git would have
-    // skipped inexact detection for this status.
-    if !over_limit {
+    // Similarity-pair the remaining candidates, unless git would skip inexact
+    // detection for this status (matrix over `diff.renameLimit`).
+    if !over_rename_limit(deletions.len(), additions.len(), rename_limit(repo)) {
         pair_inexact_renames(repo, &mut rows, &mut additions, &mut deletions);
     }
     for old in deletions {
@@ -233,7 +201,6 @@ fn collect_initial_tracked_rows<'a>(
     rows: &mut Vec<TrackedRow<'a>>,
     additions: &mut Vec<RenameSide>,
     deletions: &mut Vec<RenameSide>,
-    inexact_renames: &mut Vec<(RenameSide, RenameSide)>,
 ) {
     for entry in entries.non_submod.iter().filter(|entry| {
         is_tracked_change(entry.status(), entry.path_bytes(), entries.phantom_deletes)
@@ -241,23 +208,6 @@ fn collect_initial_tracked_rows<'a>(
         let st = entry.status();
         if st.contains(git2::Status::CONFLICTED) {
             rows.push(TrackedRow::Entry(entry));
-        } else if st.intersects(git2::Status::INDEX_RENAMED | git2::Status::WT_RENAMED) {
-            match rename_sides(&entry) {
-                // Exact (same-blob) rename: git always keeps it, so emit it now
-                // and keep it out of the limited inexact matrix.
-                Some((old, new)) if old.oid == new.oid => {
-                    rows.push(TrackedRow::SyntheticRename(SyntheticRename {
-                        old,
-                        new,
-                        score: 100,
-                    }));
-                }
-                // Inexact: defer the keep/split decision until the post-exact
-                // candidate count (and thus the rename limit) is known.
-                Some((old, new)) => inexact_renames.push((old, new)),
-                // No delta paths (rare): fall back to the entry-based writer.
-                None => rows.push(TrackedRow::Entry(entry)),
-            }
         } else if st.contains(git2::Status::INDEX_NEW) {
             // `.contains`, not `==`: a staged add whose new file was also
             // changed in the worktree (`INDEX_NEW | WT_MODIFIED`, etc.) is still
@@ -284,10 +234,9 @@ fn collect_initial_tracked_rows<'a>(
     }
 }
 
-/// git's exact rename pass (no rename limit): pair a standalone deletion with a
-/// standalone addition carrying the identical blob, emitting an `R100` rename
-/// and removing both from the candidate pools. libgit2 omits these whenever it
-/// is over its own rename limit, but git always finds them.
+/// git's exact rename pass (no rename limit): pair standalone deletions with
+/// standalone additions carrying the identical blob. libgit2 omits these
+/// whenever it is over its own rename limit, but git always finds them.
 fn pair_exact_renames(
     rows: &mut Vec<TrackedRow<'_>>,
     additions: &mut Vec<RenameSide>,
@@ -297,30 +246,25 @@ fn pair_exact_renames(
         return;
     }
     let mut adds_by_oid: FxHashMap<git2::Oid, Vec<usize>> = FxHashMap::default();
-    for (idx, add) in additions.iter().enumerate() {
-        adds_by_oid.entry(add.oid).or_default().push(idx);
+    for (add_idx, add) in additions.iter().enumerate() {
+        adds_by_oid.entry(add.oid).or_default().push(add_idx);
     }
-    let mut paired_add = vec![false; additions.len()];
-    let mut paired_del = vec![false; deletions.len()];
+    let mut pairs = Vec::new();
     for (delete_idx, del) in deletions.iter().enumerate() {
-        if let Some(add_idx) = adds_by_oid.get_mut(&del.oid).and_then(Vec::pop) {
-            paired_add[add_idx] = true;
-            paired_del[delete_idx] = true;
-            rows.push(TrackedRow::SyntheticRename(SyntheticRename {
-                old: del.clone(),
-                new: additions[add_idx].clone(),
-                score: 100,
-            }));
+        if let Some(add_indices) = adds_by_oid.get(&del.oid) {
+            for &add_idx in add_indices {
+                pairs.push((rename_score::Similarity::EXACT, delete_idx, add_idx));
+            }
         }
     }
-    retain_unpaired(additions, &paired_add);
-    retain_unpaired(deletions, &paired_del);
+    assign_renames(rows, additions, deletions, pairs);
 }
 
 /// git's inexact rename pass: similarity-pair the remaining standalone
-/// candidates. Each blob is hashed once (a signature cache) and compared with a
-/// size short-circuit, then pairs are taken greedily by descending score. Only
-/// called when the matrix fits under the rename limit.
+/// candidates. Each blob is hashed once (the signature cache), then an inverted
+/// index over the additions' spans finds the pairs that share content, skipping
+/// the zero-overlap majority of the matrix. Only called when the matrix fits
+/// under the rename limit.
 fn pair_inexact_renames(
     repo: &Repository,
     rows: &mut Vec<TrackedRow<'_>>,
@@ -340,25 +284,40 @@ fn pair_inexact_renames(
         .map(|new| blob_signature(repo, new.oid))
         .collect();
 
-    let mut pairs = Vec::new();
-    for (delete_idx, del_sig) in del_sigs.iter().enumerate() {
-        let Some(del_sig) = del_sig else { continue };
-        for (add_idx, add_sig) in add_sigs.iter().enumerate() {
-            let Some(add_sig) = add_sig else { continue };
-            if !size_allows_rename(del_sig.size(), add_sig.size()) {
-                continue;
-            }
-            let score = rename_score::score_sigs(del_sig, add_sig);
-            if score >= 50 {
-                pairs.push((score, delete_idx, add_idx));
-            }
-        }
-    }
+    let pairs: Vec<(rename_score::Similarity, usize, usize)> =
+        rename_score::overlapping_pairs(&del_sigs, &add_sigs)
+            .into_iter()
+            .filter(|(_, _, sim)| sim.percent() >= 50)
+            .map(|(delete_idx, add_idx, sim)| (sim, delete_idx, add_idx))
+            .collect();
+    assign_renames(rows, additions, deletions, pairs);
+}
+
+/// Greedily turns rename `pairs` (`(score, delete_idx, add_idx)`) into
+/// `SyntheticRename` rows, then drops the matched sides from the pools. Mirrors
+/// git's matrix sort + greedy walk: a candidate wins by higher score, then by
+/// matching basename (git's name-score tie-break), then by lowest source path,
+/// then lowest destination path. This ordering also yields git's parallel-sorted
+/// pairing for exact (same-blob) renames.
+fn assign_renames(
+    rows: &mut Vec<TrackedRow<'_>>,
+    additions: &mut Vec<RenameSide>,
+    deletions: &mut Vec<RenameSide>,
+    mut pairs: Vec<(rename_score::Similarity, usize, usize)>,
+) {
+    pairs.sort_by(|&(sim_a, del_a, add_a), &(sim_b, del_b, add_b)| {
+        let basename_a = basename(&deletions[del_a].path) == basename(&additions[add_a].path);
+        let basename_b = basename(&deletions[del_b].path) == basename(&additions[add_b].path);
+        sim_b
+            .cmp(&sim_a)
+            .then_with(|| basename_b.cmp(&basename_a))
+            .then_with(|| deletions[del_a].path.cmp(&deletions[del_b].path))
+            .then_with(|| additions[add_a].path.cmp(&additions[add_b].path))
+    });
 
     let mut paired_add = vec![false; additions.len()];
     let mut paired_del = vec![false; deletions.len()];
-    pairs.sort_by_key(|pair| Reverse(pair.0));
-    for (score, delete_idx, add_idx) in pairs {
+    for (sim, delete_idx, add_idx) in pairs {
         if paired_del[delete_idx] || paired_add[add_idx] {
             continue;
         }
@@ -367,12 +326,19 @@ fn pair_inexact_renames(
         rows.push(TrackedRow::SyntheticRename(SyntheticRename {
             old: deletions[delete_idx].clone(),
             new: additions[add_idx].clone(),
-            score,
+            score: sim.percent(),
         }));
     }
-
     retain_unpaired(additions, &paired_add);
     retain_unpaired(deletions, &paired_del);
+}
+
+/// The final path component (after the last `/`), for git's basename rename
+/// tie-break.
+fn basename(path: &[u8]) -> &[u8] {
+    path.iter()
+        .rposition(|&b| b == b'/')
+        .map_or(path, |slash| &path[slash + 1..])
 }
 
 /// Drops the entries of `sides` whose original index is marked `true` in
@@ -393,16 +359,6 @@ fn rename_limit(repo: &Repository) -> usize {
         .and_then(|v| usize::try_from(v).ok())
         .filter(|&v| v > 0)
         .unwrap_or(DEFAULT_RENAME_LIMIT)
-}
-
-/// git's `estimate_similarity` size gate: a pair cannot reach the 50% rename
-/// threshold once the size delta exceeds half the larger blob, so skip such a
-/// pair before reading or hashing any content.
-fn size_allows_rename(a: usize, b: usize) -> bool {
-    let max = a.max(b) as u64;
-    let delta = a.abs_diff(b) as u64;
-    // max * (100 - threshold) >= delta * 100, with threshold = 50.
-    max * 50 >= delta * 100
 }
 
 fn blob_signature(repo: &Repository, oid: git2::Oid) -> Option<rename_score::Signature> {
@@ -466,28 +422,6 @@ fn deleted_side(entry: &git2::StatusEntry<'_>) -> Option<RenameSide> {
         wt_y: '.',
         wt_mode: 0,
     })
-}
-
-fn rename_sides(entry: &git2::StatusEntry<'_>) -> Option<(RenameSide, RenameSide)> {
-    let delta = entry.head_to_index().or_else(|| entry.index_to_workdir())?;
-    let new_mode = u32::from(delta.new_file().mode());
-    Some((
-        RenameSide {
-            path: delta.old_file().path_bytes()?.to_vec(),
-            mode: u32::from(delta.old_file().mode()),
-            oid: delta.old_file().id(),
-            // The rename source path is gone from the worktree.
-            wt_y: '.',
-            wt_mode: 0,
-        },
-        RenameSide {
-            path: delta.new_file().path_bytes()?.to_vec(),
-            mode: new_mode,
-            oid: delta.new_file().id(),
-            wt_y: worktree_y(entry.status()),
-            wt_mode: workdir_mode(entry, new_mode),
-        },
-    ))
 }
 
 /// Workdir file mode (`m_work`) for an entry's index->workdir side: the new

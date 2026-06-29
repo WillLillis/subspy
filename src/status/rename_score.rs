@@ -6,23 +6,31 @@
 //! of the larger file. "Copied" bytes are counted by matching content spans:
 //! newline-terminated records, with very long records split every 64 bytes.
 
-use rustc_hash::FxHashMap;
+use std::hash::{Hash as _, Hasher as _};
+
+use rustc_hash::{FxHashMap, FxHasher};
 
 /// A blob's span multiset, computed once and reused across every candidate
-/// pairing. Mirrors git's signature cache: each file is hashed a single time,
-/// not once per comparison, which is what keeps O(adds x deletes) rename
-/// detection affordable.
+/// pairing (git's signature cache: each file is hashed once, not once per
+/// comparison, which keeps O(adds x deletes) rename detection affordable).
+///
+/// Spans are keyed by `(hash, byte length)` rather than their raw bytes, so
+/// neither building the signature nor probing it allocates or re-hashes span
+/// bytes in the hot path. The 64-bit span hash makes collisions far rarer than
+/// git's own (git hashes spans to 32 bits), so scores stay identical to a
+/// byte-exact comparison in practice.
 pub(super) struct Signature {
-    /// Span bytes -> occurrence count.
-    spans: FxHashMap<Box<[u8]>, u32>,
+    spans: FxHashMap<(u64, u32), u32>,
     size: usize,
 }
 
 impl Signature {
     pub(super) fn new(bytes: &[u8]) -> Self {
-        let mut spans: FxHashMap<Box<[u8]>, u32> = FxHashMap::default();
+        let mut spans: FxHashMap<(u64, u32), u32> = FxHashMap::default();
         for span in Spans::new(bytes) {
-            *spans.entry(Box::from(span)).or_default() += 1;
+            *spans
+                .entry((hash_span(span), span.len() as u32))
+                .or_default() += 1;
         }
         Self {
             spans,
@@ -35,40 +43,150 @@ impl Signature {
     }
 }
 
-/// Similarity score (0-100) between two precomputed signatures: the floor of
-/// copied bytes (spans common to both, weighted by length) as a percent of the
-/// larger blob. Non-destructive, so a `Signature` is reusable across pairings.
+fn hash_span(span: &[u8]) -> u64 {
+    let mut hasher = FxHasher::default();
+    span.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// A rename similarity, kept as the exact ratio `copied / max_size` rather than a
+/// rounded percent. git orders rename candidates by this fine score (two pairs
+/// that both display `R83` are not a tie to git unless their ratios are exactly
+/// equal), so [`Ord`] compares the unrounded ratio; [`Self::percent`] is only for
+/// the displayed `R{n}`.
+#[derive(Clone, Copy)]
+pub(super) struct Similarity {
+    copied: u64,
+    max_size: u64,
+}
+
+impl Similarity {
+    /// An exact (same-blob) rename: ratio 1.0, percent 100.
+    pub(super) const EXACT: Self = Self {
+        copied: 1,
+        max_size: 1,
+    };
+
+    /// The displayed percent (`R{n}`): floor of `copied * 100 / max_size`, capped
+    /// at 100. Matches git's reported similarity index.
+    #[must_use]
+    pub(super) fn percent(self) -> u8 {
+        if self.max_size == 0 {
+            return 100;
+        }
+        ((self.copied * 100) / self.max_size).min(100) as u8
+    }
+}
+
+impl PartialEq for Similarity {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == std::cmp::Ordering::Equal
+    }
+}
+impl Eq for Similarity {}
+impl PartialOrd for Similarity {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for Similarity {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // copied/max vs other.copied/other.max, cross-multiplied (u128, exact).
+        (u128::from(self.copied) * u128::from(other.max_size))
+            .cmp(&(u128::from(other.copied) * u128::from(self.max_size)))
+    }
+}
+
+/// Similarity between two precomputed signatures: copied bytes (spans common to
+/// both, weighted by length) over the larger blob. Non-destructive, so a
+/// `Signature` is reusable across pairings.
 #[must_use]
-pub(super) fn score_sigs(old: &Signature, new: &Signature) -> u8 {
-    let max_size = old.size.max(new.size);
+pub(super) fn score_sigs(old: &Signature, new: &Signature) -> Similarity {
+    let max_size = (old.size.max(new.size)) as u64;
     if max_size == 0 {
-        return 100;
+        return Similarity::EXACT;
     }
 
-    // copied = sum over shared spans of min(old_count, new_count) * span_len.
-    // Iterate the smaller map and look up in the larger.
+    // copied = sum over spans in both of min(old_count, new_count) * span_len.
+    // Iterate the smaller map and probe the larger by the `(hash, len)` key.
     let (small, large) = if old.spans.len() <= new.spans.len() {
         (&old.spans, &new.spans)
     } else {
         (&new.spans, &old.spans)
     };
     let mut copied = 0u64;
-    for (span, &count) in small {
-        if let Some(&other) = large.get(span) {
-            copied += u64::from(count.min(other)) * span.len() as u64;
+    for (key, &count) in small {
+        if let Some(&other) = large.get(key) {
+            copied += u64::from(count.min(other)) * u64::from(key.1);
         }
     }
 
-    // u64 math: on a 32-bit target `copied * 100` would overflow `usize`
-    // for a renamed file larger than ~42 MB.
-    ((copied * 100) / max_size as u64).min(100) as u8
+    Similarity { copied, max_size }
 }
 
 /// Convenience for a single comparison (no signature reuse): builds both
-/// signatures, then scores.
+/// signatures, then returns the displayed percent.
 #[must_use]
 pub(super) fn score(old: &[u8], new: &[u8]) -> u8 {
-    score_sigs(&Signature::new(old), &Signature::new(new))
+    score_sigs(&Signature::new(old), &Signature::new(new)).percent()
+}
+
+/// For every deletion, the [`Similarity`] to each addition that shares at least
+/// one span - the only additions that can score above zero. An inverted index
+/// over the additions' spans turns the `deletions x additions` matrix git walks
+/// in full into work proportional to the *overlapping* pairs, so a status whose
+/// renames don't all share content (the usual case) costs far less. Returns
+/// `(deletion index, addition index, similarity)`; `None` signatures (unreadable
+/// blobs) contribute nothing.
+#[must_use]
+pub(super) fn overlapping_pairs(
+    deletions: &[Option<Signature>],
+    additions: &[Option<Signature>],
+) -> Vec<(usize, usize, Similarity)> {
+    // Inverted index: span (hash, len) -> additions containing it, with count.
+    let mut index: FxHashMap<(u64, u32), Vec<(usize, u32)>> = FxHashMap::default();
+    for (add_idx, sig) in additions.iter().enumerate() {
+        if let Some(sig) = sig {
+            for (&key, &count) in &sig.spans {
+                index.entry(key).or_default().push((add_idx, count));
+            }
+        }
+    }
+
+    let mut pairs = Vec::new();
+    // `copied[add_idx]` accumulates shared bytes for the current deletion; only
+    // the touched entries are reset between deletions, so sparse cases stay cheap.
+    let mut copied = vec![0u64; additions.len()];
+    let mut touched: Vec<usize> = Vec::new();
+    for (del_idx, sig) in deletions.iter().enumerate() {
+        let Some(del_sig) = sig else { continue };
+        for (key, &del_count) in &del_sig.spans {
+            let Some(postings) = index.get(key) else {
+                continue;
+            };
+            let len = u64::from(key.1);
+            for &(add_idx, add_count) in postings {
+                if copied[add_idx] == 0 {
+                    touched.push(add_idx);
+                }
+                copied[add_idx] += u64::from(del_count.min(add_count)) * len;
+            }
+        }
+        for &add_idx in &touched {
+            let add_size = additions[add_idx].as_ref().map_or(0, Signature::size);
+            pairs.push((
+                del_idx,
+                add_idx,
+                Similarity {
+                    copied: copied[add_idx],
+                    max_size: del_sig.size.max(add_size) as u64,
+                },
+            ));
+            copied[add_idx] = 0;
+        }
+        touched.clear();
+    }
+    pairs
 }
 
 struct Spans<'a> {
