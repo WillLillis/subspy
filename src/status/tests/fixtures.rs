@@ -201,6 +201,39 @@ pub fn setup_rename_limit_drops_exact_staged(root: &Path) {
     repo.add_all();
 }
 
+/// Two files moved between directories keeping their basenames, with content
+/// cross-similar enough that a pure score would tie. git's basename tie-break
+/// pairs `foo->foo` and `bar->bar`; subspy must reproduce that (libgit2 cross-
+/// paired them - the original GitExtensions-style divergence).
+pub fn setup_renames_basename_preserving(root: &Path) {
+    let repo = Repo::init(root);
+    repo.write("old/foo.txt", "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\n")
+        .write("old/bar.txt", "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nx\n")
+        .add_all()
+        .commit("initial")
+        // `git rm` (not a plain unlink) so the emptied `old/` dir is cleaned up.
+        .rm_tracked("old/foo.txt")
+        .rm_tracked("old/bar.txt")
+        .write("new/foo.txt", "a\nb\nc\nd\ne\nf\ng\nh\ni\nFOO\n")
+        .write("new/bar.txt", "a\nb\nc\nd\ne\nf\ng\nh\ni\nBAR\n")
+        .add_all();
+}
+
+/// Three byte-identical files renamed at once. git pairs them in parallel sorted
+/// order (a->x, b->y, c->z); subspy's exact pass must match that rather than a
+/// hash-iteration order.
+pub fn setup_identical_files_renamed(root: &Path) {
+    Repo::init(root)
+        .write("a.txt", "same\ncontent\n")
+        .write("b.txt", "same\ncontent\n")
+        .write("c.txt", "same\ncontent\n")
+        .add_all()
+        .commit("initial")
+        .mv("a.txt", "x.txt")
+        .mv("b.txt", "y.txt")
+        .mv("c.txt", "z.txt");
+}
+
 pub fn setup_renamed_staged_in_subdir(root: &Path) {
     Repo::init(root)
         .write(
