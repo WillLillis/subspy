@@ -22,8 +22,12 @@ use crate::{
 };
 
 use super::fixtures::{
-    setup_clean, setup_deleted_staged, setup_deleted_workdir, setup_modified_workdir,
-    setup_moved_modified_unstaged, setup_renamed_staged, setup_staged_modified, setup_staged_new,
+    setup_below_git_rename_threshold_staged, setup_below_git_rename_threshold_staged_wt_modified,
+    setup_clean, setup_deleted_staged, setup_deleted_workdir, setup_identical_files_renamed,
+    setup_modified_workdir, setup_moved_modified_staged, setup_moved_modified_unstaged,
+    setup_rename_limit_drops_exact_staged, setup_rename_limit_exceeded_staged,
+    setup_rename_limit_mixed_staged, setup_renamed_staged, setup_renamed_then_worktree_deleted,
+    setup_renames_basename_preserving, setup_staged_modified, setup_staged_new,
     setup_submodule_gitlink_conflict, setup_submodule_gitlink_conflict_dirty, setup_untracked,
     setup_untracked_in_dir, setup_upstream_ahead, setup_upstream_behind, setup_upstream_diverged,
     setup_upstream_gone, setup_upstream_up_to_date,
@@ -73,6 +77,16 @@ fn setup_mixed(root: &Path) {
         .write("file.txt", "modified\n")
         .write("untracked.txt", "u\n")
         .write("hidden.log", "ignored\n");
+}
+
+fn setup_git_rename_long_record_staged(root: &Path) {
+    Repo::init(root)
+        .write("old.txt", &"a".repeat(65))
+        .add_all()
+        .commit("initial")
+        .write("new.txt", &format!("{}b", "a".repeat(65)))
+        .rm_file("old.txt")
+        .add_all();
 }
 
 fn setup_detached_head(root: &Path) {
@@ -178,9 +192,16 @@ const CASES: &[Case] = &[
     plain("deleted (staged)", setup_deleted_staged),
     plain("deleted (workdir)", setup_deleted_workdir),
     plain("renamed (staged)", setup_renamed_staged),
+    // Staged rename, then the new file deleted from the worktree: `2 RD` with a
+    // zero workdir mode. Guards the synthetic rename's worktree status + m_work.
+    plain(
+        "renamed then worktree-deleted",
+        setup_renamed_then_worktree_deleted,
+    ),
     // Plain `mv` + edit, unstaged: must be `D old` + `?? new` like git, never a
     // spurious worktree rename. Guards the `renames_index_to_workdir` fix.
     plain("moved+modified (unstaged)", setup_moved_modified_unstaged),
+    plain("moved+modified (staged)", setup_moved_modified_staged),
     plain("untracked", setup_untracked),
     plain("untracked in dir", setup_untracked_in_dir),
     plain("path with space", setup_path_with_space),
@@ -191,6 +212,14 @@ const CASES: &[Case] = &[
     plain("path with non-ASCII", setup_path_with_non_ascii),
     plain("path with backslash", setup_path_with_backslash),
     plain("multiple renames", setup_multiple_renames),
+    // Basename-preserving cross-dir moves (git's basename tie-break) and a set
+    // of byte-identical files renamed at once (git's parallel-sorted exact
+    // pairing). Both are pairings libgit2 got wrong; subspy reconciles to match.
+    plain(
+        "renames basename-preserving",
+        setup_renames_basename_preserving,
+    ),
+    plain("identical files renamed", setup_identical_files_renamed),
     plain("dotfile (untracked)", setup_dotfile),
     submodule_case("submodule clean", &["sub_a"], setup_submod_clean),
     submodule_case(
@@ -585,6 +614,93 @@ fn v2_z() {
     );
     for c in CASES {
         run_case(c, opts);
+    }
+}
+
+#[test]
+fn v2_rename_classification_matches_git_score_threshold() {
+    let opts = opts_with(
+        PorcelainVersion::V2,
+        false,
+        false,
+        UntrackedFiles::No,
+        IgnoredFiles::No,
+    );
+    for case in [
+        plain(
+            "below git rename threshold (staged)",
+            setup_below_git_rename_threshold_staged,
+        ),
+        plain(
+            "below git rename threshold (staged, worktree-modified)",
+            setup_below_git_rename_threshold_staged_wt_modified,
+        ),
+        plain(
+            "git rename long record (staged)",
+            setup_git_rename_long_record_staged,
+        ),
+    ] {
+        run_case(&case, opts);
+    }
+}
+
+#[test]
+fn v2_z_rename_classification_matches_git_score_threshold() {
+    let opts = opts_with(
+        PorcelainVersion::V2,
+        true,
+        false,
+        UntrackedFiles::No,
+        IgnoredFiles::No,
+    );
+    for case in [
+        plain(
+            "below git rename threshold (staged)",
+            setup_below_git_rename_threshold_staged,
+        ),
+        plain(
+            "below git rename threshold (staged, worktree-modified)",
+            setup_below_git_rename_threshold_staged_wt_modified,
+        ),
+        plain(
+            "git rename long record (staged)",
+            setup_git_rename_long_record_staged,
+        ),
+    ] {
+        run_case(&case, opts);
+    }
+}
+
+/// git honors `diff.renameLimit`: past it, similarity rename detection is
+/// skipped wholesale (edited renames become add + delete) while exact (same
+/// blob) renames still survive. libgit2 ignores the limit, so subspy reconciles
+/// to match. Live oracle in both v2 and v2 -z (the fixtures set the config).
+#[test]
+fn v2_rename_limit_matches_git() {
+    for null_terminate in [false, true] {
+        let opts = opts_with(
+            PorcelainVersion::V2,
+            null_terminate,
+            false,
+            UntrackedFiles::No,
+            IgnoredFiles::No,
+        );
+        for case in [
+            plain(
+                "inexact renames over rename limit",
+                setup_rename_limit_exceeded_staged,
+            ),
+            plain(
+                "exact + inexact renames over rename limit",
+                setup_rename_limit_mixed_staged,
+            ),
+            plain(
+                "rename limit makes libgit2 drop an exact rename",
+                setup_rename_limit_drops_exact_staged,
+            ),
+        ] {
+            run_case(&case, opts);
+        }
     }
 }
 

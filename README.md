@@ -200,7 +200,8 @@ subspy status  0.00s user 0.00s system 94% cpu 0.004 total
 `subspy start` must be run from the top-level of the repository.
 - On Linux, each watch server consumes inotify watches. For very large repositories or many concurrent servers, you may
 need to increase the system limit (e.g. `sudo sysctl fs.inotify.max_user_watches=<value>`).
-- On Windows, AF_UNIX sockets are used for IPC, which requires Windows 10 version 1809 (October 2018 Update) or Windows Server 2019 or later.
+- On Windows, AF_UNIX sockets are used for IPC, which requires Windows 10 version 1809 (October 2018 Update) or Windows
+Server 2019 or later.
 
 ### Future Improvements
 

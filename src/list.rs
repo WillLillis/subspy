@@ -45,7 +45,7 @@ impl SubmoduleInfo {
     /// Maps a placeholder name to its value for this submodule.
     ///
     /// Only called with names from [`PLACEHOLDERS`], guaranteed by
-    /// [`validate_template`].
+    /// [`Template::parse`].
     ///
     /// # Panics
     ///

@@ -14,6 +14,7 @@
 //! - [`relativize`]: cwd-relative path rewriting at write time
 //! - [`quote`]: C-style path quoting (the `core.quotePath` semantics)
 
+mod case_collision;
 mod conflict;
 mod display;
 mod header;
@@ -22,8 +23,10 @@ mod porcelain_v1;
 mod porcelain_v2;
 mod quote;
 mod relativize;
+mod rename_score;
 mod short;
 mod submodule;
+mod tracked;
 mod xy_line;
 
 #[cfg(test)]
@@ -177,6 +180,12 @@ pub struct StatusEntries<'a> {
     /// render as a separate dirty row; porcelain v2 uses this for the `u`-line
     /// `S<c><m><u>` field. Empty when the index has no gitlink conflicts.
     pub conflicted_submodules: &'a FxHashMap<String, StatusSummary>,
+    /// Byte paths of libgit2's case-collision phantom deletes: a spurious
+    /// `WT_DELETED` for a path whose case-variant occupies the one working file
+    /// on a `core.ignorecase` filesystem. Renderers skip these; git collapses
+    /// the collision to a single line. Empty on case-sensitive filesystems and
+    /// whenever nothing is worktree-deleted. See [`case_collision`].
+    pub phantom_deletes: &'a FxHashSet<Vec<u8>>,
 }
 
 /// Builds the `git2::StatusOptions` used by production and tests. Kept
@@ -209,18 +218,17 @@ pub fn build_status_options(opts: OutputOpts, repo_kind: RepoKind) -> git2::Stat
     // Skip the redundant stat-cache refresh pass.
     st_opts.no_refresh(true);
 
-    // Match git's default `diff.renames=true` so a staged move renders as
-    // `R old -> new` rather than separate `D old`/`A new` entries. This is
-    // intentionally only the HEAD->index (staged) diff. git does NOT detect
-    // renames in the index->workdir (unstaged) diff: an untracked file is never
-    // a rename target there, so a plain `mv` of a tracked file shows as `D old`
-    // + `?? new`. libgit2's `renames_index_to_workdir` would instead pair the
-    // deletion with the untracked file and emit a spurious worktree rename,
-    // diverging from git and producing porcelain a consumer can't parse (the
-    // old path lands in a record with no valid `XY ` prefix), so it stays off.
-    st_opts
-        .renames_head_to_index(true)
-        .renames_from_rewrites(true);
+    // libgit2's own rename detection stays OFF; `tracked.rs` reconciles renames
+    // from the raw add/delete set instead. libgit2 has no separate exact-rename
+    // pass (it runs an O(targets x sources) similarity loop even for pure moves)
+    // and ignores git's global `diff.renameLimit` skip, so leaning on it is both
+    // slower than git on the common case and divergent over the limit. Our
+    // pairing mirrors git's phases: exact (same-blob) renames by OID in O(n),
+    // then inexact similarity only under the limit, with git's basename + path
+    // tie-break. Worktree (index->workdir) renames must stay off regardless: git
+    // never pairs a tracked deletion with an untracked file (a plain `mv` shows
+    // `D old` + `?? new`), but libgit2's `renames_index_to_workdir` would, on a
+    // record with no valid `XY ` prefix.
 
     // Exclude submodules from the plain status walk whenever subspy supplies
     // their statuses itself -- the watch server at the top level, or local
@@ -268,6 +276,24 @@ pub fn assemble_status<R>(
     // phantom rows.
     let conflicted_paths = if has_conflicts {
         conflict::conflicted_paths(&repo.index()?)?
+    } else {
+        FxHashSet::default()
+    };
+
+    // libgit2 emits a phantom `WT_DELETED` for a case-collision (two index
+    // entries differing only in case, collapsed to one working file) that git
+    // reports as a single line. Only possible with `core.ignorecase`, and only
+    // when something is worktree-deleted, so the common case short-circuits on
+    // the cheap scan before ever reading config.
+    let phantom_deletes = if non_submod
+        .iter()
+        .any(|e| e.status().contains(git2::Status::WT_DELETED))
+        && repo
+            .config()
+            .and_then(|c| c.get_bool("core.ignorecase"))
+            .unwrap_or(false)
+    {
+        case_collision::phantom_deletes(&non_submod)
     } else {
         FxHashSet::default()
     };
@@ -322,6 +348,7 @@ pub fn assemble_status<R>(
         renamed_submodules: &submod_changes.renamed,
         conflicted_paths: &conflicted_paths,
         conflicted_submodules: &conflicted_submodules,
+        phantom_deletes: &phantom_deletes,
     };
 
     render(&repo, &entries, &rel)

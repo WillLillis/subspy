@@ -57,12 +57,30 @@ const CASES: &[Case] = &[
         name: "renamed_staged",
         setup: Setup::Plain(setup_renamed_staged),
     },
+    // Staged rename, new file then deleted from the worktree: long format shows
+    // "renamed:" staged and "deleted:" unstaged.
+    Case {
+        name: "renamed_then_worktree_deleted",
+        setup: Setup::Plain(setup_renamed_then_worktree_deleted),
+    },
     Case {
         name: "renamed_staged_in_subdir",
         setup: Setup::Subdir {
             setup: setup_renamed_staged_in_subdir,
             subdir: "sub",
         },
+    },
+    // Sub-threshold staged move: git (and subspy) report "new file:" + "deleted:",
+    // not "renamed:". Guards the long-format synthetic-row rendering.
+    Case {
+        name: "rename_below_threshold_staged",
+        setup: Setup::Plain(setup_below_git_rename_threshold_staged),
+    },
+    // Same sub-threshold move, new file modified again in the worktree: the long
+    // format lists "new file:" + "deleted:" staged and "modified:" unstaged.
+    Case {
+        name: "rename_below_threshold_staged_wt_modified",
+        setup: Setup::Plain(setup_below_git_rename_threshold_staged_wt_modified),
     },
     // Plain `mv` + edit, unstaged: `deleted: file.txt` + untracked `renamed.txt`,
     // never `renamed:` (guards the `renames_index_to_workdir` fix).

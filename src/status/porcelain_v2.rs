@@ -20,10 +20,14 @@ use crate::StatusSummary;
 use super::{
     Divergence, PorcelainOpts, StatusEntries, StatusResult, UpstreamStatus,
     conflict::{ConflictEntry, build_conflict_map, path_within_any},
-    interleave::{Row, SubRow, for_each_merged},
+    interleave::SubRow,
     line_terminator,
     quote::QuoteMode,
     relativize::Relativizer,
+    tracked::{
+        EntryModesAndOids, SyntheticOrdinary, SyntheticRename, TrackedOrSubRow, TrackedRow,
+        extract_modes_and_oids, for_each_tracked_row, normalized_tracked_rows, rename_similarity,
+    },
     unborn_branch_name, upstream_status,
 };
 
@@ -91,13 +95,8 @@ pub fn display_porcelain_v2(
     // git emits tracked changes (ordinary/renamed/conflicted, including
     // submodules) in one path-sorted stream, then untracked, then ignored.
     // libgit2 excludes submodules from `non_submod`, so interleave the
-    // submodule rows among the tracked file entries by path.
-    let tracked = entries.non_submod.iter().filter(|entry| {
-        let st = entry.status();
-        st != git2::Status::CURRENT
-            && st != git2::Status::WT_NEW
-            && !st.contains(git2::Status::IGNORED)
-    });
+    // submodule rows among the tracked file rows by path.
+    let tracked = normalized_tracked_rows(repo, entries);
     let mut submods: Vec<SubRow<'_>> = Vec::new();
     submods.extend(
         entries
@@ -126,30 +125,34 @@ pub fn display_porcelain_v2(
             .map_or(git2::Oid::ZERO_SHA1, |e| e.id)
     };
 
-    for_each_merged(tracked, submods, |row| match row {
-        Row::File(entry) => {
-            let st = entry.status();
-            if st.contains(git2::Status::CONFLICTED) {
-                write_conflict(
-                    &entry,
-                    &conflicts,
-                    entries.conflicted_submodules,
-                    out,
-                    &render_opts,
-                )
-            } else if st.intersects(git2::Status::INDEX_RENAMED | git2::Status::WT_RENAMED) {
-                write_renamed(&entry, out, &render_opts)
-            } else {
-                write_ordinary(&entry, out, &render_opts)
+    for_each_tracked_row(tracked, submods, |row| match row {
+        TrackedOrSubRow::File(row) => match row {
+            TrackedRow::Entry(entry) => {
+                let st = entry.status();
+                if st.contains(git2::Status::CONFLICTED) {
+                    write_conflict(
+                        &entry,
+                        &conflicts,
+                        entries.conflicted_submodules,
+                        out,
+                        &render_opts,
+                    )
+                } else if st.intersects(git2::Status::INDEX_RENAMED | git2::Status::WT_RENAMED) {
+                    write_renamed(repo, &entry, out, &render_opts)
+                } else {
+                    write_ordinary(&entry, out, &render_opts)
+                }
             }
-        }
-        Row::Sub(SubRow::Modified(path, st)) => {
+            TrackedRow::SyntheticOrdinary(row) => write_synthetic_ordinary(&row, out, &render_opts),
+            TrackedRow::SyntheticRename(row) => write_synthetic_rename(&row, out, &render_opts),
+        },
+        TrackedOrSubRow::Sub(SubRow::Modified(path, st)) => {
             write_submodule(path, st, head_oid(path), index_oid(path), out, &render_opts)
         }
-        Row::Sub(SubRow::Deleted(path)) => {
+        TrackedOrSubRow::Sub(SubRow::Deleted(path)) => {
             write_deleted_submodule(path, head_oid(path), out, &render_opts)
         }
-        Row::Sub(SubRow::Renamed(rename)) => write_renamed_submodule(
+        TrackedOrSubRow::Sub(SubRow::Renamed(rename)) => write_renamed_submodule(
             rename,
             head_oid(&rename.old),
             index_oid(&rename.new),
@@ -327,50 +330,6 @@ const fn submodule_cmu(st: StatusSummary) -> (char, char, char) {
     (c, m, u)
 }
 
-/// File modes and blob OIDs for the HEAD/index/workdir versions of a
-/// non-submodule entry, suitable for the porcelain v2 `1`/`2` lines.
-struct EntryModesAndOids {
-    m_head: u32,
-    m_idx: u32,
-    m_work: u32,
-    h_head: git2::Oid,
-    h_idx: git2::Oid,
-}
-
-/// Resolves the modes and OIDs for a `1`/`2` line. For workdir-only
-/// changes, HEAD falls back to index (they're identical when the file
-/// isn't staged).
-fn extract_modes_and_oids(entry: &git2::StatusEntry<'_>) -> EntryModesAndOids {
-    let m_idx = entry
-        .head_to_index()
-        .map(|d| u32::from(d.new_file().mode()))
-        .or_else(|| {
-            entry
-                .index_to_workdir()
-                .map(|d| u32::from(d.old_file().mode()))
-        })
-        .unwrap_or(0);
-    let m_head = entry
-        .head_to_index()
-        .map_or(m_idx, |d| u32::from(d.old_file().mode()));
-    let m_work = entry
-        .index_to_workdir()
-        .map_or(m_idx, |d| u32::from(d.new_file().mode()));
-    let h_idx = entry
-        .head_to_index()
-        .map(|d| d.new_file().id())
-        .or_else(|| entry.index_to_workdir().map(|d| d.old_file().id()))
-        .unwrap_or(git2::Oid::ZERO_SHA1);
-    let h_head = entry.head_to_index().map_or(h_idx, |d| d.old_file().id());
-    EntryModesAndOids {
-        m_head,
-        m_idx,
-        m_work,
-        h_head,
-        h_idx,
-    }
-}
-
 /// Writes a non-rename, non-conflict tracked entry as a porcelain v2
 /// `1` line: `1 XY <sub> <m_head> <m_idx> <m_work> <h_head> <h_idx> PATH`.
 /// `sub` is always `N...` here (non-submodule); modes and OIDs come
@@ -401,12 +360,41 @@ fn write_ordinary(
     out.write_all(line_terminator(render_opts.null_terminate).as_bytes())
 }
 
+fn write_synthetic_ordinary(
+    row: &SyntheticOrdinary,
+    out: &mut impl Write,
+    render_opts: &RenderOpts<'_>,
+) -> Result<(), io::Error> {
+    let SyntheticOrdinary {
+        x,
+        y,
+        m_head,
+        m_idx,
+        m_work,
+        h_head,
+        h_idx,
+        path,
+    } = row;
+    write!(
+        out,
+        "1 {x}{y} N... {m_head:06o} {m_idx:06o} {m_work:06o} {h_head} {h_idx} ",
+    )?;
+    render_opts.rel.write_quoted(
+        out,
+        path,
+        render_opts.null_terminate,
+        render_opts.quote_mode,
+    )?;
+    out.write_all(line_terminator(render_opts.null_terminate).as_bytes())
+}
+
 /// Writes a rename entry as a porcelain v2 `2` line:
 /// `2 XY <sub> <modes> <oids> R<score> NEW<sep>OLD`. The separator
 /// between paths is TAB (`\t`) without `-z` and NUL (`\0`) with `-z`,
-/// per `git-status(1)`. Similarity is always reported as `R100` -
-/// libgit2's rename detection returns the pair but not a score.
+/// per `git-status(1)`. The similarity is computed locally with the
+/// clean-room scorer in [`rename_score`].
 fn write_renamed(
+    repo: &Repository,
     entry: &git2::StatusEntry<'_>,
     out: &mut impl Write,
     render_opts: &RenderOpts<'_>,
@@ -435,9 +423,10 @@ fn write_renamed(
         h_head,
         h_idx,
     } = extract_modes_and_oids(entry);
+    let score = rename_similarity(repo, h_head, h_idx);
     write!(
         out,
-        "2 {x}{y} N... {m_head:06o} {m_idx:06o} {m_work:06o} {h_head} {h_idx} R100 ",
+        "2 {x}{y} N... {m_head:06o} {m_idx:06o} {m_work:06o} {h_head} {h_idx} R{score} ",
     )?;
     render_opts.rel.write_quoted(
         out,
@@ -454,6 +443,42 @@ fn write_renamed(
     render_opts.rel.write_quoted(
         out,
         old_path,
+        render_opts.null_terminate,
+        render_opts.quote_mode,
+    )?;
+    out.write_all(line_terminator(render_opts.null_terminate).as_bytes())
+}
+
+fn write_synthetic_rename(
+    row: &SyntheticRename,
+    out: &mut impl Write,
+    render_opts: &RenderOpts<'_>,
+) -> Result<(), io::Error> {
+    write!(
+        out,
+        "2 R{y} N... {m_head:06o} {m_idx:06o} {m_work:06o} {h_head} {h_idx} R{score} ",
+        y = row.new.wt_y,
+        m_head = row.old.mode,
+        m_idx = row.new.mode,
+        m_work = row.new.wt_mode,
+        h_head = row.old.oid,
+        h_idx = row.new.oid,
+        score = row.score,
+    )?;
+    render_opts.rel.write_quoted(
+        out,
+        &row.new.path,
+        render_opts.null_terminate,
+        render_opts.quote_mode,
+    )?;
+    out.write_all(if render_opts.null_terminate {
+        b"\0"
+    } else {
+        b"\t"
+    })?;
+    render_opts.rel.write_quoted(
+        out,
+        &row.old.path,
         render_opts.null_terminate,
         render_opts.quote_mode,
     )?;

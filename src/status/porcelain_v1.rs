@@ -6,7 +6,7 @@
 //! prepends a `## branch...upstream [ahead/behind]` header.
 //!
 //! v1 is repo-root-relative and uncolored. The actual line-writing is
-//! shared with the short format via [`xy_line`]; this module is a thin
+//! shared with the short format via [`super::xy_line`]; this module is a thin
 //! wrapper that picks `QuoteSpace` quoting, no palette, and a no-op
 //! `Relativizer::new("")`.
 
