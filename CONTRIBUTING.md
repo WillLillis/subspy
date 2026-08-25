@@ -64,19 +64,21 @@ each with its own renderer. Long stands alone; short + porcelain v1 share an
 
 | File | Purpose |
 |---|---|
-| `mod.rs` | `status()` entry, `OutputFormat`, `OutputOpts`, `PorcelainOpts`, `StatusEntries`, `cwd_relative_to_repo` |
+| `mod.rs` | CLI and shim status entry points, status scopes/outcomes, output options, status assembly, cwd resolution |
 | `display.rs` | Long-format output (`display_status`), section formatting, submodule predicates |
 | `header.rs` | Branch / upstream / operation-state header (`HeaderState`, `HeaderBody`, `print_header`, `print_unmerged_paths`) |
 | `short.rs` | `git status -s` / `--short` (`display_short`): thin wrapper around `xy_line` with `Standard` quoting + `SHORT_PALETTE` colors |
 | `porcelain_v1.rs` | `git status --porcelain[=1]`: thin wrapper around `xy_line` with `QuoteSpace` quoting and no palette |
 | `porcelain_v2.rs` | `git status --porcelain=2` output: `1`/`2`/`u`/`?`/`!` lines, `Standard` quoting |
 | `xy_line.rs` | Shared `XY PATH` writer used by short + porcelain v1; `LineStyle`, `Palette`, `SubmoduleFormat`, branch-header logic |
+| `interleave.rs` | Path-ordered merging of tracked-file and submodule rows within status sections |
 | `relativize.rs` | `Relativizer`: streams repo-root-relative paths as cwd-relative, applies C-style quoting via `QuoteMode` |
 | `quote.rs` | Path quoting primitives (`needs_quoting`, `write_escaped`, `QuoteMode::{Standard, QuoteSpace}`) consumed by `Relativizer::write_quoted` |
 | `conflict.rs` | Shared conflict-index parsing for XY-line and porcelain v2 entries |
 | `tracked.rs` | Rename reconciliation: `normalized_tracked_rows` builds the shared `TrackedRow` stream (exact + inexact rename pairing in git's order) that all four renderers consume |
 | `rename_score.rs` | Clean-room git rename-similarity scoring (`Signature`, `Similarity`, `score_sigs`, inverted-index `overlapping_pairs`) |
-| `case_collision.rs` | Drops libgit2's case-collision phantom deletes on `core.ignorecase` filesystems |
+| `case.rs` | Shared `core.ignorecase` comparison policy and case-collision phantom-delete suppression |
+| `pathspec.rs` | Cwd-subtree status filtering plus detection of collapsed untracked scans that must fall back to Git |
 | `submodule.rs` | `compute_local_statuses`, `deleted_submodule_paths`, `apply_ignore_submodules` |
 | `tests/` | Output-format verification tests (see [Snapshot tests](#snapshot-tests)). Submodules: `long.rs` + `short.rs` (snapshot-based), `porcelain.rs` (live `git status` oracle), `fixtures.rs` (shared `setup_*` helpers) |
 | `snapshots/{long,short}/*.snapshot` | Committed snapshot fixtures for the long- and short-format tests |
@@ -314,11 +316,20 @@ Each test file exercises a specific category of git operation against a real wat
 | `clean.rs` | `git clean -fd` in submodules |
 | `submodule_management.rs` | Adding/removing submodules at runtime (committed and uncommitted) |
 | `lifecycle.rs` | Server shutdown, reindex, IPC version mismatch, stale socket recovery |
+| `shim.rs` | End-to-end `subspy-git` interception, forwarding, and byte-for-byte status parity against real Git |
 
 Tests aim to be deterministic: each test sets up a specific git state, performs an
 operation, and asserts the expected `StatusSummary` flags. The watch server runs
 in-process on a background thread (not as a spawned daemon), communicating over real
 IPC sockets to a temp directory.
+
+**Live Git oracle configuration**: `tests/shim.rs` removes `GIT_ADVICE` from the
+oracle and shim processes and invokes the oracle with
+`-c advice.statusHints=true`. Subspy currently renders the default long-format status
+hints, so allowing the oracle to inherit a developer's or runner's advice settings
+would make the byte-parity tests platform-dependent. Keep this normalization in the
+test helper rather than CI so `cargo test` behaves the same locally and on hosted
+runners. Supporting disabled status hints in Subspy is a separate feature.
 
 **Repeat macro**: Every integration test runs 10x via `#[apply(common::repeat)]` to
 surface race conditions between filesystem events, watcher notifications, and status
