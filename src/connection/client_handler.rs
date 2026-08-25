@@ -220,20 +220,56 @@ fn handle_reindex_request(
     subscribers: &ProgressSubscribers,
 ) -> WatchResult<()> {
     let result = loop {
-        match try_send_progress_update(&mut conn, client_pid, progress) {
+        match try_send_reindex_progress_update(&mut conn, client_pid, progress, subscribers) {
             Ok(true) => break Ok(()),
             Ok(false) => std::thread::yield_now(),
             Err(e) => break Err(e),
         }
     };
 
+    if result.is_err() {
+        remove_progress_client(client_pid, progress, subscribers);
+    }
+
+    result
+}
+
+/// Sends one queued reindex progress update. Terminal updates remove the
+/// client's progress state before they are written, so a sequential request
+/// from the same process cannot be mistaken for stale state from this one.
+fn try_send_reindex_progress_update(
+    conn: &mut BufReader<IpcStream>,
+    client_pid: u32,
+    progress: &ProgressMap,
+    subscribers: &ProgressSubscribers,
+) -> WatchResult<bool> {
+    let Some(ProgressUpdate { curr, total }) = try_take_progress_update(client_pid, progress)
+    else {
+        return Ok(false);
+    };
+    let complete = curr == total;
+    if complete {
+        // Once this write completes, the client can immediately register its
+        // next request under the same PID. Finish this request's cleanup first
+        // so it cannot delete the new subscriber and queue afterward.
+        remove_progress_client(client_pid, progress, subscribers);
+    }
+    send_progress_update(conn, curr, total)?;
+    Ok(complete)
+}
+
+/// Removes a client's progress state using the same lock order as
+/// [`crate::connection::progress::broadcast_progress`].
+fn remove_progress_client(
+    client_pid: u32,
+    progress: &ProgressMap,
+    subscribers: &ProgressSubscribers,
+) {
     _ = subscribers
         .lock()
         .expect("Subscribers mutex poisoned")
         .remove(&client_pid);
     _ = progress.lock().expect("Mutex poisoned").remove(&client_pid);
-
-    result
 }
 
 /// Attempts to send an index progress message to `conn` for `client_pid`.
@@ -248,24 +284,29 @@ fn try_send_progress_update(
     client_pid: u32,
     progress: &ProgressMap,
 ) -> WatchResult<bool> {
-    let Some(mut progress_queue) = try_lock(progress) else {
+    let Some(ProgressUpdate { curr, total }) = try_take_progress_update(client_pid, progress)
+    else {
         return Ok(false);
     };
-    let Some(queue) = progress_queue.get_mut(&client_pid) else {
-        return Ok(false);
-    };
-    let Some(ProgressUpdate { curr, total }) = queue.pop_front() else {
-        return Ok(false);
-    };
-    drop(progress_queue);
 
+    send_progress_update(conn, curr, total)?;
+
+    Ok(curr == total)
+}
+
+/// Takes the next queued update without blocking behind an active broadcast.
+fn try_take_progress_update(client_pid: u32, progress: &ProgressMap) -> Option<ProgressUpdate> {
+    let mut progress_queue = try_lock(progress)?;
+    progress_queue.get_mut(&client_pid)?.pop_front()
+}
+
+fn send_progress_update(conn: &mut BufReader<IpcStream>, curr: u32, total: u32) -> WatchResult<()> {
     let progress = ServerMessage::Indexing { curr, total };
     // 4 byte variant index + 4 byte u32 curr + 4 byte u32 total (fixint)
     let mut progress_msg = [0; 12];
     let progress_msg_len = bincode::encode_into_slice(progress, &mut progress_msg, BINCODE_CFG)?;
     write_full_message_fixed(conn, &progress_msg[..progress_msg_len])?;
-
-    Ok(curr == total)
+    Ok(())
 }
 
 /// Acquires the `statuses` guard. Every time the lock cannot be acquired
