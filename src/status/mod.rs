@@ -7,18 +7,24 @@
 //! - [`porcelain_v1`] and [`porcelain_v2`] for the machine-readable formats
 //!
 //! Helper modules:
+//! - [`tracked`]: shared tracked-row normalization and rename reconciliation
+//! - [`rename_score`]: Git-compatible rename similarity scoring
+//! - [`interleave`]: path-ordered merging of file and submodule rows
 //! - [`xy_line`]: shared `XY PATH` writer for short + porcelain v1
 //! - [`header`]: branch/upstream/operation-state header rendering (long format)
 //! - [`conflict`]: shared conflict-index parsing
 //! - [`submodule`]: submodule status computation and filtering
+//! - [`case`]: `core.ignorecase` matching and phantom-delete suppression
+//! - [`pathspec`]: cwd-subtree filtering and unsupported-scan detection
 //! - [`relativize`]: cwd-relative path rewriting at write time
 //! - [`quote`]: C-style path quoting (the `core.quotePath` semantics)
 
-mod case_collision;
+mod case;
 mod conflict;
 mod display;
 mod header;
 mod interleave;
+mod pathspec;
 mod porcelain_v1;
 mod porcelain_v2;
 mod quote;
@@ -49,10 +55,47 @@ use crate::{
     watch::LockFileError,
 };
 
+pub use case::CaseSensitivity;
+pub use pathspec::PathFilter;
 pub use relativize::Relativizer;
 pub use submodule::{SubmoduleChanges, SubmoduleRename, compute_local_statuses, submodule_changes};
 
 pub type StatusResult<T> = Result<T, StatusError>;
+
+/// A resolved status invocation shared by the CLI and git shim entry points.
+/// Project discovery stays at the caller boundary because it reports
+/// [`crate::cli::RunError`], not [`StatusError`].
+#[derive(Clone, Copy)]
+pub struct ResolvedStatusRequest<'a> {
+    pub project: &'a ProjectPath,
+    pub no_server: bool,
+    pub display_progress: bool,
+    pub output: OutputOpts,
+}
+
+/// Which portion of the repository a status invocation selects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StatusScope {
+    /// Select the whole repository.
+    #[default]
+    All,
+    /// Select the effective cwd and its descendants.
+    Cwd,
+}
+
+/// A non-error reason the shim should forward the original invocation to Git.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeclineReason {
+    /// libgit2 collapsed an untracked directory above the selected cwd.
+    CwdInsideCollapsedUntrackedDirectory,
+}
+
+/// Result of a successfully evaluated shim status request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShimStatusOutcome {
+    Rendered,
+    Declined(DeclineReason),
+}
 
 #[derive(Error, Debug)]
 pub enum StatusError {
@@ -184,8 +227,15 @@ pub struct StatusEntries<'a> {
     /// `WT_DELETED` for a path whose case-variant occupies the one working file
     /// on a `core.ignorecase` filesystem. Renderers skip these; git collapses
     /// the collision to a single line. Empty on case-sensitive filesystems and
-    /// whenever nothing is worktree-deleted. See [`case_collision`].
+    /// whenever nothing is worktree-deleted. See [`case`].
     pub phantom_deletes: &'a FxHashSet<Vec<u8>>,
+    /// Cwd pathspec selection shared by every renderer.
+    pub path_filter: PathFilter<'a>,
+}
+
+enum AssembleOutcome<T> {
+    Rendered(T),
+    Declined(DeclineReason),
 }
 
 /// Builds the `git2::StatusOptions` used by production and tests. Kept
@@ -259,9 +309,30 @@ pub fn assemble_status<R>(
     submodule_statuses: impl FnOnce() -> StatusResult<Vec<(String, StatusSummary)>>,
     render: impl FnOnce(&Repository, &StatusEntries<'_>, &Relativizer<'_>) -> StatusResult<R>,
 ) -> StatusResult<R> {
+    match assemble_status_scoped(project, opts, StatusScope::All, submodule_statuses, render)? {
+        AssembleOutcome::Rendered(rendered) => Ok(rendered),
+        AssembleOutcome::Declined(_) => {
+            unreachable!("whole-repository status requests cannot decline")
+        }
+    }
+}
+
+fn assemble_status_scoped<R>(
+    project: &ProjectPath,
+    opts: OutputOpts,
+    scope: StatusScope,
+    submodule_statuses: impl FnOnce() -> StatusResult<Vec<(String, StatusSummary)>>,
+    render: impl FnOnce(&Repository, &StatusEntries<'_>, &Relativizer<'_>) -> StatusResult<R>,
+) -> StatusResult<AssembleOutcome<R>> {
     let repo = Repository::open(&project.repo_root)?;
     let mut so = build_status_options(opts, project.kind);
     let non_submod = repo.statuses(Some(&mut so))?;
+
+    let cwd_rel = cwd_relative_to_repo(&project.repo_root, &project.effective_cwd);
+    let mut cwd_rel_slash = cwd_rel.to_vec();
+    if !cwd_rel_slash.is_empty() {
+        cwd_rel_slash.push(b'/');
+    }
 
     // Conflicted submodules need special handling (see below). Both pieces are
     // gated on this cheap check over the already-computed status set, so a
@@ -282,23 +353,38 @@ pub fn assemble_status<R>(
 
     // libgit2 emits a phantom `WT_DELETED` for a case-collision (two index
     // entries differing only in case, collapsed to one working file) that git
-    // reports as a single line. Only possible with `core.ignorecase`, and only
-    // when something is worktree-deleted, so the common case short-circuits on
-    // the cheap scan before ever reading config.
-    let phantom_deletes = if non_submod
+    // reports as a single line. That is only possible with `core.ignorecase`
+    // and a worktree deletion; cwd filtering also needs the same setting. Read
+    // it once whenever either consumer needs it.
+    let has_worktree_delete = non_submod
         .iter()
-        .any(|e| e.status().contains(git2::Status::WT_DELETED))
-        && repo
-            .config()
-            .and_then(|c| c.get_bool("core.ignorecase"))
-            .unwrap_or(false)
-    {
-        case_collision::phantom_deletes(&non_submod)
-    } else {
-        FxHashSet::default()
-    };
+        .any(|e| e.status().contains(git2::Status::WT_DELETED));
+    let needs_case_sensitivity =
+        has_worktree_delete || (matches!(scope, StatusScope::Cwd) && !cwd_rel_slash.is_empty());
+    let case_sensitivity = CaseSensitivity::from_ignore_case(
+        needs_case_sensitivity
+            && repo
+                .config()
+                .and_then(|c| c.get_bool("core.ignorecase"))
+                .unwrap_or(false),
+    );
+    let phantom_deletes = case::phantom_deletes(&non_submod, case_sensitivity);
 
-    let submod_changes = if opts.ignore_submodules == IgnoreSubmodules::All {
+    let path_filter = match scope {
+        StatusScope::All => PathFilter::all(),
+        StatusScope::Cwd => PathFilter::subtree(&cwd_rel_slash, case_sensitivity),
+    };
+    if !path_filter.is_all()
+        && non_submod.iter().any(|entry| {
+            entry.status() == git2::Status::WT_NEW && path_filter.contains_cwd(entry.path_bytes())
+        })
+    {
+        return Ok(AssembleOutcome::Declined(
+            DeclineReason::CwdInsideCollapsedUntrackedDirectory,
+        ));
+    }
+
+    let mut submod_changes = if opts.ignore_submodules == IgnoreSubmodules::All {
         SubmoduleChanges::default()
     } else {
         submodule_changes(&repo)?
@@ -318,6 +404,8 @@ pub fn assemble_status<R>(
         opts.ignore_submodules,
         &per_submodule_ignore,
     );
+
+    apply_path_filter_to_submodules(&mut submods, &mut submod_changes, path_filter);
     submodule::filter_rename_new_paths(&mut submods, &submod_changes.renamed);
 
     // An unmerged submodule is reported once, through the conflict machinery,
@@ -338,7 +426,6 @@ pub fn assemble_status<R>(
     // - Porcelain v2: cwd-relative without `-z`, repo-root-relative
     //   with `-z` (where paths are stable identifiers).
     // - Short and long: cwd-relative.
-    let cwd_rel = cwd_relative_to_repo(&project.repo_root, &project.effective_cwd);
     let rel = relativize::Relativizer::new(&cwd_rel, opts.quote_path);
 
     let entries = StatusEntries {
@@ -349,9 +436,51 @@ pub fn assemble_status<R>(
         conflicted_paths: &conflicted_paths,
         conflicted_submodules: &conflicted_submodules,
         phantom_deletes: &phantom_deletes,
+        path_filter,
     };
 
-    render(&repo, &entries, &rel)
+    Ok(AssembleOutcome::Rendered(render(&repo, &entries, &rel)?))
+}
+
+fn apply_path_filter_to_submodules(
+    submods: &mut Vec<(String, StatusSummary)>,
+    changes: &mut SubmoduleChanges,
+    path_filter: PathFilter<'_>,
+) {
+    if path_filter.is_all() {
+        return;
+    }
+    submods.retain(|(path, _)| path_filter.keeps(path.as_bytes()));
+
+    let mut scoped_deleted: Vec<String> = std::mem::take(&mut changes.deleted)
+        .into_iter()
+        .filter(|path| path_filter.keeps(path.as_bytes()))
+        .collect();
+    let mut scoped_renamed = Vec::new();
+    let mut selected_rename_old_paths = Vec::new();
+    for rename in std::mem::take(&mut changes.renamed) {
+        let old_selected = path_filter.keeps(rename.old.as_bytes());
+        let new_selected = path_filter.keeps(rename.new.as_bytes());
+        if old_selected {
+            // Some status providers can retain a staged-new summary under the
+            // old path while a submodule rename is in flight. The
+            // rename/deletion row owns that endpoint after scoping.
+            selected_rename_old_paths.push(rename.old.clone());
+        }
+        match (old_selected, new_selected) {
+            (true, true) => scoped_renamed.push(rename),
+            (true, false) => scoped_deleted.push(rename.old),
+            (false, true) => {
+                if !submods.iter().any(|(path, _)| *path == rename.new) {
+                    submods.push((rename.new, StatusSummary::STAGED_NEW));
+                }
+            }
+            (false, false) => {}
+        }
+    }
+    submods.retain(|(path, _)| !selected_rename_old_paths.contains(path));
+    changes.deleted = scoped_deleted;
+    changes.renamed = scoped_renamed;
 }
 
 /// Retrieves and displays the statuses for the repository described by
@@ -361,13 +490,47 @@ pub fn assemble_status<R>(
 /// # Errors
 ///
 /// Returns `Err` if statuses cannot be retrieved from the repository or watch server
-pub fn status(
-    project: &ProjectPath,
-    display_progress: bool,
-    use_server: bool,
-    opts: OutputOpts,
+pub fn status(request: ResolvedStatusRequest<'_>, out: &mut impl io::Write) -> StatusResult<()> {
+    match render_status(request, StatusScope::All, out)? {
+        ShimStatusOutcome::Rendered => Ok(()),
+        ShimStatusOutcome::Declined(_) => {
+            unreachable!("whole-repository status requests cannot decline")
+        }
+    }
+}
+
+/// Retrieves and displays status for the git shim.
+///
+/// Unlike [`status`], this entry point can deliberately decline a request so
+/// the shim can forward the original argv to real Git without treating the
+/// decision as an error.
+///
+/// # Errors
+///
+/// Returns `Err` if statuses cannot be retrieved from the repository or watch
+/// server.
+pub fn status_for_shim(
+    request: ResolvedStatusRequest<'_>,
+    scope: StatusScope,
     out: &mut impl io::Write,
-) -> StatusResult<()> {
+) -> StatusResult<ShimStatusOutcome> {
+    render_status(request, scope, out)
+}
+
+fn render_status(
+    request: ResolvedStatusRequest<'_>,
+    scope: StatusScope,
+    out: &mut impl io::Write,
+) -> StatusResult<ShimStatusOutcome> {
+    let ResolvedStatusRequest {
+        project,
+        no_server,
+        display_progress,
+        output: opts,
+    } = request;
+    let use_server = !no_server
+        && project.kind.server_eligible()
+        && opts.ignore_submodules != IgnoreSubmodules::All;
     // Send IPC request early so the server starts processing while we
     // do local work.
     let mut conn = if use_server {
@@ -389,9 +552,10 @@ pub fn status(
     let ignore_submodules = opts.ignore_submodules;
     let kind = project.kind;
 
-    assemble_status(
+    match assemble_status_scoped(
         project,
         opts,
+        scope,
         || match conn {
             Some(ref mut c) => Ok(recv_status_response(c, display_progress)?.0),
             None if kind.has_submodules() && ignore_submodules != IgnoreSubmodules::All => {
@@ -416,7 +580,10 @@ pub fn status(
             }
             Ok(())
         },
-    )
+    )? {
+        AssembleOutcome::Rendered(()) => Ok(ShimStatusOutcome::Rendered),
+        AssembleOutcome::Declined(reason) => Ok(ShimStatusOutcome::Declined(reason)),
+    }
 }
 
 /// Returns `effective_cwd` expressed relative to `repo_root`, as forward-slash

@@ -16,8 +16,8 @@ use crate::{
     reindex::{ReindexError, reindex},
     shutdown::{ShutdownError, shutdown},
     status::{
-        IgnoreSubmodules, IgnoredFiles, OutputFormat, OutputOpts, PorcelainVersion, StatusError,
-        UntrackedFiles, status,
+        IgnoreSubmodules, IgnoredFiles, OutputFormat, OutputOpts, PorcelainVersion,
+        ResolvedStatusRequest, StatusError, UntrackedFiles, status,
     },
     watch::{WatchError, spawn_daemon},
 };
@@ -375,26 +375,25 @@ impl Status {
         let format = self.output_format();
         let project = get_project_path(self.dir)?;
         let display_progress = std::io::stderr().is_terminal();
-        let use_server = !self.no_server
-            && project.kind.server_eligible()
-            && self.ignore_submodules != IgnoreSubmodules::All;
         // Default is on; only the explicit `--no-ahead-behind` flips it off.
         // `--ahead-behind` is accepted for symmetry but is the default.
         let ahead_behind = !self.no_ahead_behind;
         Ok(status(
-            &project,
-            display_progress,
-            use_server,
-            OutputOpts {
-                format,
-                null_terminate: self.null_terminate,
-                ignore_submodules: self.ignore_submodules,
-                untracked_files: self.untracked_files.unwrap_or_default(),
-                ignored_files: self.ignored.unwrap_or_default(),
-                branch: self.branch,
-                ahead_behind,
-                quote_path: self.quote_path,
-                show_stash: self.show_stash,
+            ResolvedStatusRequest {
+                project: &project,
+                no_server: self.no_server,
+                display_progress,
+                output: OutputOpts {
+                    format,
+                    null_terminate: self.null_terminate,
+                    ignore_submodules: self.ignore_submodules,
+                    untracked_files: self.untracked_files.unwrap_or_default(),
+                    ignored_files: self.ignored.unwrap_or_default(),
+                    branch: self.branch,
+                    ahead_behind,
+                    quote_path: self.quote_path,
+                    show_stash: self.show_stash,
+                },
             },
             out,
         )?)

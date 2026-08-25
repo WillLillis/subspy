@@ -17,7 +17,7 @@ use std::{
 
 use crate::paint::{Paint, RED, paint_into};
 
-use super::{StatusResult, relativize::Relativizer};
+use super::{PathFilter, StatusResult, relativize::Relativizer};
 
 /// Length of the short-OID prefix git uses in `status` output (matches
 /// `core.abbrev`'s default of 7 hex chars).
@@ -224,6 +224,7 @@ fn print_rebase_header(info: &RebaseInfo, stdout: &mut impl Write) -> Result<(),
 /// Returns `true` if there were conflicts.
 pub fn print_unmerged_paths(
     repo: &Repository,
+    path_filter: PathFilter<'_>,
     rel: &Relativizer<'_>,
     stdout: &mut impl Write,
 ) -> StatusResult<bool> {
@@ -232,17 +233,7 @@ pub fn print_unmerged_paths(
         return Ok(false);
     }
 
-    writeln!(stdout, "Unmerged paths:")?;
-    // During any rebase, git prepends an unstage hint before the resolve hint.
-    // Merge / cherry-pick / revert conflicts show only the resolve hint.
-    if is_rebasing(repo) {
-        writeln!(
-            stdout,
-            "  (use \"git restore --staged <file>...\" to unstage)"
-        )?;
-    }
-    writeln!(stdout, "  (use \"git add <file>...\" to mark resolution)")?;
-
+    let mut header = false;
     for conflict in index.conflicts()? {
         let conflict = conflict?;
         let path = conflict
@@ -251,6 +242,23 @@ pub fn print_unmerged_paths(
             .or(conflict.their.as_ref())
             .or(conflict.ancestor.as_ref())
             .map_or(b"<unknown path>".as_slice(), |e| e.path.as_slice());
+        if !path_filter.keeps(path) {
+            continue;
+        }
+        if !header {
+            writeln!(stdout, "Unmerged paths:")?;
+            // During any rebase, git prepends an unstage hint before the
+            // resolve hint. Merge / cherry-pick / revert conflicts show only
+            // the resolve hint.
+            if is_rebasing(repo) {
+                writeln!(
+                    stdout,
+                    "  (use \"git restore --staged <file>...\" to unstage)"
+                )?;
+            }
+            writeln!(stdout, "  (use \"git add <file>...\" to mark resolution)")?;
+            header = true;
+        }
 
         // Padded to 17 chars to match git's column alignment
         #[allow(clippy::match_same_arms)]
@@ -274,8 +282,10 @@ pub fn print_unmerged_paths(
         })?;
         writeln!(stdout)?;
     }
-    writeln!(stdout)?;
-    Ok(true)
+    if header {
+        writeln!(stdout)?;
+    }
+    Ok(header)
 }
 
 /// Branch / operation state for header rendering. `branch_display` is

@@ -164,7 +164,7 @@ pub fn display_porcelain_v2(
     for entry in entries
         .non_submod
         .iter()
-        .filter(|e| e.status() == git2::Status::WT_NEW)
+        .filter(|e| e.status() == git2::Status::WT_NEW && entries.path_filter.keeps(e.path_bytes()))
     {
         // Drop the phantom untracked row libgit2 emits for a conflicted
         // submodule's working tree; git lists it only as an unmerged (`u`) entry.
@@ -181,11 +181,10 @@ pub fn display_porcelain_v2(
         out.write_all(line_terminator(render_opts.null_terminate).as_bytes())?;
     }
 
-    for entry in entries
-        .non_submod
-        .iter()
-        .filter(|e| e.status().contains(git2::Status::IGNORED))
-    {
+    for entry in entries.non_submod.iter().filter(|e| {
+        e.status().contains(git2::Status::IGNORED)
+            && entries.path_filter.keeps_ignored(e.path_bytes())
+    }) {
         out.write_all(b"! ")?;
         render_opts.rel.write_quoted(
             out,

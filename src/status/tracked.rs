@@ -203,7 +203,8 @@ fn collect_initial_tracked_rows<'a>(
     deletions: &mut Vec<RenameSide>,
 ) {
     for entry in entries.non_submod.iter().filter(|entry| {
-        is_tracked_change(entry.status(), entry.path_bytes(), entries.phantom_deletes)
+        entries.path_filter.keeps(entry.path_bytes())
+            && is_tracked_change(entry.status(), entry.path_bytes(), entries.phantom_deletes)
     }) {
         let st = entry.status();
         if st.contains(git2::Status::CONFLICTED) {
