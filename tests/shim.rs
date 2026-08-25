@@ -20,12 +20,26 @@ fn run(program: &str, cwd: &std::path::Path, args: &[&str]) -> Output {
         .expect("spawn failed")
 }
 
+/// Runs the real-Git oracle with status advice pinned to the behavior Subspy
+/// currently implements.
+fn run_git_oracle(cwd: &std::path::Path, args: &[&str]) -> Output {
+    Command::new("git")
+        .args(["-c", "advice.statusHints=true"])
+        .args(args)
+        .current_dir(cwd)
+        .env("NO_COLOR", "1")
+        .env_remove("GIT_ADVICE")
+        .output()
+        .expect("spawn git oracle")
+}
+
 fn run_without_git(cwd: &std::path::Path, args: &[&str]) -> Output {
     Command::new(shim_path())
         .args(args)
         .current_dir(cwd)
         .env("NO_COLOR", "1")
         .env("PATH", "")
+        .env_remove("GIT_ADVICE")
         .output()
         .expect("spawn shim")
 }
@@ -74,7 +88,7 @@ fn assert_outputs_match(cwd: &std::path::Path, args: &[&str]) {
 }
 
 fn assert_rendered_locally_matches(cwd: &std::path::Path, args: &[&str]) -> Output {
-    let real = run("git", cwd, args);
+    let real = run_git_oracle(cwd, args);
     let shim = run_without_git(cwd, args);
     assert_eq!(real.status.code(), shim.status.code());
     assert_eq!(
