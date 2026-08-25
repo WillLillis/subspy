@@ -77,8 +77,20 @@ fn assert_rendered_locally_matches(cwd: &std::path::Path, args: &[&str]) -> Outp
     let real = run("git", cwd, args);
     let shim = run_without_git(cwd, args);
     assert_eq!(real.status.code(), shim.status.code());
-    assert_eq!(real.stdout, shim.stdout, "stdout mismatch for {args:?}");
-    assert_eq!(real.stderr, shim.stderr, "stderr mismatch for {args:?}");
+    assert_eq!(
+        real.stdout,
+        shim.stdout,
+        "stdout mismatch for {args:?}\nreal (lossy): {:?}\nshim (lossy): {:?}",
+        String::from_utf8_lossy(&real.stdout),
+        String::from_utf8_lossy(&shim.stdout),
+    );
+    assert_eq!(
+        real.stderr,
+        shim.stderr,
+        "stderr mismatch for {args:?}\nreal (lossy): {:?}\nshim (lossy): {:?}",
+        String::from_utf8_lossy(&real.stderr),
+        String::from_utf8_lossy(&shim.stderr),
+    );
     shim
 }
 
