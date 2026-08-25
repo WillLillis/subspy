@@ -12,7 +12,7 @@ use crate::{
 };
 
 use super::{
-    StatusEntries, StatusResult,
+    PathFilter, StatusEntries, StatusResult,
     conflict::path_within_any,
     header::{print_header, print_unmerged_paths},
     interleave::{Row, SubRow, for_each_merged},
@@ -274,6 +274,7 @@ fn print_staged_changes(
 fn print_unstaged_changes(
     non_submod: &Statuses<'_>,
     phantom_deletes: &FxHashSet<Vec<u8>>,
+    path_filter: PathFilter<'_>,
     submodule_statuses: &[(String, StatusSummary)],
     rm_in_workdir: bool,
     rel: &Relativizer<'_>,
@@ -290,7 +291,8 @@ fn print_unstaged_changes(
     // submodules from `non_submod`.
     let files = non_submod.iter().filter(|e| {
         let st = e.status();
-        !st.contains(git2::Status::CONFLICTED)
+        path_filter.keeps(e.path_bytes())
+            && !st.contains(git2::Status::CONFLICTED)
             && (phantom_deletes.is_empty() || !phantom_deletes.contains(e.path_bytes()))
             && st.intersects(
                 git2::Status::WT_MODIFIED
@@ -384,13 +386,14 @@ fn print_unstaged_changes(
 fn print_untracked_files(
     non_submod: &Statuses<'_>,
     conflicted_paths: &FxHashSet<Vec<u8>>,
+    path_filter: PathFilter<'_>,
     rel: &Relativizer<'_>,
     stdout: &mut impl Write,
 ) -> Result<bool, io::Error> {
     let mut header = false;
     for entry in non_submod
         .iter()
-        .filter(|e| e.status() == git2::Status::WT_NEW)
+        .filter(|e| e.status() == git2::Status::WT_NEW && path_filter.keeps(e.path_bytes()))
     {
         let Some(file) = entry
             .index_to_workdir()
@@ -421,14 +424,14 @@ fn print_untracked_files(
 /// Prints the "Ignored files:" section.
 fn print_ignored_files(
     non_submod: &Statuses<'_>,
+    path_filter: PathFilter<'_>,
     rel: &Relativizer<'_>,
     stdout: &mut impl Write,
 ) -> Result<(), io::Error> {
     let mut header = false;
-    for entry in non_submod
-        .iter()
-        .filter(|e| e.status() == git2::Status::IGNORED)
-    {
+    for entry in non_submod.iter().filter(|e| {
+        e.status() == git2::Status::IGNORED && path_filter.keeps_ignored(e.path_bytes())
+    }) {
         let Some(file) = entry
             .index_to_workdir()
             .and_then(|idx| idx.old_file().path_bytes())
@@ -546,6 +549,7 @@ pub fn display_status(
         // and relies on it already being excluded from `submodules`; the folded
         // `S<c><m><u>` status is a porcelain-v2-only concern.
         conflicted_submodules: _,
+        path_filter,
     } = *entries;
 
     let is_unborn = repo
@@ -553,31 +557,11 @@ pub fn display_status(
         .err()
         .is_some_and(|e| e.code() == git2::ErrorCode::UnbornBranch);
 
-    // Fast path: nothing dirty
-    if non_submod.is_empty()
-        && submodules.is_empty()
-        && deleted_submodules.is_empty()
-        && renamed_submodules.is_empty()
-    {
-        print_header(repo, out, ahead_behind)?;
-        if is_unborn {
-            writeln!(
-                out,
-                "nothing to commit (create/copy files and use \"git add\" to track)"
-            )?;
-        } else {
-            writeln!(out, "nothing to commit, working tree clean")?;
-        }
-        if show_stash {
-            print_stash_trailer(repo, out)?;
-        }
-        return Ok(());
-    }
-
     print_header(repo, out, ahead_behind)?;
 
     let rm_in_workdir = non_submod.iter().any(|e| {
-        e.status().contains(git2::Status::WT_DELETED)
+        path_filter.keeps(e.path_bytes())
+            && e.status().contains(git2::Status::WT_DELETED)
             && (phantom_deletes.is_empty() || !phantom_deletes.contains(e.path_bytes()))
     }) || submodules
         .iter()
@@ -593,17 +577,18 @@ pub fn display_status(
         is_unborn,
         out,
     )?;
-    let has_conflicts = print_unmerged_paths(repo, rel, out)?;
+    let has_conflicts = print_unmerged_paths(repo, path_filter, rel, out)?;
     let changed_in_workdir = print_unstaged_changes(
         non_submod,
         phantom_deletes,
+        path_filter,
         submodules,
         rm_in_workdir,
         rel,
         out,
     )?;
-    let has_untracked = print_untracked_files(non_submod, conflicted_paths, rel, out)?;
-    print_ignored_files(non_submod, rel, out)?;
+    let has_untracked = print_untracked_files(non_submod, conflicted_paths, path_filter, rel, out)?;
+    print_ignored_files(non_submod, path_filter, rel, out)?;
 
     print_summary(
         &SummaryState {
