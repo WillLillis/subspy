@@ -956,3 +956,46 @@ fn v2_z_from_subdir() {
     );
     assert_outputs_match(&project, "v2 -z from subdir", opts);
 }
+
+/// A repo whose only status row is a collapsed untracked directory, with the
+/// effective cwd set to that directory. Returns the cwd.
+///
+/// libgit2 reports the row as `subdir/`, a path that *is* the cwd rather than
+/// a descendant of it -- the one case where the cwd-relative form is neither a
+/// suffix nor a `../` walk. Git spells it `./`.
+fn setup_untracked_dir_fixture(root: &Path) -> PathBuf {
+    setup_untracked_in_dir(root);
+    root.join("subdir")
+}
+
+#[test]
+fn v2_from_inside_untracked_dir() {
+    let tmp = TempDir::new().unwrap();
+    let untracked = setup_untracked_dir_fixture(tmp.path());
+    let project = subdir_project(tmp.path().to_path_buf(), untracked);
+    let opts = opts_with(
+        PorcelainVersion::V2,
+        false,
+        false,
+        UntrackedFiles::Normal,
+        IgnoredFiles::No,
+    );
+    assert_outputs_match(&project, "v2 from inside untracked dir", opts);
+}
+
+#[test]
+fn v2_z_from_inside_untracked_dir() {
+    // `-z` paths stay repo-root-relative, so the same row is `subdir/` here.
+    // Guards the `./` rewrite against leaking into the stable-identifier mode.
+    let tmp = TempDir::new().unwrap();
+    let untracked = setup_untracked_dir_fixture(tmp.path());
+    let project = subdir_project(tmp.path().to_path_buf(), untracked);
+    let opts = opts_with(
+        PorcelainVersion::V2,
+        true,
+        false,
+        UntrackedFiles::Normal,
+        IgnoredFiles::No,
+    );
+    assert_outputs_match(&project, "v2 -z from inside untracked dir", opts);
+}

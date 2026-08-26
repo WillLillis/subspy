@@ -142,6 +142,10 @@ impl<'a> Relativizer<'a> {
             }
         }
 
+        if matched == self.cwd_components && path_cursor == path.len() && path.ends_with(b"/") {
+            return (0, b"./");
+        }
+
         (self.cwd_components - matched, &path[path_cursor..])
     }
 }
@@ -204,6 +208,13 @@ mod tests {
         // expected in real use (files aren't directories) but make sure
         // we don't panic or produce nonsense.
         assert_eq!(formatted("src", "src"), "");
+    }
+
+    #[test]
+    fn collapsed_directory_equal_to_cwd_is_dot_slash() {
+        // libgit2 collapses an untracked directory to a trailing-slash entry.
+        // From inside that directory, git spells the cwd-relative path `./`.
+        assert_eq!(formatted("src", "src/"), "./");
     }
 
     #[test]
