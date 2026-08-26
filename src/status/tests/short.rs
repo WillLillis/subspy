@@ -116,6 +116,17 @@ const CASES: &[Case] = &[
         setup: Setup::Plain(setup_untracked_in_dir),
         branch: false,
     },
+    // Same fixture viewed from inside the untracked directory: libgit2
+    // collapses it to a `subdir/` row whose path *is* the cwd, which git
+    // spells `?? ./` rather than an empty path.
+    Case {
+        name: "untracked_dir_from_inside",
+        setup: Setup::Subdir {
+            setup: setup_untracked_in_dir,
+            subdir: "subdir",
+        },
+        branch: false,
+    },
     Case {
         name: "untracked_high_byte_filename",
         setup: Setup::Plain(setup_untracked_high_byte_filename),
