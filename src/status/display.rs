@@ -34,6 +34,9 @@ const UNTRACKED_HEADER: &str = "Untracked files:
 const IGNORED_HEADER: &str = "Ignored files:
   (use \"git add -f <file>...\" to include in what will be committed)";
 
+const UNREADABLE_HEADER: &str = "Submodules with unreadable status:
+  (use \"git -C <path> status\" to see the underlying error)";
+
 fn unstaged_header(rm_in_workdir: bool, has_submod_changes: bool) -> String {
     format!(
         "Changes not staged for commit:
@@ -65,7 +68,10 @@ const fn staged_label(st: StatusSummary) -> &'static str {
 /// Returns `true` if `st` has unstaged changes that belong in the
 /// "Changes not staged for commit" section.
 fn is_unstaged(st: StatusSummary) -> bool {
-    !st.is_empty() && st != StatusSummary::STAGED && st != StatusSummary::STAGED_NEW
+    !st.is_empty()
+        && st != StatusSummary::STAGED
+        && st != StatusSummary::STAGED_NEW
+        && !st.contains(StatusSummary::UNREADABLE)
 }
 
 /// Returns the display label for an unstaged submodule entry.
@@ -434,6 +440,28 @@ fn print_ignored_files(
     Ok(())
 }
 
+/// Prints the section listing submodules whose status could not be read.
+fn print_unreadable_submodules(
+    submodules: &[(String, StatusSummary)],
+    stdout: &mut impl Write,
+) -> Result<bool, io::Error> {
+    let mut header = false;
+    for (path, _) in submodules
+        .iter()
+        .filter(|(_, st)| st.contains(StatusSummary::UNREADABLE))
+    {
+        if !header {
+            writeln!(stdout, "{UNREADABLE_HEADER}")?;
+            header = true;
+        }
+        writeln!(stdout, "\t{path}")?;
+    }
+    if header {
+        writeln!(stdout)?;
+    }
+    Ok(header)
+}
+
 /// What the working tree looks like, for the footer-summary decision.
 #[expect(
     clippy::struct_excessive_bools,
@@ -443,6 +471,7 @@ struct SummaryState {
     changes_in_index: bool,
     changed_in_workdir: bool,
     has_untracked: bool,
+    has_unreadable: bool,
     is_unborn: bool,
 }
 
@@ -452,6 +481,7 @@ fn print_summary(state: &SummaryState, stdout: &mut impl Write) -> Result<(), io
         changes_in_index,
         changed_in_workdir,
         has_untracked,
+        has_unreadable,
         is_unborn,
     } = state;
     match (changes_in_index, changed_in_workdir, has_untracked) {
@@ -461,7 +491,9 @@ fn print_summary(state: &SummaryState, stdout: &mut impl Write) -> Result<(), io
                 "no changes added to commit (use \"git add\" and/or \"git commit -a\")"
             )?;
         }
-        (false, false, false) => {
+        // Nothing observed changed. Stay silent when a submodule couldn't be read, we can't claim
+        // a clean tree here.
+        (false, false, false) if !has_unreadable => {
             if is_unborn {
                 writeln!(
                     stdout,
@@ -545,12 +577,14 @@ pub fn display_status(
     )?;
     let has_untracked = print_untracked_files(non_submod, conflicted_paths, path_filter, rel, out)?;
     print_ignored_files(non_submod, path_filter, rel, out)?;
+    let has_unreadable = print_unreadable_submodules(submodules, out)?;
 
     print_summary(
         &SummaryState {
             changes_in_index,
             changed_in_workdir: changed_in_workdir || has_conflicts,
             has_untracked,
+            has_unreadable,
             is_unborn,
         },
         out,
@@ -628,6 +662,13 @@ mod tests {
     #[test]
     fn clean_is_not_unstaged() {
         assert!(!is_unstaged(StatusSummary::clean()));
+    }
+
+    #[test]
+    fn unreadable_excluded() {
+        let st = StatusSummary::UNREADABLE;
+        assert!(!is_staged(st));
+        assert!(!is_unstaged(st));
     }
 
     // -- has_workdir_changes --

@@ -80,6 +80,7 @@ pub fn prompt(
     for (_, status) in &statuses {
         if status.contains(StatusSummary::MODIFIED_CONTENT)
             || status.contains(StatusSummary::UNTRACKED_CONTENT)
+            || status.contains(StatusSummary::UNREADABLE)
         {
             dirty += 1;
         }

@@ -73,9 +73,7 @@ impl WatchServer {
         let mut gitmodules = ReindexDebounce::new(DebounceKind::Gitmodules);
         let mut structural = ReindexDebounce::new(DebounceKind::Structural);
 
-        if std::mem::take(&mut self.pending_rescan) {
-            self.rescan_all_submodules(&in_flight, &pending_lock_retries);
-        }
+        self.drain_pending_rescans(&in_flight, &pending_lock_retries);
 
         let mut sel = crossbeam_channel::Select::new();
         register_select(&mut sel, &self.watchers, &self.tripwires, &self.control_rx);
