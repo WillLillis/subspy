@@ -173,12 +173,14 @@ impl WatchServer {
     /// `<root>/libs` and `<root>`.
     fn tripwire_dirs(&self) -> BTreeSet<PathBuf> {
         let mut dirs = BTreeSet::new();
+        if self.workdir_to_index.is_empty() {
+            return dirs;
+        }
+        dirs.insert(self.root_path.clone());
         for rel in self.workdir_to_index.keys() {
             let mut cur = rel.as_path();
             while let Some(parent) = cur.parent() {
                 if parent.as_os_str().is_empty() {
-                    // Reached the top level; the parent is the repo root itself.
-                    dirs.insert(self.root_path.clone());
                     break;
                 }
                 dirs.insert(self.root_path.join(parent));
