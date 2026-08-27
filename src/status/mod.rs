@@ -418,6 +418,13 @@ fn assemble_status_scoped<R>(
         FxHashMap::default()
     };
 
+    if matches!(
+        opts.format,
+        OutputFormat::Short | OutputFormat::Porcelain(_)
+    ) {
+        submods.retain(|(_, status)| !status.contains(StatusSummary::UNREADABLE));
+    }
+
     // Path-formatting policy by output mode:
     // - Porcelain v1: repo-root-relative regardless of cwd.
     // - Porcelain v2: cwd-relative without `-z`, repo-root-relative

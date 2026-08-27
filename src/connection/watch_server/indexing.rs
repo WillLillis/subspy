@@ -127,22 +127,16 @@ impl WatchServer {
                                 let status = if is_in_rebase {
                                     StatusSummary::NEW_COMMITS
                                 } else {
-                                    // Lock-free, exactly as `try_spawn_submod_update` reads on the incremental
-                                    // path. `submodule_status` is read-only, and git publishes a new index by
-                                    // renaming `index.lock` over it, so a concurrent git operation can't expose
-                                    // a torn index to this read.
+                                    // Status reads run concurrently with git's atomic index
+                                    // replacement pattern. Failures become `StatusSummary::UNREADABLE`
+                                    // below and are retried after watcher placement.
                                     //
-                                    // Never take the submodule's `index.lock` here: holding it makes the user's
-                                    // own git command in that submodule fail with `Unable to create '<path>':
-                                    // File exists`. If this read fails anyway the submodule is left without an
-                                    // entry, which renders as clean until the post-reindex re-read picks it up.
-                                    //
-                                    // A deleted workdir needs no special case: libgit2 reports a gone workdir as
-                                    // WD_DELETED -> DELETED_WORKDIR by relative path, correct even under a
-                                    // rename.
+                                    // libgit2 reports a missing submodule workdir as `WD_DELETED`,
+                                    // which maps to `DELETED_WORKDIR` by relative path and remains
+                                    // correct even under a rename.
                                     repo.submodule_status(&relative_path, git2::SubmoduleIgnore::None)
                                         .map_err(|e| {
-                                            error!("Failed to get deleted {relative_path} status while populating status map: {e}");
+                                            error!("Failed to read status for {relative_path} while populating status map: {e}");
                                             e
                                         })?
                                         .into()
@@ -169,7 +163,7 @@ impl WatchServer {
             .collect();
 
         status_guard.clear();
-        // `skip_set` and `pending_rescane` are indexed by watcher position and
+        // `skip_set` and `pending_rescan` are indexed by watcher position and
         // read with an unchecked index in the event loop, so it must cover every
         // live watcher. A no-replace reindex leaves `self.watchers` at its current
         // length while this pass still assigns slots up to `ROOT_WATCHER_COUNT +
