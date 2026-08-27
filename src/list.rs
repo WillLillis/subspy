@@ -82,25 +82,35 @@ fn long_oid(oid: Option<git2::Oid>) -> String {
 /// the `Display` impl which is tailored to the `status` command. Returns an
 /// empty string for clean submodules.
 fn status_text(status: StatusSummary) -> String {
-    let mut parts = Vec::new();
+    let mut text = String::new();
+    let mut push = |part: &str| {
+        if !text.is_empty() {
+            text.push_str(", ");
+        }
+        text.push_str(part);
+    };
+    if status.contains(StatusSummary::UNREADABLE) {
+        push("unreadable");
+    }
     if status.contains(StatusSummary::MODIFIED_CONTENT) {
-        parts.push("modified content");
+        push("modified content");
     }
     if status.contains(StatusSummary::UNTRACKED_CONTENT) {
-        parts.push("untracked content");
+        push("untracked content");
     }
     if status.contains(StatusSummary::NEW_COMMITS) {
-        parts.push("new commits");
+        push("new commits");
     }
     if status.contains(StatusSummary::DELETED_WORKDIR) {
-        parts.push("deleted");
+        push("deleted");
     }
     if status.contains(StatusSummary::STAGED_NEW) {
-        parts.push("staged (new)");
+        push("staged (new)");
     } else if status.contains(StatusSummary::STAGED) {
-        parts.push("staged");
+        push("staged");
     }
-    parts.join(", ")
+
+    text
 }
 
 const PLACEHOLDERS: [&str; 9] = [

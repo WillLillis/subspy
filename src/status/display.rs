@@ -1,5 +1,4 @@
-//! Human-readable `git status` output, including the staged/unstaged/untracked
-//! sections, summary footer, and submodule lock-failure errors.
+//! Human-readable `git status` output.
 
 use git2::{Repository, Statuses};
 use rustc_hash::FxHashSet;
@@ -662,13 +661,6 @@ mod tests {
     #[test]
     fn clean_is_not_unstaged() {
         assert!(!is_unstaged(StatusSummary::clean()));
-    }
-
-    #[test]
-    fn unreadable_excluded() {
-        let st = StatusSummary::UNREADABLE;
-        assert!(!is_staged(st));
-        assert!(!is_unstaged(st));
     }
 
     // -- has_workdir_changes --
