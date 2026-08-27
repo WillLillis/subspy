@@ -140,6 +140,16 @@ impl WatchServer {
             //    `SubmoduleLockRelease` for rename events where only the
             //    source path is reported.)
             let mut cleaned_up = false;
+            let publish_status = |status| {
+                if !cancel.load(Ordering::Relaxed) {
+                    let mut guard = statuses.lock().expect("StatusMap mutex poisoned");
+                    if let Some(entry) = guard.get_mut(relative_path.as_str()) {
+                        *entry = status;
+                    } else {
+                        guard.insert(relative_path.clone(), status);
+                    }
+                }
+            };
             loop {
                 if cancel.load(Ordering::Relaxed) {
                     break;
@@ -155,6 +165,7 @@ impl WatchServer {
                     Ok(r) => r,
                     Err(e) => {
                         error!("Failed to open repository for submodule update: {e}");
+                        publish_status(StatusSummary::UNREADABLE);
                         break;
                     }
                 };
@@ -167,14 +178,7 @@ impl WatchServer {
                                 rel: s.intern_str(&relative_path),
                                 status: submod_status,
                             });
-                            if !cancel.load(Ordering::Relaxed) {
-                                let mut guard = statuses.lock().expect("StatusMap mutex poisoned");
-                                if let Some(entry) = guard.get_mut(relative_path.as_str()) {
-                                    *entry = submod_status;
-                                } else {
-                                    guard.insert(relative_path.clone(), submod_status);
-                                }
-                            }
+                            publish_status(submod_status);
                             true
                         }
                         #[cfg_attr(not(trace_events), allow(unused_variables))]
@@ -185,6 +189,7 @@ impl WatchServer {
                                 class: e.class(),
                                 msg: s.intern_str(e.message()),
                             });
+                            publish_status(StatusSummary::UNREADABLE);
                             false
                         }
                     };
