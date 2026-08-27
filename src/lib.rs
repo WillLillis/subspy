@@ -116,7 +116,6 @@ bitflags! {
         const STAGED            = 0b0000_1000;
         const STAGED_NEW        = 0b0001_0000;
         const DELETED_WORKDIR   = 0b0010_0000;
-        const LOCK_FAILURE      = 0b1000_0000;
     }
 }
 

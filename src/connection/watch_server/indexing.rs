@@ -1,8 +1,4 @@
-use std::{
-    collections::BTreeMap,
-    path::{Path, PathBuf},
-    sync::MutexGuard,
-};
+use std::{collections::BTreeMap, path::PathBuf, sync::MutexGuard};
 
 use git2::Repository;
 use log::{error, info};
@@ -17,44 +13,8 @@ use crate::{
     },
     create_progress_bar,
     git::{parse_gitmodules, submodule_modules_subpath},
-    watch::{LockFileGuard, WatchError, WatchResult},
+    watch::{WatchError, WatchResult},
 };
-
-/// Returns the converted `StatusSummary` status for the submodule at `relative_path` guarded by
-/// `lock_path`. If the lock file at `lock_path` cannot be acquired, returns
-/// `Ok(StatusSummary::LOCK_FAILURE)`.
-fn get_submod_status(
-    repo: &Repository,
-    relative_path: &str,
-    lock_path: &Path,
-) -> WatchResult<StatusSummary> {
-    // Unlike the incremental path (`try_spawn_submod_update`, which reads
-    // lock-free), the reindex acquires the submodule's `index.lock` on purpose:
-    // a failure surfaces as `StatusSummary::LOCK_FAILURE` so a wedged submodule
-    // is visible to the user (commit 27f2ecb), and this one-shot pass has no
-    // per-submodule retry loop to make a lock-free read converge the way the
-    // incremental path's dirty / `SubmoduleLockRelease` retries do. Contention
-    // with a concurrent git op is handled upstream by debouncing the reindex
-    // (`ReindexDebounce`), not by dropping this lock; and a recorded
-    // `LOCK_FAILURE` is re-read once the lock is released (see
-    // `lock_release_needs_reread`).
-    let lock = LockFileGuard::acquire(lock_path);
-    let status: StatusSummary = if lock.is_ok() {
-        repo.submodule_status(relative_path, git2::SubmoduleIgnore::None)?
-            .into()
-    } else {
-        // Pass failures to acquire the relevant `index.lock` file as pseudo
-        // statuses so they can be displayed to the user to resolve.
-        error!(
-            "Failed to acquire lock file `{}` before retrieving status",
-            lock_path.display()
-        );
-        StatusSummary::LOCK_FAILURE
-    };
-    // Explicitly drop `lock` as soon as possible, rather than at some point after the return
-    drop(lock);
-    Ok(status)
-}
 
 impl WatchServer {
     /// Gathers the status for all submodules within the given repository. When
@@ -166,17 +126,20 @@ impl WatchServer {
 
                                 let status = if is_in_rebase {
                                     StatusSummary::NEW_COMMITS
-                                } else if let Some(modules_path) = &modules_path {
-                                    get_submod_status(repo, &relative_path, &modules_path.join("index.lock"))
-                                        .map_err(|e| {
-                                            error!("Failed to get {relative_path} status while populating status map: {e}");
-                                            e
-                                        })?
                                 } else {
-                                    // Deleted workdir: no `index.lock` to contend with, so read
-                                    // lock-free, mirroring `try_spawn_submod_update`. libgit2
-                                    // reports a gone workdir as WD_DELETED -> DELETED_WORKDIR,
-                                    // by relative path, so this is correct even under a rename.
+                                    // Lock-free, exactly as `try_spawn_submod_update` reads on the incremental
+                                    // path. `submodule_status` is read-only, and git publishes a new index by
+                                    // renaming `index.lock` over it, so a concurrent git operation can't expose
+                                    // a torn index to this read.
+                                    //
+                                    // Never take the submodule's `index.lock` here: holding it makes the user's
+                                    // own git command in that submodule fail with `Unable to create '<path>':
+                                    // File exists`. If this read fails anyway the submodule is left without an
+                                    // entry, which renders as clean until the post-reindex re-read picks it up.
+                                    //
+                                    // A deleted workdir needs no special case: libgit2 reports a gone workdir as
+                                    // WD_DELETED -> DELETED_WORKDIR by relative path, correct even under a
+                                    // rename.
                                     repo.submodule_status(&relative_path, git2::SubmoduleIgnore::None)
                                         .map_err(|e| {
                                             error!("Failed to get deleted {relative_path} status while populating status map: {e}");
@@ -277,6 +240,7 @@ impl WatchServer {
         // the submodule watches are (re)placed.
         if place_submod_watches {
             self.place_tripwires();
+            self.pending_rescan = true;
         }
 
         if let Some(pb) = &progress_bar {

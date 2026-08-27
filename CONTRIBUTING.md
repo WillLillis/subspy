@@ -25,8 +25,8 @@ over IPC to retrieve or manipulate that cache.
 
 1. `subspy status` (or `prompt`) connects to the server. If none is running, it spawns
    one via `spawn_daemon` and retries.
-2. The server acquires a lock file, places recursive filesystem watchers on `.git/`,
-   `.gitmodules`, and each submodule directory, then runs an initial indexing pass.
+2. The server places recursive filesystem watchers on `.git/`, `.gitmodules`, and each
+   submodule directory, then runs an initial indexing pass.
 3. On filesystem events, the server re-computes status for affected submodules (debounced,
    with cancellation of in-flight tasks via `AtomicBool`).
 4. Client requests are handled on the server's main thread. Status responses are
@@ -47,7 +47,7 @@ over IPC to retrieve or manipulate that cache.
 | `proc.rs` | Cross-platform `Command` flag helpers (`configure_detached_daemon`, `configure_hidden_console`); no-ops on non-Windows |
 | `bitset.rs` | Inline bitset for dense integer sets (watcher indices) |
 | `git.rs` | Lightweight git helpers (`parse_gitmodules` -- fast `.gitmodules` parser; `configure_git2` for global libgit2 options) |
-| `watch.rs` | `spawn_daemon`, `build_daemon_command`, `LockFileGuard` (atomic lock file with fs-watcher wait) |
+| `watch.rs` | `spawn_daemon`, `build_daemon_command` |
 | `status/` | Status output (see below) |
 | `prompt.rs` | Shell prompt integration -- fast, silent on all errors (experimental; exposed primitives may change) |
 | `list.rs` | `subspy list` -- submodule metadata with format templates |
@@ -102,7 +102,7 @@ each with its own renderer. Long stands alone; short + porcelain v1 share an
 | `mod.rs` | The `WatchServer` struct, shared vocabulary (consts, type aliases, `ControlMessage`, `StatusMap`), the `watch()` entry, and the run-loop spine |
 | `classify.rs` | Event classification: `classify_event`, the `EventType` enum, and the path predicates |
 | `placement.rs` | Watcher and tripwire setup (`place_*`, `build_watcher`, `WatchListItem`) |
-| `indexing.rs` | Full status-map population (`populate_status_map`, `get_submod_status`, `get_modules_path`) |
+| `indexing.rs` | Full status-map population (`populate_status_map`, `get_modules_path`) |
 | `update.rs` | The in-flight rayon update engine (`try_spawn_submod_update`, `InFlightTask`/`InFlightTracker`) |
 | `event_loop.rs` | The `crossbeam` select loop, dispatch, tripwire handling, and reindex-deferral wiring |
 | `debounce.rs` | Debounced reindex deadlines (`ReindexDebounce`, `DebounceKind`, `earliest_deadline`) shared by the `.gitmodules` and structural-tripwire reindex paths |
@@ -143,7 +143,7 @@ bump `IPC_VERSION` and update the expected bytes.
 
 **`StatusSummary` bitflags over structured types.** Submodule status is a compact `u8`
 bitmask (`MODIFIED_CONTENT`, `UNTRACKED_CONTENT`, `NEW_COMMITS`, `STAGED`, `STAGED_NEW`,
-`LOCK_FAILURE`). This keeps IPC payloads small and comparisons cheap.
+`DELETED_WORKDIR`). This keeps IPC payloads small and comparisons cheap.
 
 **Rename detection runs in SubSpy, not libgit2.** `build_status_options` leaves
 libgit2's rename detection off; `status/tracked.rs` reconciles renames from the raw
@@ -460,50 +460,62 @@ RUSTFLAGS='--cfg trace_events' cargo test
 
 ### `index.lock` discipline
 
-Git uses an atomic rename pattern: write to `index.lock`, delete the original `index`,
-rename `index.lock` to `index`. The server must be careful about when it holds
-`index.lock`:
+Git publishes a new index by writing it to `index.lock` and renaming that file over
+`index`. The rename is atomic and *is* the unlock -- there is no separate delete or
+unlock step, so a reader always sees a complete old-or-new index.
 
-- **During `populate_status_map`**: `.gitmodules` is read **lock-free**. Git replaces it
-  via an atomic rename, so a reader always sees a complete old-or-new file; holding the
-  root `index.lock` here would be unnecessary and actively harmful, since it makes
-  concurrent git commands fail fast on the pre-existing lock.
-- **During rayon status updates**: No lock is held. `submodule_status()` is read-only
-  and never calls `git_index_write()`. Git's atomic rename guarantees the index is
-  always consistent for readers. Holding the lock here would block user git operations.
-- **During `get_submod_status`**: The submodule's `index.lock` (not the root's) is
-  acquired -- the one place the server takes a lock, and only on the full-reindex path.
-  If it can't be acquired (git is actively writing), the server returns `LOCK_FAILURE`
-  as a transient pseudo-status so a wedged submodule is visible to the user.
+**The server never holds an `index.lock`** -- not the root's, not a submodule's:
 
-The key rule: **never hold the root `index.lock`.** `.gitmodules` is read lock-free and
-`submodule_status()` needs no lock; the only lock the server acquires is the *submodule's*
-own `index.lock` in `get_submod_status`, solely to surface `LOCK_FAILURE` during a reindex.
+- **`.gitmodules` during `populate_status_map`**: read **lock-free**. Git replaces it via
+  an atomic rename, so a reader always sees a complete old-or-new file.
+- **Submodule status, on every path**: no lock. `submodule_status()` is read-only and
+  never calls `git_index_write()`, so the reindex (`populate_status_map`) and the
+  incremental path (`try_spawn_submod_update`) read exactly the same way.
+
+Holding a lock is worse than unnecessary: it makes the user's own git command fail with
+`Unable to create '<path>/index.lock': File exists`. The reindex used to take each
+submodule's `index.lock` in order to surface a `LOCK_FAILURE` pseudo-status, and did
+exactly that to a concurrent `git submodule update` on Windows CI. A lock-free read can
+fail transiently instead (see below); that is handled by re-reading, not by locking git
+out of its own repository.
 
 ### Reindex deferral (debouncing)
 
-Some events call for a full reindex, but not *immediately*. When `.gitmodules` changes,
-the git operation that modified it (e.g. `git submodule add`) also updates the index as
-part of the same command; reindexing on the `.gitmodules` event would try to acquire
-`index.lock` before the command releases it, failing the command. Likewise, a structural
-change to a submodule workdir (a `rm -rf` and re-checkout) arrives as a burst of events,
-and reindexing mid-burst reads a transient state.
+Some events call for a full reindex, but not *immediately*. A `.gitmodules` change, or a
+structural change to a submodule workdir (a `rm -rf` and re-checkout), arrives as a burst
+of events from the git operation that caused it; reindexing mid-burst reads a transient
+state rather than the operation's result.
 
 Both use a shared `ReindexDebounce` (`debounce.rs`): the triggering event *arms* a short
 deadline that the in-flight git operation's subsequent root-`.git` activity keeps
-*bumping*, so the reindex fires only once that operation has settled (released
-`index.lock`). `event_loop.rs` holds two -- one for `.gitmodules` changes, one for a
-submodule workdir appearing -- and reindexes when the earlier deadline elapses. Submodule
-working-tree watchers don't extend the structural window: a submodule can't witness its
-own workdir reappearing (its watch is dead until the reindex re-arms it).
+*bumping*, so the reindex fires only once that operation has settled. `event_loop.rs`
+holds two -- one for `.gitmodules` changes, one for a submodule workdir appearing -- and
+reindexes when the earlier deadline elapses. Submodule working-tree watchers don't extend
+the structural window: a submodule can't witness its own workdir reappearing (its watch
+is dead until the reindex re-arms it).
+
+The debounce is a freshness heuristic, not mutual exclusion. It cannot bound how long a
+git operation runs, so nothing may depend on it to keep the server and a git command
+apart: a `git submodule update` that outlived the 200ms window on Windows CI is what
+exposed the reindex's `index.lock` acquisition.
 
 ### Transient read failures in rayon tasks
 
-Between git deleting the old `index` and renaming `index.lock` to `index`, the file
-is briefly absent. A `submodule_status()` call during this window fails. Three retry
+A `submodule_status()` call can fail while git is publishing a new index: the read is
+lock-free by design, so it races the operation rather than excluding it. Three retry
 paths cover this (documented in detail in `try_spawn_submod_update`): dirty retry (event
 loop marks the in-flight task), new task spawn (event loop creates a fresh task after
 the rename), and `SubmoduleLockRelease` safety net (for aborted git operations).
+
+The reindex has no such retries, and reads each submodule *before* arming the replacement
+watchers, so events the old watchers had queued are lost with them. A reindex that
+replaced watchers therefore sets `pending_rescan`, and the event loop re-reads every
+submodule through the incremental path before it starts selecting.
+
+The reindex has no such retries, and reads each submodule *before* arming the replacement
+watchers, so events the old watchers had queued are lost with them. A reindex that
+replaced watchers therefore sets `pending_rescan`, and the event loop re-reads every
+submodule through the incremental path before it starts selecting.
 
 ### Event ordering across platforms
 

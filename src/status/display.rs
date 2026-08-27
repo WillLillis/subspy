@@ -34,13 +34,6 @@ const UNTRACKED_HEADER: &str = "Untracked files:
 const IGNORED_HEADER: &str = "Ignored files:
   (use \"git add -f <file>...\" to include in what will be committed)";
 
-const LOCK_FILE_ERROR_FOOTER: &str =
-    "Another git/subspy process seems to be running in this repository, e.g.
-an editor opened by 'git commit'. Please make sure all processes
-are terminated then try `subspy reindex`. If it still fails, a git/subspy
-process may have crashed in this repository earlier:
-remove the file manually, `subspy reindex`, and retry to continue.";
-
 fn unstaged_header(rm_in_workdir: bool, has_submod_changes: bool) -> String {
     format!(
         "Changes not staged for commit:
@@ -55,17 +48,9 @@ fn unstaged_header(rm_in_workdir: bool, has_submod_changes: bool) -> String {
     )
 }
 
-// -- Submodule display predicates --
-//
-// These capture the filtering logic used by `print_staged_changes`,
-// `print_unstaged_changes`, and `print_lock_file_errors` so the
-// decisions about which submodules appear in each section are testable
-// independently of the rendering.
-
 /// Returns `true` if `st` should appear in the "Changes to be committed" section.
 const fn is_staged(st: StatusSummary) -> bool {
-    (st.contains(StatusSummary::STAGED) || st.contains(StatusSummary::STAGED_NEW))
-        && !st.contains(StatusSummary::LOCK_FAILURE)
+    st.contains(StatusSummary::STAGED) || st.contains(StatusSummary::STAGED_NEW)
 }
 
 /// Returns the display label for a staged submodule.
@@ -80,10 +65,7 @@ const fn staged_label(st: StatusSummary) -> &'static str {
 /// Returns `true` if `st` has unstaged changes that belong in the
 /// "Changes not staged for commit" section.
 fn is_unstaged(st: StatusSummary) -> bool {
-    !st.is_empty()
-        && st != StatusSummary::STAGED
-        && st != StatusSummary::STAGED_NEW
-        && !st.contains(StatusSummary::LOCK_FAILURE)
+    !st.is_empty() && st != StatusSummary::STAGED && st != StatusSummary::STAGED_NEW
 }
 
 /// Returns the display label for an unstaged submodule entry.
@@ -501,32 +483,6 @@ fn print_summary(state: &SummaryState, stdout: &mut impl Write) -> Result<(), io
     Ok(())
 }
 
-/// Prints error messages for submodules whose `index.lock` could not be acquired.
-fn print_lock_file_errors(
-    submodule_statuses: &[(String, StatusSummary)],
-    stdout: &mut impl Write,
-) -> Result<(), io::Error> {
-    let mut footer = false;
-    for (submod_path, _) in submodule_statuses
-        .iter()
-        .filter(|(_, st)| st.contains(StatusSummary::LOCK_FAILURE))
-    {
-        if !footer {
-            writeln!(stdout)?;
-        }
-        footer = true;
-        writeln!(
-            stdout,
-            "error: Unable to create index.lock file for '{submod_path}': File exists."
-        )?;
-    }
-    if footer {
-        writeln!(stdout, "\n{LOCK_FILE_ERROR_FOOTER}")?;
-    }
-
-    Ok(())
-}
-
 /// Formats and prints the full `git status`-style output: header, staged changes,
 /// unmerged paths, unstaged changes, untracked files, and lock file errors.
 // Basic logic originally adapted from https://github.com/rust-lang/git2-rs/blob/master/examples/status.rs
@@ -600,8 +556,6 @@ pub fn display_status(
         out,
     )?;
 
-    print_lock_file_errors(submodules, out)?;
-
     if show_stash {
         print_stash_trailer(repo, out)?;
     }
@@ -669,20 +623,6 @@ mod tests {
         let st = StatusSummary::NEW_COMMITS;
         assert!(!is_staged(st));
         assert!(is_unstaged(st));
-    }
-
-    #[test]
-    fn lock_failure_excluded_from_both() {
-        let st = StatusSummary::LOCK_FAILURE;
-        assert!(!is_staged(st));
-        assert!(!is_unstaged(st));
-    }
-
-    #[test]
-    fn lock_failure_with_staged_excluded() {
-        let st = StatusSummary::STAGED | StatusSummary::LOCK_FAILURE;
-        assert!(!is_staged(st));
-        assert!(!is_unstaged(st));
     }
 
     #[test]
