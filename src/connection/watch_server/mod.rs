@@ -116,6 +116,12 @@ struct WatchServer {
     skip_set: BitSet,
     /// Whether a rebase is in progress in the root repository
     root_rebasing: bool,
+    /// Set when a reindex replaced the submodule watchers, and cleared by the event
+    /// loop ([`Self::handle_events`]) once it has re-read every submodule. Those
+    /// watchers are armed _after_ [`Self::populate_status_map`] reads statuses,
+    /// and whatever the previous watchers had queued is dropped with them. So, a
+    /// replacing reindex can publish statuses that are already stale or absent.
+    pending_rescan: bool,
 
     // NOTE: Commonly used paths are pre-computed and stored here to avoid redundant heap allocs
     // in hot loops. They are derived from the repository's resolved `GitLayout`
@@ -193,6 +199,7 @@ impl WatchServer {
             workdir_to_index: BTreeMap::new(),
             skip_set: BitSet::with_capacity(0),
             root_rebasing: false,
+            pending_rescan: false,
             root_path: root_path.to_path_buf(),
             root_path_shared: Arc::from(root_path),
             root_index_path,

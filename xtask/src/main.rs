@@ -1083,8 +1083,6 @@ impl FuzzerState {
             let server_us = srv_start.elapsed().as_micros();
             polls += 1;
 
-            // Filter out LOCK_FAILURE — transient, not a real mismatch
-            actual.retain(|(_, s)| !s.contains(StatusSummary::LOCK_FAILURE));
             actual.sort_by(|a, b| a.0.cmp(&b.0));
 
             if actual == expected {

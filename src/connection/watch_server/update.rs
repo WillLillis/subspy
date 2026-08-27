@@ -7,7 +7,11 @@ use git2::Repository;
 use log::error;
 use rustc_hash::FxHashMap;
 
-use crate::{StatusSummary, bitset::BitSet, connection::watch_server::WatchServer};
+use crate::{
+    StatusSummary,
+    bitset::BitSet,
+    connection::watch_server::{ROOT_WATCHER_COUNT, WatchServer},
+};
 
 use super::trace::{spawn_submod_task, wtrace};
 
@@ -238,5 +242,24 @@ impl WatchServer {
             let (_, condvar) = &*in_flight;
             condvar.notify_one();
         });
+    }
+
+    /// Re-reads every live submodule through the incremental path.
+    ///
+    /// A reindex that replaced the submodule watchers read their statuses _before_
+    /// arming the new ones, and dropped whatever the old ones had queued. Because
+    /// of this ordering, any event in that gap is lost, leading to stale or absent
+    /// statuses. This re-read corrects those failures. Any failures that occur during
+    /// this re-read arm their own retries, so statuses eventually converge.
+    pub(super) fn rescan_all_submodules(
+        &self,
+        in_flight: &Arc<(Mutex<InFlightTracker>, Condvar)>,
+        pending_lock_retries: &Arc<Mutex<BitSet>>,
+    ) {
+        for i in ROOT_WATCHER_COUNT..self.watchers.len() {
+            if !self.skip_set.contains(i) {
+                self.try_spawn_submod_update(i, in_flight, pending_lock_retries);
+            }
+        }
     }
 }

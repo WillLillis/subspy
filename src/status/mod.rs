@@ -52,7 +52,6 @@ use crate::{
         IpcError,
         client::{recv_status_response, send_status_request},
     },
-    watch::LockFileError,
 };
 
 pub use case::CaseSensitivity;
@@ -103,8 +102,6 @@ pub enum StatusError {
     Ipc(#[from] IpcError),
     #[error(transparent)]
     Git(#[from] git2::Error),
-    #[error(transparent)]
-    LockFile(#[from] LockFileError),
     #[error(transparent)]
     IO(#[from] io::Error),
 }
