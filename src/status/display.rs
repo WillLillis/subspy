@@ -115,7 +115,7 @@ fn print_staged_changes(
     renamed_submodules: &[super::SubmoduleRename],
     rel: &Relativizer<'_>,
     is_unborn: bool,
-    stdout: &mut impl Write,
+    out: &mut impl Write,
 ) -> Result<bool, io::Error> {
     let mut header = false;
     let staged_header = if is_unborn {
@@ -160,14 +160,14 @@ fn print_staged_changes(
                 return Ok(());
             };
             if !header {
-                writeln!(stdout, "{staged_header}")?;
+                writeln!(out, "{staged_header}")?;
                 header = true;
             }
             let old_path = index.old_file().path_bytes();
             let new_path = index.new_file().path_bytes();
             match (old_path, new_path) {
                 (Some(old), Some(new)) if old != new => {
-                    paint_into(stdout, GREEN, |out| {
+                    paint_into(out, GREEN, |out| {
                         write!(out, "\t{istatus}")?;
                         rel.write_to(out, old)?;
                         out.write_all(b" -> ")?;
@@ -176,13 +176,13 @@ fn print_staged_changes(
                 }
                 (old, new) => {
                     let path = old.or(new).unwrap();
-                    paint_into(stdout, GREEN, |out| {
+                    paint_into(out, GREEN, |out| {
                         write!(out, "\t{istatus}")?;
                         rel.write_to(out, path)
                     })?;
                 }
             }
-            writeln!(stdout)
+            writeln!(out)
         }
         TrackedOrSubRow::File(TrackedRow::SyntheticOrdinary(row)) => {
             let istatus = match row.x {
@@ -191,68 +191,68 @@ fn print_staged_changes(
                 _ => return Ok(()),
             };
             if !header {
-                writeln!(stdout, "{staged_header}")?;
+                writeln!(out, "{staged_header}")?;
                 header = true;
             }
-            paint_into(stdout, GREEN, |out| {
+            paint_into(out, GREEN, |out| {
                 write!(out, "\t{istatus}")?;
                 rel.write_to(out, &row.path)
             })?;
-            writeln!(stdout)
+            writeln!(out)
         }
         TrackedOrSubRow::File(TrackedRow::SyntheticRename(row)) => {
             if !header {
-                writeln!(stdout, "{staged_header}")?;
+                writeln!(out, "{staged_header}")?;
                 header = true;
             }
-            paint_into(stdout, GREEN, |out| {
+            paint_into(out, GREEN, |out| {
                 write!(out, "\trenamed:    ")?;
                 rel.write_to(out, &row.old.path)?;
                 out.write_all(b" -> ")?;
                 rel.write_to(out, &row.new.path)
             })?;
-            writeln!(stdout)
+            writeln!(out)
         }
         TrackedOrSubRow::Sub(SubRow::Deleted(path)) => {
             if !header {
-                writeln!(stdout, "{staged_header}")?;
+                writeln!(out, "{staged_header}")?;
                 header = true;
             }
-            paint_into(stdout, GREEN, |out| {
+            paint_into(out, GREEN, |out| {
                 write!(out, "\tdeleted:    ")?;
                 rel.write_to(out, path.as_bytes())
             })?;
-            writeln!(stdout)
+            writeln!(out)
         }
         TrackedOrSubRow::Sub(SubRow::Renamed(rename)) => {
             if !header {
-                writeln!(stdout, "{staged_header}")?;
+                writeln!(out, "{staged_header}")?;
                 header = true;
             }
-            paint_into(stdout, GREEN, |out| {
+            paint_into(out, GREEN, |out| {
                 write!(out, "\trenamed:    ")?;
                 rel.write_to(out, rename.old.as_bytes())?;
                 out.write_all(b" -> ")?;
                 rel.write_to(out, rename.new.as_bytes())
             })?;
-            writeln!(stdout)
+            writeln!(out)
         }
         TrackedOrSubRow::Sub(SubRow::Modified(submod_path, st)) => {
             if !header {
-                writeln!(stdout, "{staged_header}")?;
+                writeln!(out, "{staged_header}")?;
                 header = true;
             }
             let label = staged_label(st);
-            paint_into(stdout, GREEN, |out| {
+            paint_into(out, GREEN, |out| {
                 write!(out, "\t{label}")?;
                 rel.write_to(out, submod_path.as_bytes())
             })?;
-            writeln!(stdout)
+            writeln!(out)
         }
     })?;
 
     if header {
-        writeln!(stdout)?;
+        writeln!(out)?;
     }
     Ok(header)
 }
@@ -266,7 +266,7 @@ fn print_unstaged_changes(
     submodule_statuses: &[(String, StatusSummary)],
     rm_in_workdir: bool,
     rel: &Relativizer<'_>,
-    stdout: &mut impl Write,
+    out: &mut impl Write,
 ) -> Result<bool, io::Error> {
     let has_submod_changes = submodule_statuses
         .iter()
@@ -312,7 +312,7 @@ fn print_unstaged_changes(
             };
             if !header {
                 writeln!(
-                    stdout,
+                    out,
                     "{}",
                     unstaged_header(rm_in_workdir, has_submod_changes)
                 )?;
@@ -322,7 +322,7 @@ fn print_unstaged_changes(
             let new_path = workdir.new_file().path_bytes();
             match (old_path, new_path) {
                 (Some(old), Some(new)) if old != new => {
-                    paint_into(stdout, RED, |out| {
+                    paint_into(out, RED, |out| {
                         write!(out, "\t{istatus}")?;
                         rel.write_to(out, old)?;
                         out.write_all(b" -> ")?;
@@ -331,32 +331,32 @@ fn print_unstaged_changes(
                 }
                 (old, new) => {
                     let path = old.or(new).unwrap();
-                    paint_into(stdout, RED, |out| {
+                    paint_into(out, RED, |out| {
                         write!(out, "\t{istatus}")?;
                         rel.write_to(out, path)
                     })?;
                 }
             }
-            writeln!(stdout)
+            writeln!(out)
         }
         Row::Sub(SubRow::Modified(submod_path, submod_status)) => {
             if !header {
                 writeln!(
-                    stdout,
+                    out,
                     "{}",
                     unstaged_header(rm_in_workdir, has_submod_changes)
                 )?;
                 header = true;
             }
             let label = unstaged_label(submod_status);
-            paint_into(stdout, RED, |out| {
+            paint_into(out, RED, |out| {
                 write!(out, "\t{label}")?;
                 rel.write_to(out, submod_path.as_bytes())
             })?;
             if has_status_info(submod_status) {
-                writeln!(stdout, " {submod_status}")
+                writeln!(out, " {submod_status}")
             } else {
-                writeln!(stdout)
+                writeln!(out)
             }
         }
         // Deleted/renamed submodule rows are staged changes; they never appear
@@ -365,7 +365,7 @@ fn print_unstaged_changes(
     })?;
 
     if header {
-        writeln!(stdout)?;
+        writeln!(out)?;
     }
     Ok(header)
 }
@@ -376,7 +376,7 @@ fn print_untracked_files(
     conflicted_paths: &FxHashSet<Vec<u8>>,
     path_filter: PathFilter<'_>,
     rel: &Relativizer<'_>,
-    stdout: &mut impl Write,
+    out: &mut impl Write,
 ) -> Result<bool, io::Error> {
     let mut header = false;
     for entry in non_submod
@@ -396,15 +396,15 @@ fn print_untracked_files(
             continue;
         }
         if !header {
-            writeln!(stdout, "{UNTRACKED_HEADER}")?;
+            writeln!(out, "{UNTRACKED_HEADER}")?;
             header = true;
         }
-        stdout.write_all(b"\t")?;
-        paint_into(stdout, RED, |out| rel.write_to(out, file))?;
-        writeln!(stdout)?;
+        out.write_all(b"\t")?;
+        paint_into(out, RED, |out| rel.write_to(out, file))?;
+        writeln!(out)?;
     }
     if header {
-        writeln!(stdout)?;
+        writeln!(out)?;
     }
     Ok(header)
 }
@@ -414,7 +414,7 @@ fn print_ignored_files(
     non_submod: &Statuses<'_>,
     path_filter: PathFilter<'_>,
     rel: &Relativizer<'_>,
-    stdout: &mut impl Write,
+    out: &mut impl Write,
 ) -> Result<(), io::Error> {
     let mut header = false;
     for entry in non_submod.iter().filter(|e| {
@@ -427,15 +427,15 @@ fn print_ignored_files(
             continue;
         };
         if !header {
-            writeln!(stdout, "{IGNORED_HEADER}")?;
+            writeln!(out, "{IGNORED_HEADER}")?;
             header = true;
         }
-        stdout.write_all(b"\t")?;
-        paint_into(stdout, RED, |out| rel.write_to(out, file))?;
-        writeln!(stdout)?;
+        out.write_all(b"\t")?;
+        paint_into(out, RED, |out| rel.write_to(out, file))?;
+        writeln!(out)?;
     }
     if header {
-        writeln!(stdout)?;
+        writeln!(out)?;
     }
     Ok(())
 }
@@ -443,7 +443,7 @@ fn print_ignored_files(
 /// Prints the section listing submodules whose status could not be read.
 fn print_unreadable_submodules(
     submodules: &[(String, StatusSummary)],
-    stdout: &mut impl Write,
+    out: &mut impl Write,
 ) -> Result<bool, io::Error> {
     let mut header = false;
     for (path, _) in submodules
@@ -451,13 +451,13 @@ fn print_unreadable_submodules(
         .filter(|(_, st)| st.contains(StatusSummary::UNREADABLE))
     {
         if !header {
-            writeln!(stdout, "{UNREADABLE_HEADER}")?;
+            writeln!(out, "{UNREADABLE_HEADER}")?;
             header = true;
         }
-        writeln!(stdout, "\t{path}")?;
+        writeln!(out, "\t{path}")?;
     }
     if header {
-        writeln!(stdout)?;
+        writeln!(out)?;
     }
     Ok(header)
 }
@@ -476,7 +476,7 @@ struct SummaryState {
 }
 
 /// Prints the footer hint (e.g. "nothing added to commit but untracked files present").
-fn print_summary(state: &SummaryState, stdout: &mut impl Write) -> Result<(), io::Error> {
+fn print_summary(state: &SummaryState, out: &mut impl Write) -> Result<(), io::Error> {
     let &SummaryState {
         changes_in_index,
         changed_in_workdir,
@@ -487,7 +487,7 @@ fn print_summary(state: &SummaryState, stdout: &mut impl Write) -> Result<(), io
     match (changes_in_index, changed_in_workdir, has_untracked) {
         (false, true, _) => {
             writeln!(
-                stdout,
+                out,
                 "no changes added to commit (use \"git add\" and/or \"git commit -a\")"
             )?;
         }
@@ -496,16 +496,16 @@ fn print_summary(state: &SummaryState, stdout: &mut impl Write) -> Result<(), io
         (false, false, false) if !has_unreadable => {
             if is_unborn {
                 writeln!(
-                    stdout,
+                    out,
                     "nothing to commit (create/copy files and use \"git add\" to track)"
                 )?;
             } else {
-                writeln!(stdout, "nothing to commit, working tree clean")?;
+                writeln!(out, "nothing to commit, working tree clean")?;
             }
         }
         (false, false, true) => {
             writeln!(
-                stdout,
+                out,
                 "nothing added to commit but untracked files present (use \"git add\" to track)"
             )?;
         }
@@ -600,13 +600,13 @@ pub fn display_status(
 /// Emits git's `--show-stash` trailer line (`Your stash currently has
 /// N entry/entries`), or nothing when the repo has no stashes. Stashes
 /// are tracked via the `refs/stash` reflog; missing reflog means 0.
-fn print_stash_trailer(repo: &Repository, stdout: &mut impl Write) -> Result<(), io::Error> {
+fn print_stash_trailer(repo: &Repository, out: &mut impl Write) -> Result<(), io::Error> {
     let count = repo.reflog("refs/stash").map_or(0, |r| r.len());
     if count == 0 {
         return Ok(());
     }
     let noun = if count == 1 { "entry" } else { "entries" };
-    writeln!(stdout, "Your stash currently has {count} {noun}")
+    writeln!(out, "Your stash currently has {count} {noun}")
 }
 
 #[cfg(test)]
