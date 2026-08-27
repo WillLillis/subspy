@@ -282,34 +282,37 @@ pub fn apply_ignore_submodules(
 ///
 /// # Errors
 ///
-/// Returns `StatusError` if git2 fails to read submodule status.
+/// Returns `git2::Error` on failure to parse the `.gitmodules` file.
 ///
 /// # Panics
 ///
 /// Panics if a submodule path contains non-UTF-8.
-pub fn compute_local_statuses(root_path: &Path) -> StatusResult<Vec<(String, StatusSummary)>> {
+pub fn compute_local_statuses(
+    root_path: &Path,
+) -> Result<Vec<(String, StatusSummary)>, git2::Error> {
     use rayon::prelude::*;
 
     // Read `.gitmodules` lock-free: git replaces it via an atomic rename, so a
     // reader always sees a complete old-or-new file. Holding the root
-    // `index.lock` here would be unnecessary and actively harmful -- it makes
-    // concurrent git commands fail fast on the pre-existing lock. Mirrors the
+    // `index.lock` here would be unnecessary and actively harmful (it makes
+    // concurrent git commands fail fast on the pre-existing lock). Mirrors the
     // watch server's `populate_status_map`.
     let gitmodule_entries = parse_gitmodules(root_path)?;
     let tl_repo = thread_local::ThreadLocal::new();
 
-    let statuses: StatusResult<Vec<_>> = gitmodule_entries
+    let statuses: Vec<_> = gitmodule_entries
         .into_par_iter()
-        .map(|(_, path, _)| -> StatusResult<(String, StatusSummary)> {
-            let repo = tl_repo.get_or_try(|| Repository::open(root_path))?;
-            let st = repo.submodule_status(&path, git2::SubmoduleIgnore::None)?;
-            let summary: StatusSummary = st.into();
-            Ok((path, summary))
+        .map(|(_, path, _)| -> (String, StatusSummary) {
+            let summary = tl_repo
+                .get_or_try(|| Repository::open(root_path))
+                .and_then(|repo| repo.submodule_status(&path, git2::SubmoduleIgnore::None))
+                .map_or(StatusSummary::UNREADABLE, Into::into);
+            (path, summary)
         })
-        .filter(|r| !matches!(r, Ok((_, s)) if *s == StatusSummary::clean()))
+        .filter(|(_, s)| *s != StatusSummary::clean())
         .collect();
 
-    statuses
+    Ok(statuses)
 }
 
 #[cfg(test)]

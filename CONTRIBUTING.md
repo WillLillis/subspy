@@ -143,7 +143,9 @@ bump `IPC_VERSION` and update the expected bytes.
 
 **`StatusSummary` bitflags over structured types.** Submodule status is a compact `u8`
 bitmask (`MODIFIED_CONTENT`, `UNTRACKED_CONTENT`, `NEW_COMMITS`, `STAGED`, `STAGED_NEW`,
-`DELETED_WORKDIR`). This keeps IPC payloads small and comparisons cheap.
+`DELETED_WORKDIR`, `UNREADABLE`). This keeps IPC payloads small and comparisons cheap.
+`UNREADABLE` is the one pseudo-status: it means the server could not read that submodule,
+not that git reports anything about it.
 
 **Rename detection runs in SubSpy, not libgit2.** `build_status_options` leaves
 libgit2's rename detection off; `status/tracked.rs` reconciles renames from the raw
@@ -508,14 +510,11 @@ loop marks the in-flight task), new task spawn (event loop creates a fresh task 
 the rename), and `SubmoduleLockRelease` safety net (for aborted git operations).
 
 The reindex has no such retries, and reads each submodule *before* arming the replacement
-watchers, so events the old watchers had queued are lost with them. A reindex that
-replaced watchers therefore sets `pending_rescan`, and the event loop re-reads every
-submodule through the incremental path before it starts selecting.
-
-The reindex has no such retries, and reads each submodule *before* arming the replacement
-watchers, so events the old watchers had queued are lost with them. A reindex that
-replaced watchers therefore sets `pending_rescan`, and the event loop re-reads every
-submodule through the incremental path before it starts selecting.
+watchers, so events the old watchers had queued are lost with them. Both gaps route
+through `pending_rescan`: a replacing reindex marks every submodule, a failed read marks
+its own slot, and the event loop drains the set through the incremental path before it
+starts selecting. A failed read also publishes `UNREADABLE` rather than leaving the entry
+absent, which a client would render as clean.
 
 ### Event ordering across platforms
 

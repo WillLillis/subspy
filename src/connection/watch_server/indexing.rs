@@ -169,18 +169,19 @@ impl WatchServer {
             .collect();
 
         status_guard.clear();
-        // `skip_set` is indexed by watcher position and read with an unchecked
-        // index in the event loop, so it must cover every live watcher. A
-        // no-replace reindex leaves `self.watchers` at its current length while
-        // this pass still assigns slots up to `ROOT_WATCHER_COUNT +
+        // `skip_set` and `pending_rescane` are indexed by watcher position and
+        // read with an unchecked index in the event loop, so it must cover every
+        // live watcher. A no-replace reindex leaves `self.watchers` at its current
+        // length while this pass still assigns slots up to `ROOT_WATCHER_COUNT +
         // results.len()`, so size to whichever is larger. Using only the new
         // submodule count would let a no-replace reindex that shrinks the set
         // leave `skip_set` shorter than `watchers` (an out-of-bounds read);
         // using only `watchers.len()` would under-size it when the set grows
         // (an out-of-bounds insert below). On the replace path `watchers` holds
         // just the root watchers here, so the new count dominates.
-        let skip_set_len = self.watchers.len().max(ROOT_WATCHER_COUNT + results.len());
-        self.skip_set.clear_and_resize(skip_set_len);
+        let watcher_slot_count = self.watchers.len().max(ROOT_WATCHER_COUNT + results.len());
+        self.skip_set.clear_and_resize(watcher_slot_count);
+        self.pending_rescan.clear_and_resize(watcher_slot_count);
         if place_submod_watches {
             self.modules_path_to_index.clear();
             self.workdir_to_index.clear();
@@ -201,16 +202,22 @@ impl WatchServer {
         {
             let index = ROOT_WATCHER_COUNT + i;
             // Status and skip_set come only from a successful read. A failed read
-            // leaves no status entry but still reserves a watcher slot (below);
-            // the watcher will generate events that trigger re-reads via
-            // try_spawn_submod_update, so the status will eventually converge.
+            // is recorded as `UNREADABLE` and still reserves a watcher slot (below).
+            // The watcher will generate events that trigger re-reads via
+            // `try_spawn_submod_update`, so the status will eventually converge.
             if let Ok((status, is_in_rebase)) = status {
                 status_guard.insert(relative_path.clone(), status);
                 if is_in_rebase {
                     self.skip_set.insert(index);
                 }
+            } else {
+                // Already logged at the point of failure, just mark the slot so
+                // the event loop can re-read it.
+                status_guard.insert(relative_path.clone(), StatusSummary::UNREADABLE);
+                self.pending_rescan.insert(index);
             }
             if place_submod_watches {
+                self.pending_rescan.insert(index);
                 // Route `.git/modules/<name>` events to this slot whenever the
                 // path resolved, independent of the status read: a transient
                 // read failure must not strand the submodule without routing,
@@ -240,7 +247,6 @@ impl WatchServer {
         // the submodule watches are (re)placed.
         if place_submod_watches {
             self.place_tripwires();
-            self.pending_rescan = true;
         }
 
         if let Some(pb) = &progress_bar {
