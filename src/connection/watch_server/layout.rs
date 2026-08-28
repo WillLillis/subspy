@@ -19,13 +19,13 @@ use git2::Repository;
 
 use crate::watch::WatchResult;
 
-/// The resolved git-directory layout for a watched working tree.
-///
-/// `git_dir` is the per-worktree directory ([`Repository::path`]); `common_dir`
-/// is the shared one ([`Repository::commondir`]). For a non-worktree repository
-/// the two are equal.
+/// The resolved git-directory layout for a working tree.
 pub(super) struct GitLayout {
+    /// Git state specific to this working tree, including its index, HEAD, submodule
+    /// git directories, locks, and rebase markers.
     git_dir: PathBuf,
+    /// Repository-wide git state shared by linked worktrees, used here to locate branch
+    /// refs. For the main working tree, this is the same as [`Self::git_dir`].
     common_dir: PathBuf,
 }
 
@@ -52,19 +52,18 @@ impl GitLayout {
         &self.git_dir
     }
 
-    /// `<git_dir>/index` -- the working tree's index (per-worktree).
+    /// `<git_dir>/index`: the working tree's index (per-worktree).
     pub(super) fn index(&self) -> PathBuf {
         self.git_dir.join("index")
     }
 
-    /// `<git_dir>/HEAD` -- the working tree's HEAD (per-worktree).
+    /// `<git_dir>/HEAD`: the working tree's HEAD (per-worktree).
     pub(super) fn head(&self) -> PathBuf {
         self.git_dir.join("HEAD")
     }
 
-    /// `<git_dir>/modules` -- where this working tree's submodule gitdirs live
-    /// (per-worktree: a worktree's submodules sit under
-    /// `.git/worktrees/<name>/modules/`, not the main repo's `.git/modules/`).
+    /// `<git_dir>/modules`: where this working tree's submodule gitdirs live
+    /// (per-worktree: a worktree's submodules sit under `.git/worktrees/<name>/modules/`).
     pub(super) fn modules(&self) -> PathBuf {
         self.git_dir.join("modules")
     }
@@ -79,8 +78,8 @@ impl GitLayout {
         self.git_dir.join("HEAD.lock")
     }
 
-    /// `<common_dir>/refs/heads` -- branch refs are shared across worktrees, so
-    /// this is anchored on the common dir, not the per-worktree git dir.
+    /// `<common_dir>/refs/heads`: branch refs are shared across worktrees, so
+    /// this is anchored on the common dir.
     pub(super) fn refs_heads(&self) -> PathBuf {
         self.common_dir.join("refs").join("heads")
     }
@@ -88,8 +87,6 @@ impl GitLayout {
 
 #[cfg(test)]
 impl GitLayout {
-    /// Builds a layout directly from a git dir and common dir, bypassing
-    /// libgit2. For tests that exercise path derivation without a real repo.
     pub const fn from_dirs(git_dir: PathBuf, common_dir: PathBuf) -> Self {
         Self {
             git_dir,
@@ -134,8 +131,6 @@ mod tests {
         init_repo(&root);
 
         let layout = GitLayout::resolve(&root).unwrap();
-        // For a plain repo the two coincide, and every per-worktree path sits
-        // directly under `<root>/.git`.
         assert_eq!(
             layout.git_dir(),
             layout.refs_heads().parent().unwrap().parent().unwrap()
@@ -145,7 +140,6 @@ mod tests {
         assert!(layout.modules().ends_with(".git/modules"));
         assert!(layout.index_lock().ends_with(".git/index.lock"));
         assert!(layout.refs_heads().ends_with(".git/refs/heads"));
-        // git_dir resolves under the working tree.
         assert!(layout.git_dir().starts_with(root));
     }
 
@@ -155,14 +149,11 @@ mod tests {
         let main = tmp.path().join("main");
         std::fs::create_dir(&main).unwrap();
         init_repo(&main);
-        // A linked worktree: its git dir is `<main>/.git/worktrees/wt`, but refs
-        // stay in `<main>/.git`.
         git(&main, &["worktree", "add", "-q", "../wt", "HEAD"]);
         let wt = tmp.path().join("wt");
 
         let layout = GitLayout::resolve(&wt).unwrap();
 
-        // Per-worktree state lives under `.git/worktrees/wt/`.
         assert!(
             layout.git_dir().ends_with("worktrees/wt"),
             "git_dir = {}",
@@ -173,7 +164,7 @@ mod tests {
         assert!(layout.modules().ends_with("worktrees/wt/modules"));
         assert!(layout.index_lock().ends_with("worktrees/wt/index.lock"));
 
-        // Refs are shared: anchored on the main repo's `.git`, NOT the worktree.
+        // Branch refs resolve through the main repository's common git directory.
         assert!(
             layout.refs_heads().ends_with("main/.git/refs/heads"),
             "refs_heads = {}",
@@ -182,10 +173,6 @@ mod tests {
         assert!(!layout.refs_heads().starts_with(layout.git_dir()));
     }
 
-    // Resolution-only coverage: `GitLayout` resolves a `--separate-git-dir`
-    // repo's external git dir correctly, but the CLI classifies such repos as
-    // `OtherGitlink` and does NOT serve them (see `RepoKind::server_eligible`).
-    // This guards the path math, not end-to-end watch-server support.
     #[test]
     fn separate_git_dir_resolves_external_git_dir() {
         let tmp = TempDir::new().unwrap();
@@ -193,15 +180,12 @@ mod tests {
         let work = tmp_path.join("work");
         let gitdir = tmp_path.join("external.git");
         std::fs::create_dir_all(&work).unwrap();
-        // `git init --separate-git-dir` puts the git dir outside the work tree;
-        // `.git` becomes a gitlink file.
         git(
             &work,
             &["init", "-q", "--separate-git-dir", gitdir.to_str().unwrap()],
         );
 
         let layout = GitLayout::resolve(&work).unwrap();
-        // git_dir is the external dir; common_dir equals it (no worktree split).
         assert!(
             layout.index().starts_with(&gitdir),
             "index = {}",
