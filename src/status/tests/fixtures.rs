@@ -556,8 +556,7 @@ pub fn setup_submodule_renamed(h: &TestHarness) {
 }
 
 /// A submodule with both a new commit (HEAD advanced past the parent's
-/// gitlink) and modified working-tree content -- the `(modified content, new
-/// commits)` shape a submodule that is itself a superproject must still report.
+/// gitlink) and modified working-tree content.
 pub fn setup_submodule_modified_and_new_commits(h: &TestHarness) {
     h.submodule("sub")
         .write("README.md", "moved forward\n")

@@ -78,7 +78,7 @@ fn long_oid(oid: Option<git2::Oid>) -> String {
 }
 
 /// Formats a [`StatusSummary`] as a comma-separated list of human-readable
-/// flags (e.g. `"modified content, new commits"`). Includes `STAGED`, unlike
+/// flags (e.g. `"new commits, modified content"`). Includes `STAGED`, unlike
 /// the `Display` impl which is tailored to the `status` command. Returns an
 /// empty string for clean submodules.
 fn status_text(status: StatusSummary) -> String {
@@ -92,14 +92,14 @@ fn status_text(status: StatusSummary) -> String {
     if status.contains(StatusSummary::UNREADABLE) {
         push("unreadable");
     }
+    if status.contains(StatusSummary::NEW_COMMITS) {
+        push("new commits");
+    }
     if status.contains(StatusSummary::MODIFIED_CONTENT) {
         push("modified content");
     }
     if status.contains(StatusSummary::UNTRACKED_CONTENT) {
         push("untracked content");
-    }
-    if status.contains(StatusSummary::NEW_COMMITS) {
-        push("new commits");
     }
     if status.contains(StatusSummary::DELETED_WORKDIR) {
         push("deleted");
@@ -361,7 +361,7 @@ mod tests {
     fn status_text_multiple_flags() {
         let status =
             StatusSummary::MODIFIED_CONTENT | StatusSummary::NEW_COMMITS | StatusSummary::STAGED;
-        assert_eq!(status_text(status), "modified content, new commits, staged");
+        assert_eq!(status_text(status), "new commits, modified content, staged");
     }
 
     #[test]
@@ -372,7 +372,7 @@ mod tests {
             | StatusSummary::STAGED;
         assert_eq!(
             status_text(status),
-            "modified content, untracked content, new commits, staged"
+            "new commits, modified content, untracked content, staged"
         );
     }
 

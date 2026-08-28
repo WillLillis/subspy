@@ -157,7 +157,7 @@ pub struct List {
     ///   {head_long}   - current HEAD OID in the submodule workdir (full)
     ///   {branch}      - tracking branch from .gitmodules (if set)
     ///   {head_branch} - checked-out branch in the submodule workdir (empty if detached)
-    ///   {status}      - submodule status (e.g. "modified content, new commits")
+    ///   {status}      - submodule status (e.g. "new commits, modified content")
     ///
     /// Extra text inside braces is preserved and padded as a unit, e.g.
     /// {[name]} outputs [value] with alignment applied to the whole [value].

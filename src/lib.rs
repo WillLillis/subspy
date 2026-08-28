@@ -156,14 +156,14 @@ impl std::fmt::Display for StatusSummary {
             Ok(())
         };
 
+        if self.contains(Self::NEW_COMMITS) {
+            add_info("new commits")?;
+        }
         if self.contains(Self::MODIFIED_CONTENT) {
             add_info("modified content")?;
         }
         if self.contains(Self::UNTRACKED_CONTENT) {
             add_info("untracked content")?;
-        }
-        if self.contains(Self::NEW_COMMITS) {
-            add_info("new commits")?;
         }
         if has_content {
             write!(f, ")")?;
@@ -238,7 +238,7 @@ mod tests {
     #[test]
     fn display_multiple_flags() {
         let s = StatusSummary::MODIFIED_CONTENT | StatusSummary::NEW_COMMITS;
-        assert_eq!(s.to_string(), "(modified content, new commits)");
+        assert_eq!(s.to_string(), "(new commits, modified content)");
     }
 
     #[test]
@@ -254,7 +254,7 @@ mod tests {
             | StatusSummary::NEW_COMMITS;
         assert_eq!(
             s.to_string(),
-            "(modified content, untracked content, new commits)"
+            "(new commits, modified content, untracked content)"
         );
     }
 

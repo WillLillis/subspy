@@ -375,8 +375,8 @@ fn long_snapshots() {
 fn long_nested_superproject_snapshot() {
     // A submodule that is itself a superproject (`SubmoduleWithSubmodules`)
     // computes its submodule statuses locally, like a top-level superproject,
-    // so a modified submodule must still show the `(modified content, new
-    // commits)` detail (the bug dropped it). The gitlink-`.git` detection that
+    // so a modified submodule must still show the `(new commits, modified
+    // content)` detail (the bug dropped it). The gitlink-`.git` detection that
     // yields this kind is covered by `cli`'s `get_project_path` tests; this
     // covers the display path for the kind, so it hardcodes the kind like the
     // other submodule cases.
