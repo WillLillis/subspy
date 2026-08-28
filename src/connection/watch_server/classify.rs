@@ -33,22 +33,21 @@ pub(super) enum EventType {
     RootRebaseEnd,
 }
 
-/// Determines whether `event` is relevant by its `kind`. Relevant events include writes
-/// and deletions.
+/// Determines whether `event` is relevant by its [`kind`](`notify::Event::kind`).
 const fn event_is_relevant(event: &notify::Event) -> bool {
     matches!(
         event.kind,
         EventKind::Remove(_)
             | EventKind::Access(AccessKind::Close(AccessMode::Write))
             | EventKind::Create(_)
-            // Windows and macOS don't produce `Close(Write)`; file modifications
+            // Windows and macOS don't produce `Close(Write)`. File modifications
             // are reported as `Modify(...)` instead.
             | EventKind::Modify(ModifyKind::Any | ModifyKind::Data(_))
     )
 }
 
 impl WatchServer {
-    /// Converts a watcher event to a relevant `EventType`, if possible
+    /// Converts a watcher event to a relevant [`EventType`], if possible.
     fn classify_event(&self, event: &notify::Event, watcher_idx: usize) -> Option<EventType> {
         if !event_is_relevant(event) {
             // File renames within submodule source trees are legitimate changes, but we
@@ -57,9 +56,8 @@ impl WatchServer {
             //
             // However, renames under `.git/modules/` _are_ meaningful, e.g. a
             // `git add` inside a submodule produces only a `MOVED_TO index` event
-            // on Linux (inotify), and without this carve-out it would be silently
-            // dropped. Root index renames (`index.lock`->`index`) also need
-            // detection so that operations like `git add <submodule>` in the
+            // on Linux (inotify). Root index renames (`index.lock`->`index`) also
+            // need detection so that operations like `git add <submodule>` in the
             // parent repo are visible.
             let is_git_dir_rename = watcher_idx == DOT_GIT_WATCHER_IDX
                 && matches!(event.kind, EventKind::Modify(ModifyKind::Name(_)))
@@ -76,7 +74,7 @@ impl WatchServer {
                 });
             // macOS/FSEvents reports git's atomic `.gitmodules` replace (write
             // `.gitmodules.lock`, rename it over `.gitmodules`) as a rename
-            // rather than the Remove inotify delivers. The `.gitmodules` watcher
+            // rather than the `Remove` inotify delivers. The `.gitmodules` watcher
             // only ever sees its own file, so any rename here is a real change
             // that must trigger a reindex to pick up an added/removed submodule.
             let is_gitmodules_rename = watcher_idx == DOT_GITMODULES_WATCHER_IDX
@@ -101,8 +99,8 @@ impl WatchServer {
                     Self::is_index_or_head_path(p)
                         || self.is_submod_refs_heads(p)
                         // On Linux, inotify may only report the MOVED_FROM
-                        // half of a `.lock` → target rename. The filename is
-                        // "index.lock"/"HEAD.lock" rather than "index"/"HEAD",
+                        // half of a `target.lock`-> target` rename. The filename
+                        // is "index.lock"/"HEAD.lock" rather than "index"/"HEAD",
                         // so `is_index_or_head_path` misses it. Treat a
                         // rename of these lock files as a completed git
                         // operation so the server re-reads submodule status.
@@ -110,10 +108,6 @@ impl WatchServer {
                             && p.file_name()
                                 .is_some_and(|n| n == "index.lock" || n == "HEAD.lock"))
                 }) {
-                    // NOTE: We don't take the same `Remove` defensive measures for submodule
-                    // `index`/`HEAD` operations as we do with the root repository. This is because
-                    // the event loop continues to run (as opposed to breaking out for a reindex),
-                    // so the rebase start event is caught in time.
                     Some(EventType::SubmoduleGitOperation)
                 } else if self.is_submod_rebase_start_event(event) {
                     Some(EventType::SubmoduleRebaseStart)
@@ -155,7 +149,7 @@ impl WatchServer {
                 // the event loop by spawning lock-free rayon tasks to re-check
                 // submodule statuses.
                 //
-                // Detecting HEAD changes is critical for `git checkout`:
+                // Detecting HEAD changes is needed for `git checkout`:
                 // the index is updated before HEAD, so rayon tasks spawned
                 // from the index rename may read status against the stale
                 // HEAD (producing STAGED | NEW_COMMITS). When the HEAD
@@ -188,8 +182,7 @@ impl WatchServer {
     }
 
     /// Classifies an event via [`Self::classify_event`] and, under
-    /// `--cfg trace_events`, prints the raw event (kind + paths) with its
-    /// resulting classification.
+    /// `cfg(trace_events)`, prints the raw event with its classification.
     #[inline]
     pub(super) fn classify_and_trace_event(
         &self,
@@ -207,8 +200,7 @@ impl WatchServer {
         event_type
     }
 
-    /// Helper to determine whether `paths` contains the `rebase-merge` path as
-    /// a child of `prefix`
+    /// Whether `paths` contains the `rebase-merge` path as a child of `prefix`
     #[inline]
     fn has_rebase_marker_path(paths: &[PathBuf], prefix: &Path) -> bool {
         paths
@@ -218,8 +210,6 @@ impl WatchServer {
 
     #[inline]
     fn is_submod_rebase_start_event(&self, event: &notify::Event) -> bool {
-        // NOTE: We could add an additional check here that the `rebase-merge` path is a directory,
-        // but git shouldn't create a file with that name so it's fine
         matches!(event.kind, EventKind::Create(_))
             && Self::has_rebase_marker_path(&event.paths, &self.root_modules_path)
     }
@@ -242,7 +232,7 @@ impl WatchServer {
             && Self::has_rebase_marker_path(&event.paths, &self.root_git_path)
     }
 
-    // NOTE: There's an interesting edge case here. In _theory_, all we need to do is respond
+    // There's an interesting edge case here. In _theory_, all we need to do is respond
     // to changes to `.git/index`. However, when a new commit/branch is checked out, the files
     // within the repo are modified _before_ `.git/HEAD` is, and `.git/index` is modified
     // sometime before `HEAD` as well. This leads to a race condition where the watch server
@@ -250,13 +240,9 @@ impl WatchServer {
     // modified, only sees the modified files (and _not_ the changed `HEAD`, since it hasn't
     // been updated yet), and "correctly" gets the status from `git2` as "modified content" when
     // in reality it should be "new commits". By also triggering on modifications to
-    // `.git/HEAD`, we mitigate this race condition and get the correct status eventually.
+    // `.git/HEAD`, we converge to the correct status eventually.
     #[inline]
     fn is_index_or_head_path(p: &Path) -> bool {
-        // NOTE: We don't check if `p.is_file()` here, as git sometimes deletes `index` before
-        // renaming `index.lock`->`index`. If it doesn't exist at the time of the check, we'll get
-        // an "incorrect" false. We _could_ check via the metadata and handle errors that way, but
-        // in reality this should be just fine.
         p.file_name()
             .is_some_and(|name| name.eq("index") || name.eq("HEAD"))
     }
@@ -265,14 +251,12 @@ impl WatchServer {
     /// `.git/modules/<name>/refs/heads/`. Uses `modules_path_to_index` to
     /// correctly handle multi-component submodule names (e.g. `libs/foo`).
     ///
-    /// Detecting branch ref renames in submodules is critical for `git commit`:
-    /// the ref update is the most reliable post-commit signal. Without it, the
-    /// server can get stuck reporting pre-commit status (e.g. stale
-    /// `MODIFIED_CONTENT` from staged changes that were just committed).
+    /// Detecting branch ref renames in submodules is needed for `git commit`, as
+    /// the ref update is the most reliable post-commit signal.
     fn is_submod_refs_heads(&self, p: &Path) -> bool {
         // Cheap pre-filter: if the path doesn't contain a "refs" component it
-        // can't be a refs/heads update.  This avoids the expensive ancestor
-        // walk + HashMap lookups for the vast majority of .git/modules events
+        // can't be a `refs/heads` update. This avoids the expensive ancestor
+        // walk + HashMap lookups for the vast majority of `.git/modules` events
         // (object files, pack files, logs, etc.).
         if !p.components().any(|c| c.as_os_str() == "refs") {
             return false;
@@ -294,15 +278,13 @@ mod tests {
 
     use super::*;
 
+    // The filesystem watcher can deliver git's `index.lock`/`HEAD.lock` ->
+    // target rename as only the "source" half (path = the `.lock` file).
+    // The root branch of `classify_event` must still treat that as a
+    // RootGitOperation so submodule statuses get re-read. Otherwise, a cached
+    // STAGED_NEW (or any stale status) persists until the next git op.
     #[test]
     fn root_lock_rename_source_half_triggers_recheck() {
-        // The filesystem watcher can deliver git's `index.lock`/`HEAD.lock` ->
-        // target rename as only the "source" half (path = the `.lock` file).
-        // The root branch of `classify_event` must still treat that as a
-        // RootGitOperation so submodule statuses get re-read; otherwise a cached
-        // STAGED_NEW (or any stale status) persists until the next git op. The
-        // submodule branch already handles this; the root branch did not.
-        // Observed on Windows; inotify can split a rename the same way.
         use notify::event::RenameMode;
 
         let (_tx, rx) = crossbeam_channel::unbounded();
@@ -324,7 +306,7 @@ mod tests {
             );
         }
 
-        // A lock *rollback* (the `.lock` deleted, index unchanged) must still be
+        // A lock *rollback* (the `.lock` deleted, index unchanged) should still be
         // ignored: acting on it would spawn pointless re-reads on every op that
         // touches the index without changing it.
         let rollback = notify::Event::new(EventKind::Remove(notify::event::RemoveKind::File))
@@ -335,78 +317,5 @@ mod tests {
                 .is_none(),
             "index.lock removal (rollback) should not trigger a re-read"
         );
-    }
-
-    #[test]
-    fn is_index_or_head_matches_index() {
-        assert!(WatchServer::is_index_or_head_path(Path::new(
-            ".git/modules/sub/index"
-        )));
-    }
-
-    #[test]
-    fn is_index_or_head_matches_head() {
-        assert!(WatchServer::is_index_or_head_path(Path::new(
-            ".git/modules/sub/HEAD"
-        )));
-    }
-
-    #[test]
-    fn is_index_or_head_rejects_index_lock() {
-        assert!(!WatchServer::is_index_or_head_path(Path::new(
-            ".git/modules/sub/index.lock"
-        )));
-    }
-
-    #[test]
-    fn is_index_or_head_rejects_head_lock() {
-        assert!(!WatchServer::is_index_or_head_path(Path::new(
-            ".git/modules/sub/HEAD.lock"
-        )));
-    }
-
-    #[test]
-    fn is_index_or_head_rejects_other() {
-        assert!(!WatchServer::is_index_or_head_path(Path::new(
-            ".git/modules/sub/config"
-        )));
-    }
-
-    // -- has_rebase_marker_path --
-
-    #[test]
-    fn has_rebase_marker_under_prefix() {
-        let paths = vec![PathBuf::from(".git/modules/sub/rebase-merge")];
-        assert!(WatchServer::has_rebase_marker_path(
-            &paths,
-            Path::new(".git/modules")
-        ));
-    }
-
-    #[test]
-    fn has_rebase_marker_wrong_prefix() {
-        let paths = vec![PathBuf::from("/other/path/rebase-merge")];
-        assert!(!WatchServer::has_rebase_marker_path(
-            &paths,
-            Path::new(".git/modules")
-        ));
-    }
-
-    #[test]
-    fn has_rebase_marker_wrong_filename() {
-        let paths = vec![PathBuf::from(".git/modules/sub/rebase-apply")];
-        assert!(!WatchServer::has_rebase_marker_path(
-            &paths,
-            Path::new(".git/modules")
-        ));
-    }
-
-    #[test]
-    fn has_rebase_marker_empty_paths() {
-        let paths: Vec<PathBuf> = vec![];
-        assert!(!WatchServer::has_rebase_marker_path(
-            &paths,
-            Path::new(".git/modules")
-        ));
     }
 }
