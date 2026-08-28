@@ -2,7 +2,9 @@ mod common;
 
 use std::io::BufReader;
 
+use pretty_assertions::assert_eq;
 use rstest_reuse::apply;
+
 use subspy::{
     StatusSummary,
     connection::{

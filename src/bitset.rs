@@ -162,6 +162,8 @@ impl Iterator for BitSetIter<'_> {
 mod tests {
     use super::*;
 
+    use pretty_assertions::assert_eq;
+
     #[test]
     fn empty_bitset() {
         let bs = BitSet::with_capacity(64);

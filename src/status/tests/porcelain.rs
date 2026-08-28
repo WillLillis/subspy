@@ -6,8 +6,12 @@
 //! stability-promised format - if real git ever drifts, we want to know
 //! immediately rather than rubber-stamping a stale snapshot.
 
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::{
+    path::{Path, PathBuf},
+    process::Command,
+};
+
+use pretty_assertions::assert_eq;
 use tempfile::TempDir;
 use testutil::{HarnessBuilder, Repo, TestHarness};
 

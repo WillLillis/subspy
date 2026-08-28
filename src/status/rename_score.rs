@@ -225,6 +225,8 @@ impl<'a> Iterator for Spans<'a> {
 mod tests {
     use super::score;
 
+    use pretty_assertions::assert_eq;
+
     fn numbered_lines(prefix: &str, count: usize) -> Vec<u8> {
         let mut bytes = Vec::new();
         for i in 0..count {

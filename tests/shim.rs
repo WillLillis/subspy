@@ -4,7 +4,10 @@
 //! when possible, forward to git otherwise" contract.
 
 use std::process::{Command, Output};
+
+use pretty_assertions::assert_eq;
 use tempfile::TempDir;
+
 use testutil::HarnessBuilder;
 
 const fn shim_path() -> &'static str {

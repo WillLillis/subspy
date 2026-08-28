@@ -122,6 +122,8 @@ fn phantom_deletes_from(entries: &[(Vec<u8>, bool)], case: CaseSensitivity) -> F
 mod tests {
     use super::*;
 
+    use pretty_assertions::{assert_eq, assert_ne};
+
     // -- CaseSensitivity --
 
     #[test]

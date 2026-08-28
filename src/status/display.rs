@@ -612,6 +612,8 @@ fn print_stash_trailer(repo: &Repository, out: &mut impl Write) -> Result<(), io
 mod tests {
     use super::*;
 
+    use pretty_assertions::assert_eq;
+
     #[test]
     fn staged_modified_submodule() {
         let st = StatusSummary::STAGED;
