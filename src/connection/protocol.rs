@@ -87,6 +87,8 @@ mod tests {
     use super::*;
     use crate::connection::BINCODE_CFG;
 
+    use pretty_assertions::assert_eq;
+
     #[test]
     fn encoded_constants_match_their_messages() {
         assert_eq!(

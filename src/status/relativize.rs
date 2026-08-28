@@ -154,6 +154,8 @@ impl<'a> Relativizer<'a> {
 mod tests {
     use super::*;
 
+    use pretty_assertions::assert_eq;
+
     fn formatted(cwd_rel: &str, path: &str) -> String {
         let rel = Relativizer::new(cwd_rel.as_bytes(), true);
         let mut out: Vec<u8> = Vec::new();

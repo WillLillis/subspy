@@ -782,6 +782,8 @@ fn get_upstream_status(
 mod tests {
     use super::*;
     use std::path::Path;
+
+    use pretty_assertions::assert_eq;
     use tempfile::TempDir;
 
     fn git(args: &[&str]) {

@@ -246,6 +246,8 @@ impl<const N: usize> Template<'_, N> {
 mod tests {
     use super::*;
 
+    use pretty_assertions::assert_eq;
+
     // -- find_unescaped --
 
     #[test]

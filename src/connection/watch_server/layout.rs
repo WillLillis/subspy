@@ -102,6 +102,8 @@ impl GitLayout {
 mod tests {
     use super::*;
     use std::process::Command;
+
+    use pretty_assertions::assert_eq;
     use tempfile::TempDir;
 
     fn git(dir: &Path, args: &[&str]) {

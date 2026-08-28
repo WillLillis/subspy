@@ -670,6 +670,8 @@ fn find_real_git(me: Option<&Path>, path_var: &OsStr) -> Option<PathBuf> {
 mod tests {
     use super::{dispatch as dispatch_iter, *};
 
+    use pretty_assertions::assert_eq;
+
     /// Test-only adapter that materializes args into a peekable iterator
     /// so existing tests can keep passing `&[OsString]`.
     fn dispatch(argv: &[OsString]) -> Option<Intercept> {

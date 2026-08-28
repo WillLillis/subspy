@@ -218,6 +218,8 @@ fn create_progress_bar(len: u64, prefix: impl Into<Cow<'static, str>>) -> indica
 mod tests {
     use super::*;
 
+    use pretty_assertions::assert_eq;
+
     // -- StatusSummary Display --
 
     #[test]

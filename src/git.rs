@@ -309,6 +309,8 @@ pub fn parse_gitmodules(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use pretty_assertions::assert_eq;
     use tempfile::TempDir;
 
     fn write_gitmodules(root: &Path, content: &str) {

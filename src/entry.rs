@@ -139,6 +139,8 @@ fn setup_logging(command: &Commands) {
 mod tests {
     use super::*;
 
+    use pretty_assertions::assert_eq;
+
     fn strip(args: &[&str]) -> Vec<OsString> {
         strip_internal_flag(args.iter().map(OsString::from)).collect()
     }

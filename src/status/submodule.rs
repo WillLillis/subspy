@@ -318,6 +318,8 @@ pub fn compute_local_statuses(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use pretty_assertions::assert_eq;
     use tempfile::TempDir;
 
     fn git(args: &[&str]) {

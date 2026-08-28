@@ -85,6 +85,8 @@ const fn is_always_special(b: u8) -> bool {
 mod tests {
     use super::*;
 
+    use pretty_assertions::assert_eq;
+
     /// Quotes raw path bytes, wrapping in `"..."`. The escaped output is
     /// always ASCII, so UTF-8 validation for the assertion is infallible even
     /// when the input bytes aren't valid UTF-8.

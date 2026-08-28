@@ -333,6 +333,8 @@ mod tests {
     use super::*;
     use crate::connection::BINCODE_CFG;
 
+    use pretty_assertions::assert_eq;
+
     /// Builds a reference encoding using bincode's derived Encode, and compares
     /// it against our manual `encode_status_into`.
     fn assert_encoding_matches(map: &BTreeMap<String, StatusSummary>) {

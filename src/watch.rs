@@ -83,6 +83,8 @@ mod daemon_command_tests {
     use std::ffi::OsStr;
     use std::path::Path;
 
+    use pretty_assertions::assert_eq;
+
     #[test]
     fn argv_starts_with_internal_flag_then_start_path_foreground() {
         let cmd = build_daemon_command(Path::new("/path/to/subspy"), Path::new("/repo/root"), None);

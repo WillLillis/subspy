@@ -608,6 +608,8 @@ mod tests {
     // repository (typically under /tmp). If the CI runner's temp directory is
     // inside a git checkout, ancestry-based tests may produce false positives.
     use super::*;
+
+    use pretty_assertions::assert_eq;
     use tempfile::TempDir;
 
     fn setup_git_dir(path: &std::path::Path) {

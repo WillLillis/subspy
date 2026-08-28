@@ -313,6 +313,8 @@ pub fn list(
 mod tests {
     use super::*;
 
+    use pretty_assertions::assert_eq;
+
     // -- short_oid / long_oid --
 
     #[test]
