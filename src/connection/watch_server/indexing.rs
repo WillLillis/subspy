@@ -22,8 +22,13 @@ impl WatchServer {
     ///
     /// # Errors
     ///
-    /// Returns `notify::Error` if any watchers cannot be created, or `git2::Error` if any
-    /// git operation fails.
+    /// Returns:
+    ///     - [`git2::Error`] if `.gitmodules` cannot be opened or parsed.
+    ///     - [`notify::Error`] if a submodule watcher cannot be created, or
+    ///       if it cannot be armed for a path that still exists.
+    ///
+    /// Per-submodule metadata and status failures are published as
+    /// [`StatusSummary::UNREADABLE`] instead.
     #[allow(clippy::too_many_lines)]
     pub(super) fn populate_status_map(
         &mut self,
@@ -35,13 +40,9 @@ impl WatchServer {
 
         use rayon::prelude::*;
 
-        // Read `.gitmodules` WITHOUT holding `.git/index.lock`. git replaces
-        // `.gitmodules` via an atomic rename, so a reader always sees a complete
-        // old-or-new file, and the `.gitmodules` watcher re-fires for eventual
-        // consistency. Holding the index lock here is unnecessary for that read
-        // and actively harmful. It makes concurrent `git` commands fail fast on
-        // the pre-existing lock. (`parse_gitmodules` reads `.gitmodules` via
-        // `git2::Config`)
+        // git replaces `.gitmodules` via an atomic rename, so a reader always
+        // sees a complete old-or-new file, and the `.gitmodules` watcher re-fires
+        // for eventual consistency.
         let gitmodule_entries = parse_gitmodules(&self.root_path)?;
 
         if gitmodule_entries.is_empty() {
@@ -84,11 +85,10 @@ impl WatchServer {
                 // gitlink and independent of the repo/status read, and carried
                 // separately from the (fallible) status so that a transient
                 // status-read failure still leaves us the `modules_path_to_index`
-                // routing entry the `.git/modules` watcher needs (without it those
-                // events would resolve to no submodule, and nothing would drive the
-                // retry). A `rm -rf`'d workdir has no gitlink -> NotFound -> `None`,
-                // read lock-free below.
-                let (modules_path, status): (Option<PathBuf>, WatchResult<(StatusSummary, bool)>) =
+                // routing entry the `.git/modules` watcher needs. A deleted workdir
+                // has no gitlink, so `NotFound` leaves `modules_path` unresolved while
+                // the status read below reports `DELETED_WORKDIR`.
+                let (modules_path, status): (Option<PathBuf>, WatchResult<StatusSummary>) =
                     match self.get_modules_path(&relative_path) {
                         // A hard resolution error (not a missing gitlink) leaves no
                         // path to route with, so fail the slot and skip the read.
@@ -99,13 +99,10 @@ impl WatchServer {
                             ) =>
                         {
                             error!(
-                                "Failed to get modules path for submodule {relative_path} - {e}, skipping...",
+                                "Failed to get modules path for submodule {relative_path}: {e}\nSkipping...",
                             );
                             (None, Err(e))
                         }
-                        // Ok(path) -> Some; a missing gitlink -> None (lock-free read).
-                        // TODO: the inner read would be cleaner as a `try` block once
-                        // stabilized (https://github.com/rust-lang/rust/issues/31436).
                         resolved => {
                             let modules_path = resolved.ok();
                             let status = (|| {
@@ -115,34 +112,20 @@ impl WatchServer {
                                         e
                                     })?;
 
-                                // This is definitely a race condition, and is not meant to catch "active"
-                                // rebases while the status map is being populated. Instead, the intention is
-                                // for "stalled" rebases (i.e. that has hit a conflict that must be manually
-                                // resolved) so that we can properly skip updating this submodule until its
-                                // rebase has been completed.
-                                let is_in_rebase = modules_path
-                                    .as_deref()
-                                    .is_some_and(|p| p.join("rebase-merge").exists());
+                                // Status reads run concurrently with git's atomic index
+                                // replacement pattern. Failures become `StatusSummary::UNREADABLE`
+                                // below and queue a retry.
+                                //
+                                // libgit2 reports a missing submodule workdir as `WD_DELETED`,
+                                // which maps to `DELETED_WORKDIR` by relative path and remains
+                                // correct even under a rename.
+                                let status = repo.submodule_status(&relative_path, git2::SubmoduleIgnore::None)
+                                    .map_err(|e| {
+                                        error!("Failed to read status for {relative_path} while populating status map: {e}");
+                                        e
+                                    })?.into();
 
-                                let status = if is_in_rebase {
-                                    StatusSummary::NEW_COMMITS
-                                } else {
-                                    // Status reads run concurrently with git's atomic index
-                                    // replacement pattern. Failures become `StatusSummary::UNREADABLE`
-                                    // below and are retried after watcher placement.
-                                    //
-                                    // libgit2 reports a missing submodule workdir as `WD_DELETED`,
-                                    // which maps to `DELETED_WORKDIR` by relative path and remains
-                                    // correct even under a rename.
-                                    repo.submodule_status(&relative_path, git2::SubmoduleIgnore::None)
-                                        .map_err(|e| {
-                                            error!("Failed to read status for {relative_path} while populating status map: {e}");
-                                            e
-                                        })?
-                                        .into()
-                                };
-
-                                Ok((status, is_in_rebase))
+                                Ok(status)
                             })();
                             (modules_path, status)
                         }
@@ -163,16 +146,9 @@ impl WatchServer {
             .collect();
 
         status_guard.clear();
-        // `skip_set` and `pending_rescan` are indexed by watcher position and
-        // read with an unchecked index in the event loop, so it must cover every
-        // live watcher. A no-replace reindex leaves `self.watchers` at its current
-        // length while this pass still assigns slots up to `ROOT_WATCHER_COUNT +
-        // results.len()`, so size to whichever is larger. Using only the new
-        // submodule count would let a no-replace reindex that shrinks the set
-        // leave `skip_set` shorter than `watchers` (an out-of-bounds read);
-        // using only `watchers.len()` would under-size it when the set grows
-        // (an out-of-bounds insert below). On the replace path `watchers` holds
-        // just the root watchers here, so the new count dominates.
+        // Bitset accessors require in-bounds indices. `self.watchers` and this
+        // pass's submodule slots can differ during a reindex without watcher
+        // replacement, so size both sets for the larger index range.
         let watcher_slot_count = self.watchers.len().max(ROOT_WATCHER_COUNT + results.len());
         self.skip_set.clear_and_resize(watcher_slot_count);
         self.pending_rescan.clear_and_resize(watcher_slot_count);
@@ -180,44 +156,30 @@ impl WatchServer {
             self.modules_path_to_index.clear();
             self.workdir_to_index.clear();
         }
-        // NOTE: Watcher placement must NOT be parallelized. Creating
+        // NOTE: Watcher placement must not be parallelized. Creating
         // `notify::RecommendedWatcher` instances concurrently on rayon threads
         // causes watchers to silently miss subsequent filesystem events, likely
         // due to interference between rayon's work-stealing and notify's
-        // internal event threads. This was measured and reverted.
+        // internal event threads.
         //
         // Every submodule occupies a slot in this loop regardless of whether
         // its status read succeeded. This keeps `index` (= ROOT_WATCHER_COUNT + i)
-        // aligned with watcher positions across calls: rayon preserves order for
+        // aligned with watcher positions across calls. `rayon` preserves order for
         // indexed iterators, and `parse_gitmodules()` returns a consistent order.
-        // Skipping failed submodules would shift subsequent indices and misalign
-        // skip_set / modules_path_to_index with the watcher array.
         for (i, (relative_path, full_path, modules_path, status)) in results.into_iter().enumerate()
         {
             let index = ROOT_WATCHER_COUNT + i;
-            // Status and skip_set come only from a successful read. A failed read
-            // is recorded as `UNREADABLE` and still reserves a watcher slot (below).
-            // The watcher will generate events that trigger re-reads via
-            // `try_spawn_submod_update`, so the status will eventually converge.
-            if let Ok((status, is_in_rebase)) = status {
+            if let Ok(status) = status {
                 status_guard.insert(relative_path.clone(), status);
-                if is_in_rebase {
-                    self.skip_set.insert(index);
-                }
             } else {
-                // Already logged at the point of failure, just mark the slot so
-                // the event loop can re-read it.
                 status_guard.insert(relative_path.clone(), StatusSummary::UNREADABLE);
                 self.pending_rescan.insert(index);
             }
             if place_submod_watches {
                 self.pending_rescan.insert(index);
-                // Route `.git/modules/<name>` events to this slot whenever the
-                // path resolved, independent of the status read: a transient
-                // read failure must not strand the submodule without routing,
-                // since the routed event is what drives the retry. A deleted
-                // workdir has no resolvable path (`None`) and gets no entry until
-                // a restore reindex repopulates it.
+                // Preserve `.git/modules/<name>` event routing when the status
+                // read fails. Deleted workdirs regain this entry after a restoring
+                // reindex resolves the gitlink.
                 if let Some(modules_path) = modules_path {
                     self.modules_path_to_index.insert(modules_path, index);
                 }
@@ -227,7 +189,7 @@ impl WatchServer {
                     path: s.intern_path(&full_path),
                 });
                 // Record the (root-relative) workdir->index mapping for every
-                // submodule, even ones whose status read failed: tripwire
+                // submodule, even ones whose status read failed. Tripwire
                 // routing must still be able to find a submodule by path.
                 self.workdir_to_index
                     .insert(PathBuf::from(&relative_path), index);
@@ -265,6 +227,15 @@ impl WatchServer {
             return Err(WatchError::NotSubmoduleGitlink(dot_git_path));
         };
 
+        // `modules_subpath` is raw gitfile data, while `Path::join` needs an
+        // `OsStr`. Unix can construct it from those bytes verbatim. Other targets
+        // have no lossless conversion from arbitrary bytes, so require UTF-8.
+        #[cfg(unix)]
+        let suffix = {
+            use std::os::unix::ffi::OsStrExt as _;
+            std::ffi::OsStr::from_bytes(modules_subpath)
+        };
+        #[cfg(not(unix))]
         let suffix = std::str::from_utf8(modules_subpath).map_err(|error| {
             WatchError::NonUtf8SubmoduleName {
                 path: dot_git_path,
