@@ -57,18 +57,18 @@ impl WatchServer {
     /// will re-check after completing. Otherwise, inserts into the processing set and spawns
     /// a rayon task that loops until no more dirty events are pending.
     ///
-    /// Any previous entry for `index` in `pending_lock_retries` is cleared, since the new
+    /// Any previous entry for `index` in `pending_status_retries` is cleared, since the new
     /// task supersedes the old retry request.
     #[allow(clippy::too_many_lines)]
     pub(super) fn try_spawn_submod_update(
         &self,
         index: usize,
         in_flight: &Arc<(Mutex<InFlightTracker>, Condvar)>,
-        pending_lock_retries: &Arc<Mutex<BitSet>>,
+        pending_status_retries: &Arc<Mutex<BitSet>>,
     ) {
-        pending_lock_retries
+        pending_status_retries
             .lock()
-            .expect("pending_lock_retries mutex poisoned")
+            .expect("pending_status_retries mutex poisoned")
             .remove(index);
 
         let mut tracker = in_flight.0.lock().expect("InFlightTracker mutex poisoned");
@@ -94,7 +94,7 @@ impl WatchServer {
         let statuses = Arc::clone(&self.submod_statuses);
         // cloning the `Arc` here should be cheaper than the `PathBuf` in `self.root_path`.
         let root_path = Arc::clone(&self.root_path_shared);
-        let pending_retries = Arc::clone(pending_lock_retries);
+        let pending_retries = Arc::clone(pending_status_retries);
 
         spawn_submod_task(move || {
             // ## Lock-free submodule status reads
@@ -256,11 +256,11 @@ impl WatchServer {
     pub(super) fn drain_pending_rescans(
         &mut self,
         in_flight: &Arc<(Mutex<InFlightTracker>, Condvar)>,
-        pending_lock_retries: &Arc<Mutex<BitSet>>,
+        pending_status_retries: &Arc<Mutex<BitSet>>,
     ) {
         for i in self.pending_rescan.iter() {
             if !self.skip_set.contains(i) {
-                self.try_spawn_submod_update(i, in_flight, pending_lock_retries);
+                self.try_spawn_submod_update(i, in_flight, pending_status_retries);
             }
         }
         self.pending_rescan.clear_and_resize(self.watchers.len());
