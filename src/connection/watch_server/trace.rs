@@ -1,37 +1,14 @@
-//! Structured event tracing for the watch server.
+//! Structured watch-server tracing enabled by `cfg(trace_events)`.
 //!
-//! In a normal build this module is almost nothing: [`wtrace!`] expands to `{}`
-//! and [`spawn_submod_task`] is a thin passthrough to `rayon::spawn`. Only
-//! `--cfg trace_events` turns the machinery on,.
+//! Trace sites record [`TraceEvent`] values in per-thread buffers with local
+//! string and path interning. Captures are merged, timestamp-sorted, and
+//! formatted when drained by the test harness.
 //!
-//! # What it captures
-//!
-//! Every watch-server `wtrace!` site records a structured [`TraceEvent`].
-//! Formatting (and any `Debug`/`Display` work) is deferred to drain time, off
-//! the hot path. String and path fields are interned to `Arc<OsStr>` so the
-//! same repeated paths (`index.lock`, `index`, the per-submodule metadata paths)
-//! under an event burst cost one allocation the first time and a refcount bump
-//! on every repeat.
-//!
-//! # Concurrency
-//!
-//! The event loop is the dominant producer; rayon workers (the submodule
-//! re-reads) are occasional ones. Each thread accumulates into its OWN buffer
-//! (and its own interner) via a [`thread_local::ThreadLocal`], so no two
-//! threads ever share a synchronization primitive on the hot path. . A single
-//! consumer drains every per-thread buffer at the end, after the server has been
-//! shut down and joined (producers quiesced), then merges and sorts by timestamp
-//! into one coherent timeline.
-//!
-//! # Lifecycle (tests)
-//!
-//! [`capture_for`] is called on the server thread before `watch()`; it installs
-//! a sink on that thread and registers it by repo root. On test teardown the
-//! harness calls [`dump_for`] (failure: write the trace to stderr, where
-//! `libtest` attributes it to the failing test) or [`discard_for`] (success).
+//! In regular builds, [`wtrace!`] expands without evaluating its arguments and
+//! [`spawn_submod_task`] delegates directly to `rayon::spawn`.
 
-/// Records a structured [`TraceEvent`] for the watch server in builds made with
-/// `--cfg trace_events`; otherwise expands to nothing and never evaluates its
+/// Records a [`TraceEvent`] for the watch server in `cfg(trace_events)` builds.
+/// In regular builds, [`wtrace!`] expands to nothing and never evaluates its
 /// arguments.
 ///
 /// Three forms:
@@ -57,7 +34,8 @@ macro_rules! wtrace {
         )
     };
 }
-// Tracing disabled: drop the argument unevaluated. See the definition above.
+
+/// Discards the invocation without evaluating its arguments.
 #[cfg(not(trace_events))]
 macro_rules! wtrace {
     ($($t:tt)*) => {};
@@ -66,7 +44,7 @@ pub(crate) use wtrace;
 
 /// Spawns a submodule-update task onto rayon's global pool.
 ///
-/// In a `trace_events` build this also propagates the current thread's trace
+/// In a `cfg(trace_events)` build this also propagates the current thread's trace
 /// sink onto the worker, since rayon workers do not inherit thread-locals and
 /// the pool is shared across tests. In a normal build it is exactly
 /// `rayon::spawn`.
@@ -77,9 +55,8 @@ pub(super) fn spawn_submod_task(task: impl FnOnce() + Send + 'static) {
 
     #[cfg(trace_events)]
     {
-        // Capture this thread's sink so the pooled worker traces into the same
-        // per-test buffers; cleared after the task so a finished test's sink is
-        // not pinned into the next, unrelated task this worker happens to run.
+        // Install the caller's trace sink on the pooled worker and clear it after
+        // the task.
         let sink = SINK.with(|s| s.borrow().clone());
         rayon::spawn(move || {
             if let Some(sink) = sink {
@@ -117,11 +94,10 @@ use super::debounce::DebounceKind;
 #[cfg(trace_events)]
 use crate::StatusSummary;
 
-/// A single structured watch-server trace event. Stores cheap owned data
-/// (scalars by value, strings/paths as interned `Arc<OsStr>`).
+/// A single watch server trace event.
 #[cfg(trace_events)]
 pub(super) enum TraceEvent {
-    /// A raw filesystem event was classified (`classify`).
+    /// A raw filesystem event was classified.
     Classified {
         index: usize,
         rel: Arc<OsStr>,
@@ -129,13 +105,13 @@ pub(super) enum TraceEvent {
         paths: Vec<Arc<OsStr>>,
         result: Option<EventType>,
     },
-    /// A submodule workdir watch could not be armed because the dir was absent.
-    WatchDisarmed { path: Arc<OsStr> },
+    /// A submodule watch has no registered paths.
+    WatchUnregistered { path: Arc<OsStr> },
     /// A non-recursive tripwire watch was placed on an ancestor directory.
     TripwirePlaced { path: Arc<OsStr> },
-    /// The deferred-reindex debounce window expired; a reindex will run.
+    /// The deferred-reindex debounce window expired. A reindex will run.
     ReindexExpired,
-    /// A debounced reindex deadline was (re)armed; the reindex runs once the
+    /// A debounced reindex deadline was (re)armed. The reindex runs once the
     /// window elapses without further events. `kind` says which debounce.
     ReindexDeferred {
         kind: DebounceKind,
@@ -153,7 +129,7 @@ pub(super) enum TraceEvent {
         rel: Arc<OsStr>,
         status: StatusSummary,
     },
-    /// A submodule status re-read failed (transient lock/IO contention).
+    /// A submodule status re-read failed.
     ReReadFailed {
         rel: Arc<OsStr>,
         code: ErrorCode,
@@ -183,9 +159,9 @@ impl fmt::Display for TraceEvent {
                     .finish()?;
                 write!(f, " -> {result:?}")
             }
-            Self::WatchDisarmed { path } => write!(
+            Self::WatchUnregistered { path } => write!(
                 f,
-                "submod workdir {} absent; watch left disarmed",
+                "submod watch for {} has no registered paths",
                 Path::new(path).display()
             ),
             Self::TripwirePlaced { path } => {
@@ -233,9 +209,6 @@ impl fmt::Display for TraceEvent {
 }
 
 /// A per-thread string/path interner returning `Arc<OsStr>`.
-///
-/// Lives inside a [`ThreadBuf`], so it is touched by exactly one thread and needs
-/// no synchronization of its own.
 #[cfg(trace_events)]
 #[derive(Default)]
 pub(super) struct Interner {
@@ -258,7 +231,7 @@ impl Interner {
         self.intern(OsStr::new(s))
     }
 
-    /// Interns a path losslessly
+    /// Interns a path losslessly.
     pub(super) fn intern_path(&mut self, p: &Path) -> Arc<OsStr> {
         self.intern(p.as_os_str())
     }
@@ -288,8 +261,8 @@ impl ThreadBuf {
     }
 }
 
-/// A capture sink: one per server (per test). Holds a per-thread buffer for
-/// every thread that emits into it; drained once at the end.
+/// A per-server capture sink holding one buffer for each producer thread.
+/// The test harness drains it after the server finishes.
 #[cfg(trace_events)]
 struct TraceSink {
     start: Instant,
@@ -305,9 +278,7 @@ impl TraceSink {
         }
     }
 
-    /// This thread's buffer, creating it on first use. The mutex is per-thread,
-    /// so it is uncontended on the hot path (only this thread pushes; the drain
-    /// locks it once, after all producers have stopped).
+    /// Returns the current thread's buffer, creating it on first use.
     fn buffer_for_current_thread(&self) -> MutexGuard<'_, ThreadBuf> {
         self.buffers
             .get_or(|| Mutex::new(ThreadBuf::new()))
@@ -317,7 +288,7 @@ impl TraceSink {
 
     /// Merges every per-thread buffer, sorts by timestamp, and writes the
     /// timeline to stderr under `label`. Call only after producers have
-    /// quiesced (server thread joined).
+    /// finished (server thread joined).
     fn dump(&self, label: &str) {
         let mut lines: Vec<(Instant, String)> = Vec::new();
         for cell in &self.buffers {
@@ -348,15 +319,13 @@ impl TraceSink {
 
 #[cfg(trace_events)]
 thread_local! {
-    /// The sink installed on the current thread, if any. `wtrace!` routes here;
-    /// absent on threads we did not install on (then [`emit`] live-prints, which
-    /// is the manual-daemon / fuzzer path).
+    /// The sink installed on the current thread. [`emit`] records events into it
+    /// when present and prints them directly otherwise. Direct printing supports
+    /// manual daemon and fuzzer runs.
     static SINK: RefCell<Option<Arc<TraceSink>>> = const { RefCell::new(None) };
 }
 
-/// Records a trace event on the current thread. The builder closure is handed
-/// this thread's interner and only runs when a sink is installed (or, with no
-/// sink, when we live-print) -- so the interning/cloning never happens off-CI.
+/// Records a trace event on the current thread.
 #[cfg(trace_events)]
 pub(super) fn emit(build: impl FnOnce(&mut Interner) -> TraceEvent) {
     SINK.with(|slot| {
@@ -366,7 +335,6 @@ pub(super) fn emit(build: impl FnOnce(&mut Interner) -> TraceEvent) {
             let event = build(&mut buf.interner);
             buf.records.push((at, event));
         } else {
-            // No sink: live print (manual `--cfg trace_events` daemon / fuzzer).
             let mut scratch = Interner::default();
             eprintln!("[subspy] {}", build(&mut scratch));
         }
@@ -384,8 +352,8 @@ fn install_on_current_thread(sink: Arc<TraceSink>) {
 static REGISTRY: LazyLock<Mutex<FxHashMap<PathBuf, Arc<TraceSink>>>> =
     LazyLock::new(|| Mutex::new(FxHashMap::default()));
 
-/// Begins capturing watch-server traces for the server rooted at `root`, on the
-/// CURRENT thread. Call from the server thread before `watch()`.
+/// Begins capturing watch server traces for `root` on the calling thread.
+/// Call from the server thread before `watch()`.
 #[cfg(trace_events)]
 pub fn capture_for(root: &Path) {
     let sink = Arc::new(TraceSink::new());

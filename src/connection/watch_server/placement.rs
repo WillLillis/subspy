@@ -54,7 +54,7 @@ impl WatchServer {
     /// If `watch_path` does not exist (i.e. the submodule was removed and we are
     /// reindexing in response to that deletion) the watcher is returned inactive.
     /// Its connected channel preserves watcher slot and `Select` receiver alignment.
-    /// The deleted submodule's reapperance is detected by the surviving parent
+    /// The deleted submodule's reappearance is detected by the surviving parent
     /// tripwire, whose `Create` event triggers a reindex that places a new watch.
     ///
     /// # Errors
@@ -68,7 +68,7 @@ impl WatchServer {
         match watcher.watch(watch_path.as_ref(), notify::RecursiveMode::Recursive) {
             Ok(()) => {}
             Err(e) if matches!(e.kind, notify::ErrorKind::PathNotFound) => {
-                wtrace!(|s| WatchDisarmed {
+                wtrace!(|s| WatchUnregistered {
                     path: s.intern_path(watch_path.as_ref())
                 });
             }

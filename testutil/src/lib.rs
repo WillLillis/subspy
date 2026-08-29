@@ -727,7 +727,7 @@ fn start_watch_server(root_path: &Path) -> JoinHandle<()> {
         .name("test_watch_server".to_string())
         .spawn(move || {
             // In a `trace_events` build, capture this server's events into a
-            // per-test buffer keyed by repo root; the harness drains it on
+            // per-test buffer keyed by repo root. The harness drains it on
             // teardown (printing only if the test failed). No-op otherwise.
             #[cfg(trace_events)]
             subspy::connection::watch_server::trace::capture_for(&path);
