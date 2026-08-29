@@ -16,22 +16,16 @@ use crate::{
 };
 
 impl WatchServer {
-    /// Builds a watcher wired to a fresh unbounded channel, **without** arming
-    /// it -- callers arm the returned watcher with `watcher.watch(path, mode)`.
-    /// Separating creation from arming lets [`Self::place_submodule_watch`]
-    /// tolerate a missing workdir while still returning a live watcher and an
-    /// open receiver.
+    /// Builds an _unarmed_ filesystem watcher and its event receiver.
     ///
     /// # Errors
     ///
     /// Returns `notify::Error` if the watcher backend cannot be created.
-    fn build_watcher(log_path: PathBuf) -> notify::Result<(WatchReceiver, ServerWatcher)> {
+    fn build_watcher() -> notify::Result<(WatchReceiver, ServerWatcher)> {
         let (tx, rx) = crossbeam_channel::unbounded();
         let watcher = ServerWatcher::new(
             move |res: Result<notify::Event, notify::Error>| {
-                if let Err(e) = tx.send(res) {
-                    error!("Watcher for {} failed to send -- {e}", log_path.display());
-                }
+                _ = tx.send(res);
             },
             notify::Config::default(),
         )?;
@@ -43,29 +37,25 @@ impl WatchServer {
     ///
     /// # Errors
     ///
-    /// Returns `notify::Error` if the watcher cannot be created or the path cannot be watched
+    /// Returns [`notify::Error`] if watcher creation or path registration fails.
     fn place_watch(
         watch_path: impl AsRef<Path>,
         mode: notify::RecursiveMode,
     ) -> notify::Result<(WatchReceiver, ServerWatcher)> {
-        let (rx, mut watcher) = Self::build_watcher(watch_path.as_ref().to_path_buf())?;
+        let (rx, mut watcher) = Self::build_watcher()?;
         watcher.watch(watch_path.as_ref(), mode)?;
 
         Ok((rx, watcher))
     }
 
-    /// Places a **recursive** watch on a submodule working directory, tolerating
-    /// a missing directory.
+    /// Places a recursive watch on a submodule working directory. A missing directory
+    /// yields a watcher with no registered paths.
     ///
-    /// If `watch_path` does not exist (i.e. the submodule was `rm -rf`'d and we
-    /// are reindexing in response to that deletion) the watcher is returned
-    /// **disarmed**: created and connected to its channel, so its watcher slot
-    /// and `Select` receiver stay valid and index-aligned, but watching nothing.
-    /// The deleted submodule's reappearance is detected by the surviving parent
-    /// tripwire, whose `Create` event triggers a reindex that re-arms this watch.
-    ///
-    /// Without this, a reindex landing while the workdir is gone fails fatally
-    /// (`PathNotFound`) and takes down the whole server.
+    /// If `watch_path` does not exist (i.e. the submodule was removed and we are
+    /// reindexing in response to that deletion) the watcher is returned inactive.
+    /// Its connected channel preserves watcher slot and `Select` receiver alignment.
+    /// The deleted submodule's reapperance is detected by the surviving parent
+    /// tripwire, whose `Create` event triggers a reindex that places a new watch.
     ///
     /// # Errors
     ///
@@ -74,7 +64,7 @@ impl WatchServer {
     pub(super) fn place_submodule_watch(
         watch_path: impl AsRef<Path>,
     ) -> notify::Result<(WatchReceiver, ServerWatcher)> {
-        let (rx, mut watcher) = Self::build_watcher(watch_path.as_ref().to_path_buf())?;
+        let (rx, mut watcher) = Self::build_watcher()?;
         match watcher.watch(watch_path.as_ref(), notify::RecursiveMode::Recursive) {
             Ok(()) => {}
             Err(e) if matches!(e.kind, notify::ErrorKind::PathNotFound) => {
@@ -88,20 +78,21 @@ impl WatchServer {
         Ok((rx, watcher))
     }
 
-    /// Places watchers on the root path independent of the given repository's submodules
+    /// Places root watchers on `.gitmodules`, per-worktree git state, and shared
+    /// refs outside the per-worktree git directory.
     ///
     /// # Errors
     ///
-    /// Returns `notify::Error` if any watchers cannot be created
+    /// Returns [`notify::Error`] if watcher creation or path registration fails.
     pub(super) fn place_root_watchers(&mut self) -> notify::Result<()> {
         let (rx, watcher) = match Self::place_watch(
             self.root_gitmodules_path.as_path(),
-            notify::RecursiveMode::NonRecursive, // ignored
+            notify::RecursiveMode::NonRecursive,
         ) {
             Ok((rx, watcher)) => (rx, watcher),
             Err(e) => {
                 error!(
-                    "Failed to place root watch at `{}` - {e}",
+                    "Failed to place root watch at `{}`: {e}",
                     self.root_gitmodules_path.display()
                 );
                 Err(e)?
@@ -114,9 +105,6 @@ impl WatchServer {
             watcher,
         ));
 
-        // `root_git_path` is the per-worktree git dir (for a linked worktree,
-        // `.git/worktrees/<name>/`), which holds the index, HEAD, the submodule
-        // gitdirs under `modules/`, and the lock/rebase markers.
         let (rx, mut watcher) = match Self::place_watch(
             self.root_git_path.as_path(),
             notify::RecursiveMode::Recursive,
@@ -124,23 +112,18 @@ impl WatchServer {
             Ok((rx, watcher)) => (rx, watcher),
             Err(e) => {
                 error!(
-                    "Failed to place root watch at `{}` - {e}",
+                    "Failed to place root watch at `{}`: {e}",
                     self.root_git_path.display()
                 );
                 Err(e)?
             }
         };
 
-        // In a linked worktree the refs live in the shared common dir, outside
-        // the per-worktree git dir. Watch the common dir's `refs/` on the same
-        // watcher and let `classify_event` filter to `refs/heads`, the same
-        // watch-broad-then-filter model as a normal repo.
-        //
-        // We watch `refs/`, not the whole common dir: the common dir is the main
-        // repo's `.git`, so it also holds the main repo's `objects/` and
-        // `modules/`. The worktree's own submodule gitdirs are already covered
-        // under its git dir. For a non-worktree repo `refs/` already sits under
-        // the git dir (common dir == git dir), so this is skipped.
+        // Linked worktrees keep shared refs outside the per-worktree git directory.
+        // Add the shared `refs` directory to the existing watcher and let
+        // `classify_event` select branch ref changes. Limiting this watch to `refs`
+        // excludes object and submodule traffic from the main repository. The
+        // containment check detects layouts already covered by the recursive watch.
         let common_refs = self
             .root_refs_heads_path
             .parent()
@@ -149,7 +132,7 @@ impl WatchServer {
             && let Err(e) = watcher.watch(common_refs, notify::RecursiveMode::Recursive)
         {
             error!(
-                "Failed to watch common-dir refs at `{}` - {e}",
+                "Failed to watch common-dir refs at `{}`: {e}",
                 common_refs.display()
             );
             Err(e)?;
@@ -166,11 +149,11 @@ impl WatchServer {
         Ok(())
     }
 
-    /// The distinct ancestor directories of every submodule (as absolute paths):
-    /// each submodule's parent, and every directory between it and the repo
-    /// root, with the root always included. Computed from the root-relative
-    /// `workdir_to_index` keys, so a submodule at `libs/foo` contributes
-    /// `<root>/libs` and `<root>`.
+    /// Returns the distinct absolute ancestor directories of every submodule. These
+    /// include each submodule's parent, every directory between it and the repository
+    /// root, and the root itself when at least one submodule exists.
+    ///
+    /// For example, a submodule at `libs/foo` contributes `<root>/libs` and `<root>`.
     fn tripwire_dirs(&self) -> BTreeSet<PathBuf> {
         let mut dirs = BTreeSet::new();
         if self.workdir_to_index.is_empty() {
@@ -190,9 +173,8 @@ impl WatchServer {
         dirs
     }
 
-    /// (Re)places the tripwire watches from the current submodule set.
-    /// Best-effort: a directory that can't be watched is logged and skipped
-    /// rather than failing the whole reindex.
+    /// (Re)places the tripwire watches from the current submodule set. Failures
+    /// are logged and not propagated.
     pub(super) fn place_tripwires(&mut self) {
         self.tripwires.clear();
         for dir in self.tripwire_dirs() {
@@ -208,7 +190,7 @@ impl WatchServer {
                         .into_owned();
                     self.tripwires.push(WatchEntry::new(rel, dir, rx, watcher));
                 }
-                Err(e) => error!("Failed to place tripwire on {} -- {e}", dir.display()),
+                Err(e) => error!("Failed to place tripwire on {}: {e}", dir.display()),
             }
         }
     }
