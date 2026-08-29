@@ -30,7 +30,6 @@ fn root_rebase_without_conflict(_run: u32) {
     // Rebase feature onto master, no conflict, should complete cleanly
     harness.root().run_git(&["rebase", "master"]);
 
-    // Server detects rebase start/end, reindexes, everything stays clean
     harness.assert_all_clean();
 }
 
@@ -237,6 +236,51 @@ fn root_rebase_paused_status_updates_after_add(_run: u32) {
     harness.root().run_git(&["rebase", "--continue"]);
 
     harness.assert_all_clean();
+}
+
+#[apply(common::repeat)]
+fn root_rebase_preserves_submodule_watch_after_topology_change(_run: u32) {
+    let mut harness = common::HarnessBuilder::new()
+        .submodule("sub_a")
+        .no_server()
+        .build();
+
+    harness.root().run_git(&["checkout", "-b", "feature"]);
+    harness.add_submodule_no_commit("sub_b");
+    harness.root().write("conflict.txt", "feature version\n");
+    harness.root().run_git(&["add", "conflict.txt"]);
+    harness
+        .root()
+        .run_git(&["commit", "-m", "add sub_b and conflict.txt"]);
+
+    harness.root().run_git(&["checkout", "master"]);
+    harness.root().write("conflict.txt", "master version\n");
+    harness.root().run_git(&["add", "conflict.txt"]);
+    harness
+        .root()
+        .run_git(&["commit", "-m", "add conflict.txt"]);
+
+    harness.root().run_git(&["checkout", "feature"]);
+    harness.start_server();
+    harness.assert_all_clean();
+
+    let output = harness.root().try_git(&["rebase", "master"]);
+    assert!(
+        !output.status.success(),
+        "Expected rebase to pause on conflict"
+    );
+    harness.assert_submodule_status("sub_b", StatusSummary::STAGED_NEW);
+
+    harness.root().write("conflict.txt", "resolved\n");
+    harness.root().run_git(&["add", "conflict.txt"]);
+    harness.root().run_git(&["rebase", "--continue"]);
+    harness.assert_all_clean();
+
+    harness
+        .submodule("sub_b")
+        .write("after_rebase.txt", "changed\n");
+    harness.assert_submodule_status("sub_b", StatusSummary::UNTRACKED_CONTENT);
+    harness.assert_submodule_status("sub_a", StatusSummary::clean());
 }
 
 // Exercise watcher churn across a multi-commit root rebase.

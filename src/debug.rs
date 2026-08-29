@@ -33,7 +33,6 @@ impl fmt::Display for DebugState {
         writeln!(f, "Worker threads: {}", self.rayon_threads)?;
         writeln!(f, "Root path: {}", self.root_path)?;
         writeln!(f, "Socket: {}", self.socket_name)?;
-        writeln!(f, "Root rebasing: {}", self.root_rebasing)?;
         writeln!(f, "Watcher count: {}", self.watcher_count)?;
         write!(f, "Progress subscribers: ")?;
         match &self.progress_subscribers {
@@ -68,15 +67,6 @@ impl fmt::Display for DebugState {
         } else {
             for (watch_path, pending) in &self.tripwires {
                 writeln!(f, "  {watch_path} ({pending} pending events)")?;
-            }
-        }
-
-        writeln!(f, "\nSkip set:")?;
-        if self.skip_set.is_empty() {
-            writeln!(f, "  (none)")?;
-        } else {
-            for path in &self.skip_set {
-                writeln!(f, "  {path}")?;
             }
         }
 

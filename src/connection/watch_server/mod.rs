@@ -10,10 +10,7 @@ mod layout;
 mod placement;
 mod update;
 
-// Defines the `wtrace!` macro (imported by path where used) plus the trace
-// capture machinery. `pub` only under `--cfg trace_events`, where
-// `capture_for`/`dump_for` are reachable by the test harness; a normal build
-// keeps it private, adding no public surface.
+// Expose trace capture to the external test harness when enabled.
 #[cfg(trace_events)]
 pub mod trace;
 #[cfg(not(trace_events))]
@@ -56,29 +53,28 @@ use super::progress::{ProgressMap, ProgressSubscribers};
 
 /// `.git/` and `.gitmodules`
 const ROOT_WATCHER_COUNT: usize = 2;
-// Root watch indices are stable across re-indexes
 const DOT_GITMODULES_WATCHER_IDX: usize = 0;
 const DOT_GIT_WATCHER_IDX: usize = 1;
 
-/// Type alias for the submodule status map mutex
+/// The submodule status map
 pub(super) type StatusMap = Mutex<BTreeMap<String, StatusSummary>>;
 
 /// Message receiver type for a watcher
 type WatchReceiver = crossbeam_channel::Receiver<Result<notify::Event, notify::Error>>;
 
-/// Watcher type alias
+/// Filesystem watcher type
 pub type ServerWatcher = notify::RecommendedWatcher;
 
-/// Item watched by the server
+/// A filesystem watcher and the metadata used to route its events.
 #[derive(Debug)]
-struct WatchListItem {
+struct WatchEntry {
     watch_path: PathBuf,
     relative_path: String,
     receiver: WatchReceiver,
     watcher: ServerWatcher,
 }
 
-impl WatchListItem {
+impl WatchEntry {
     const fn new(
         relative_path: String,
         watch_path: PathBuf,
@@ -94,40 +90,33 @@ impl WatchListItem {
     }
 }
 
-type WatchList = Vec<WatchListItem>;
-
-/// The primary state necessary to maintain a status watch over the repository at `root_path`
+/// The state necessary to maintain a status watch for the working tree at `root_path`
 struct WatchServer {
     /// Filesystem watchers, one per submodule (plus the two root watchers).
-    watchers: WatchList,
+    watchers: Vec<WatchEntry>,
     /// Non-recursive "tripwire" watches on the ancestor directories of every
     /// submodule, up to and including the repo root. A submodule's own watcher
-    /// dies silently when its directory is `rm -rf`'d, so these surviving parent
+    /// dies silently when its directory is deleted, so these surviving parent
     /// watches are what detect a submodule workdir being deleted or restored.
     /// Rebuilt alongside `watchers` whenever submodule watches are (re)placed.
-    tripwires: WatchList,
+    tripwires: Vec<WatchEntry>,
     /// Maps each submodule's **root-relative** working-directory path to its
     /// watcher index, sorted so a tripwire event on a directory `P` can find
     /// every submodule at or under `P` via a prefix range. Keys are relative so
     /// these comparisons start at the distinguishing component instead of re-walking
     /// the identical repo-root prefix.
     workdir_to_index: BTreeMap<PathBuf, usize>,
-    /// Watcher indices of submodules to skip updating (due to being in a rebase)
-    skip_set: BitSet,
-    /// Whether a rebase is in progress in the root repository
-    root_rebasing: bool,
     /// Submodule watcher indices needing a re-read, drained by the event loop
     /// ([`Self::handle_events`]) on its next turn.
     ///
-    /// A reindex  that replaces the submodule watchers marks every submodule, because
+    /// A reindex that replaces the submodule watchers marks every submodule, because
     /// those watchers are armed _after_ [`Self::populate_status_map`] reads statuses,
     /// and whatever the previous watchers had queued is dropped with them. This
     /// causes a replacing reindex to publish stale status, so they must be refreshed
     /// to converge to a correct answer.
     pending_rescan: BitSet,
 
-    // NOTE: Commonly used paths are pre-computed and stored here to avoid redundant heap allocs
-    // in hot loops. They are derived from the repository's resolved `GitLayout`
+    // Cache paths used in hot loops to avoid repeated `PathBuf` allocations.
     /// Root path to the working tree being watched
     root_path: PathBuf,
     /// Shared handle to `root_path` for rayon tasks. Duplicated as an `Arc`
@@ -140,22 +129,20 @@ struct WatchServer {
     root_head_path: PathBuf,
     /// `<root_path>/.gitmodules` (a tracked file in the working tree)
     root_gitmodules_path: PathBuf,
-    /// `<git_dir>` -- the per-worktree git dir (`Repository::path`); the
-    /// recursive watch target
+    /// `<git_dir>`, the per-worktree git directory and recursive watch target
     root_git_path: PathBuf,
-    /// `<git_dir>/modules` -- this working tree's submodule gitdirs
+    /// `<git_dir>/modules`, containing this working tree's submodule gitdirs
     root_modules_path: PathBuf,
     /// `<git_dir>/index.lock`
     root_lock_path: PathBuf,
     /// `<git_dir>/HEAD.lock`
     root_head_lock_path: PathBuf,
-    /// `<common_dir>/refs/heads` -- branch refs, shared across linked worktrees
+    /// `<common_dir>/refs/heads`, containing branch refs shared by linked worktrees
     root_refs_heads_path: PathBuf,
 
     /// Receiver for control messages from the listener thread
     control_rx: crossbeam_channel::Receiver<ControlMessage>,
-    /// The main map of the server, associating submodule relative paths (from the repository's
-    /// `.gitmodules` file) to the given submodule's summarized status.
+    /// Maps root-relative submodule paths from `.gitmodules` to cached statuses.
     submod_statuses: Arc<StatusMap>,
     /// Associates a given client pid with a queue of indexing progress updates.
     progress_queue: Arc<ProgressMap>,
@@ -177,16 +164,12 @@ pub(super) enum ControlMessage {
 
 impl WatchServer {
     /// Builds a server for the working tree at `root_path` with its already
-    /// resolved [`GitLayout`]. Splitting resolution (fallible, opens the repo)
-    /// from construction keeps `new` infallible and lets the per-worktree git
-    /// dir differ from the shared common dir (see [`GitLayout`]).
+    /// resolved [`GitLayout`].
     pub fn new(
         root_path: &Path,
         layout: &GitLayout,
         control_rx: crossbeam_channel::Receiver<ControlMessage>,
     ) -> Self {
-        // Per-worktree paths come from the git dir; only refs are shared, so
-        // `root_refs_heads_path` is anchored on the common dir.
         let root_git_path = layout.git_dir().to_path_buf();
         let root_index_path = layout.index();
         let root_head_path = layout.head();
@@ -200,8 +183,6 @@ impl WatchServer {
             watchers: Vec::new(),
             tripwires: Vec::new(),
             workdir_to_index: BTreeMap::new(),
-            skip_set: BitSet::with_capacity(0),
-            root_rebasing: false,
             pending_rescan: BitSet::with_capacity(0),
             root_path: root_path.to_path_buf(),
             root_path_shared: Arc::from(root_path),
@@ -224,15 +205,14 @@ impl WatchServer {
 
     /// Spawns the listener thread that accepts incoming client connections.
     ///
-    /// Returns a shutdown flag and the thread's `JoinHandle`. To stop the
-    /// listener, [`watch`] sets the flag and connects once to the socket: the
-    /// flag is checked after each `accept`, and the self-connection wakes the
-    /// otherwise-parked `accept` so the thread sees the flag and returns, ready
+    /// Returns a shutdown flag and the thread's `JoinHandle`. To stop the listener,
+    /// [`Self::watch`] sets the flag and connects once to the socket. The flag is
+    /// checked after each `accept`, so the thread sees the flag and returns, ready
     /// to be joined.
     ///
     /// # Errors
     ///
-    /// Returns `std::io::Error` if the thread cannot be created
+    /// Returns [`std::io::Error`] if the thread cannot be created.
     fn spawn_listener(
         &self,
         control_tx: crossbeam_channel::Sender<ControlMessage>,
@@ -254,8 +234,7 @@ impl WatchServer {
                         None
                     }
                 }) {
-                    // When set, this `conn` is the shutdown self-connection from
-                    // `watch`.
+                    // When set, this is the shutdown self-connection from `WatchServer::watch`
                     if listener_shutdown.load(Ordering::Acquire) {
                         break;
                     }
@@ -277,7 +256,8 @@ impl WatchServer {
         Ok((shutdown, handle))
     }
 
-    /// Sends a shutdown acknowledgment to the client over the IPC connection.
+    /// Tries to send a shutdown acknowledgment to the client over the IPC connection.
+    /// Failures are logged but not propagated.
     fn signal_shutdown(mut conn: BufReader<IpcStream>) {
         if let Err(e) = write_full_message_fixed(&mut conn, &SHUTDOWN_ACK) {
             error!("Failed to send shutdown ack -- {e}");
@@ -350,7 +330,7 @@ impl WatchServer {
     }
 }
 
-/// Runs the watch server for the repository at `root_dir`.
+/// Runs the watch server for the working tree at `root_dir`.
 ///
 /// `root_dir` must be canonicalized.
 ///
@@ -360,7 +340,7 @@ impl WatchServer {
 ///
 /// # Panics
 ///
-/// Panics if the `SUBMOD_STATUSES` mutex is poisoned.
+/// Panics if the submodule status map mutex is poisoned.
 #[expect(clippy::significant_drop_tightening)]
 pub fn watch(root_dir: &Path, display_progress: bool) -> WatchResult<()> {
     let (control_tx, control_rx) = crossbeam_channel::unbounded();

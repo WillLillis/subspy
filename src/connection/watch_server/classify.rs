@@ -23,14 +23,6 @@ pub(super) enum EventType {
     /// A submodule's `index.lock` was removed, indicating a git operation completed
     /// or was aborted. Used to re-fire deferred status reads.
     SubmoduleLockRelease,
-    /// A rebase started within a submodule
-    SubmoduleRebaseStart,
-    /// A rebase ended within a submodule
-    SubmoduleRebaseEnd,
-    /// A rebase started within the root repository
-    RootRebaseStart,
-    /// A rebase ended within the root repository
-    RootRebaseEnd,
 }
 
 /// Determines whether `event` is relevant by its [`kind`](`notify::Event::kind`).
@@ -107,12 +99,9 @@ impl WatchServer {
                         || (matches!(event.kind, EventKind::Modify(ModifyKind::Name(_)))
                             && p.file_name()
                                 .is_some_and(|n| n == "index.lock" || n == "HEAD.lock"))
-                }) {
+                }) || Self::is_rebase_marker_event(event, &self.root_modules_path)
+                {
                     Some(EventType::SubmoduleGitOperation)
-                } else if self.is_submod_rebase_start_event(event) {
-                    Some(EventType::SubmoduleRebaseStart)
-                } else if self.is_submod_rebase_end_event(event) {
-                    Some(EventType::SubmoduleRebaseEnd)
                 } else if matches!(event.kind, EventKind::Remove(_))
                     && event
                         .paths
@@ -167,10 +156,8 @@ impl WatchServer {
                 } else {
                     Some(EventType::RootGitOperation)
                 }
-            } else if self.is_root_rebase_start_event(event) {
-                Some(EventType::RootRebaseStart)
-            } else if self.is_root_rebase_end_event(event) {
-                Some(EventType::RootRebaseEnd)
+            } else if Self::is_rebase_marker_event(event, &self.root_git_path) {
+                Some(EventType::RootGitOperation)
             } else {
                 None
             }
@@ -209,27 +196,9 @@ impl WatchServer {
     }
 
     #[inline]
-    fn is_submod_rebase_start_event(&self, event: &notify::Event) -> bool {
-        matches!(event.kind, EventKind::Create(_))
-            && Self::has_rebase_marker_path(&event.paths, &self.root_modules_path)
-    }
-
-    #[inline]
-    fn is_submod_rebase_end_event(&self, event: &notify::Event) -> bool {
-        matches!(event.kind, EventKind::Remove(_))
-            && Self::has_rebase_marker_path(&event.paths, &self.root_modules_path)
-    }
-
-    #[inline]
-    fn is_root_rebase_start_event(&self, event: &notify::Event) -> bool {
-        matches!(event.kind, EventKind::Create(_))
-            && Self::has_rebase_marker_path(&event.paths, &self.root_git_path)
-    }
-
-    #[inline]
-    fn is_root_rebase_end_event(&self, event: &notify::Event) -> bool {
-        matches!(event.kind, EventKind::Remove(_))
-            && Self::has_rebase_marker_path(&event.paths, &self.root_git_path)
+    fn is_rebase_marker_event(event: &notify::Event, prefix: &Path) -> bool {
+        matches!(event.kind, EventKind::Create(_) | EventKind::Remove(_))
+            && Self::has_rebase_marker_path(&event.paths, prefix)
     }
 
     // There's an interesting edge case here. In _theory_, all we need to do is respond

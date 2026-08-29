@@ -101,7 +101,7 @@ each with its own renderer. Long stands alone; short + porcelain v1 share an
 |---|---|
 | `mod.rs` | The `WatchServer` struct, shared vocabulary (consts, type aliases, `ControlMessage`, `StatusMap`), the `watch()` entry, and the run-loop spine |
 | `classify.rs` | Event classification: `classify_event`, the `EventType` enum, and the path predicates |
-| `placement.rs` | Watcher and tripwire setup (`place_*`, `build_watcher`, `WatchListItem`) |
+| `placement.rs` | Watcher and tripwire setup (`place_*`, `build_watcher`, `WatchEntry`) |
 | `indexing.rs` | Full status-map population (`populate_status_map`, `get_modules_path`) |
 | `update.rs` | The in-flight rayon update engine (`try_spawn_submod_update`, `InFlightTask`/`InFlightTracker`) |
 | `event_loop.rs` | The `crossbeam` select loop, dispatch, tripwire handling, and reindex-deferral wiring |
@@ -309,7 +309,7 @@ Each test file exercises a specific category of git operation against a real wat
 |---|---|
 | `basic.rs` | Core status detection: modified/untracked content, new commits, staging, nested paths |
 | `checkout.rs` | Branch switches, `--recurse-submodules`, submodule update after checkout |
-| `rebase.rs` | Rebase with/without conflicts, reindex during rebase (skip set clearing) |
+| `rebase.rs` | Rebase with/without conflicts, reindex during rebase |
 | `merge.rs` | Merge with/without conflicts, both in root and submodules |
 | `cherry_pick.rs` | Cherry-pick with/without conflicts, both in root and submodules |
 | `reset.rs` | Soft, mixed, and hard resets; unstaging gitlinks in the parent |
@@ -546,9 +546,9 @@ subspy start /path/to/repo --foreground --log-level trace 2>&1
 ### `subspy debug`
 
 Dumps the server's live internal state: watcher list with pending event counts,
-skip set (submodules paused during rebase), in-flight rayon tasks, progress
-subscribers, cached submodule statuses, and the last watcher error. This is the
-first thing to check when the server reports incorrect status.
+in-flight rayon tasks, progress subscribers, cached submodule statuses, and the
+last watcher error. This is the first thing to check when the server reports incorrect
+status.
 
 ```sh
 subspy debug
