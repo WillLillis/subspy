@@ -15,8 +15,7 @@ use super::trace::{spawn_submod_task, wtrace};
 /// flag signals the task to stop.
 pub(super) struct InFlightTask {
     pub cancel: Arc<AtomicBool>,
-    /// When `true`, new events arrived while processing and the task should
-    /// re-read status when done rather than completing.
+    /// Set when events arrive during processing and require another status read.
     pub dirty: bool,
 }
 
@@ -34,8 +33,7 @@ pub(super) fn wait_for_in_flight(state: &(Mutex<InFlightTracker>, Condvar)) {
     for task in guard.tasks.values() {
         task.cancel.store(true, Ordering::Relaxed);
     }
-    // Tasks remove themselves from the tracker as they exit; wait for stragglers
-    // that haven't observed cancellation yet.
+    // Wait while tasks observe cancellation and remove themselves from the tracker.
     while !guard.tasks.is_empty() {
         guard = condvar.wait(guard).expect("InFlightTracker mutex poisoned");
     }
@@ -84,53 +82,47 @@ impl WatchServer {
 
         let in_flight = Arc::clone(in_flight);
         let statuses = Arc::clone(&self.submod_statuses);
-        // cloning the `Arc` here should be cheaper than the `PathBuf` in `self.root_path`.
         let root_path = Arc::clone(&self.root_path_shared);
         let pending_retries = Arc::clone(pending_status_retries);
 
         spawn_submod_task(move || {
-            // ## Lock-free submodule status reads
+            // ## Submodule status reads without `index.lock`
             //
             // No `index.lock` is acquired here. `submodule_status()` is a
             // read-only operation. It never calls `git_index_write()` in
             // libgit2 (the `GIT_DIFF_UPDATE_INDEX` flag is never set in the
             // submodule status path). Git's atomic rename pattern
-            // (`index.lock`->`index`) guarantees the index file is always
-            // in a consistent state for readers. Acquiring `index.lock`
-            // would block concurrent git operations (commit, rebase, add,
-            // etc.) that need the same lock for writing.
+            // (`index.lock`->`index`) publishes only complete index files.
+            // Readers therefore see only a complete index or a transiently
+            // missing path.
             //
             // ## Retry strategy for transient read failures
             //
             // If the index is transiently missing (between git deleting
             // the old file and renaming `index.lock`->`index`), the read
-            // fails. Three retry paths cover all timing scenarios:
+            // fails. Three retry paths allow these transient failures to
+            // converge:
             //
             // 1. **Dirty retry (event loop already processed the rename)**:
             //    This task runs concurrently with the event loop. If the
             //    rename event arrives while we're in-flight, the event loop
-            //    calls `try_spawn_submod_update` which marks us `Dirty`.
-            //    After the failed read we fall through to the Dirty check,
-            //    see the flag, and loop back to retry. The index is
-            //    guaranteed to exist by now since the rename completed.
+            //    calls `try_spawn_submod_update` which marks us dirty. After
+            //    the failed read we fall through to the dirty check, see the
+            //    flag, and loop back to retry. The index is guaranteed to
+            //    exist by now since the rename completed.
             //
             // 2. **New task (task exits before rename event arrives)**:
             //    If we exit before the event loop processes the rename, we
             //    remove ourselves from `InFlightTracker`. When the rename
             //    event arrives it fires `SubmoduleGitOperation`, which
             //    calls `try_spawn_submod_update`. Since we're gone, it
-            //    spawns a fresh task that reads successfully.
+            //    spawns a fresh task to retry.
             //
-            // 3. **`SubmoduleLockRelease` safety net (abort / no rename)**:
-            //    If git aborts (deletes `index.lock` without renaming), no
-            //    `SubmoduleGitOperation` fires. Instead, the `Remove
-            //    index.lock` event is classified as `SubmoduleLockRelease`.
-            //    On exit without a Dirty retry, we insert our watcher index
-            //    into `pending_retries`. The `SubmoduleLockRelease` handler
-            //    checks this set and re-fires the status read. (On Linux,
-            //    `Modify(Name(From)) index.lock` is also classified as
-            //    `SubmoduleLockRelease` for rename events where only the
-            //    source path is reported.)
+            // 3. **`SubmoduleLockRelease` safety net for aborted operations**:
+            //    If git aborts by deleting `index.lock`, the resulting event is
+            //    classified as `SubmoduleLockRelease`. A failed task ready to exit
+            //    leaves its watcher index in `pending_retries`. The handler checks
+            //    this set and re-fires the status read.
             let mut cleaned_up = false;
             let publish_status = |status| {
                 if !cancel.load(Ordering::Relaxed) {
@@ -152,7 +144,6 @@ impl WatchServer {
                 // reusing a handle across dirty retries would read stale
                 // data when the index changed between iterations (e.g.
                 // rapid `git add` calls staging different gitlinks).
-                // Opening is cheap (config + refdb setup, no heavy I/O).
                 let repo = match Repository::open(&root_path) {
                     Ok(r) => r,
                     Err(e) => {
@@ -186,34 +177,28 @@ impl WatchServer {
                         }
                     };
 
-                // Handle pending_retries before acquiring the tracker lock.
-                // This preserves lock ordering (pending_retries->tracker),
-                // matching `try_spawn_submod_update` to avoid deadlocks.
+                // Update `pending_retries` before the dirty check and task removal.
+                // A lock-release event arriving between them marks this task dirty,
+                // preserving the retry.
                 if !read_ok && !cancel.load(Ordering::Relaxed) {
                     pending_retries
                         .lock()
                         .expect("pending_retries mutex poisoned")
                         .insert(index);
                 } else {
-                    // Clear any stale entry from a previous failed iteration
+                    // Clear any stale entry from a previous failed iteration.
                     pending_retries
                         .lock()
                         .expect("pending_retries mutex poisoned")
                         .remove(index);
                 }
 
-                // Dirty check + task removal under a single lock hold.
-                //
-                // This is critical: if these were separate critical sections,
-                // the event loop could mark the task Dirty in the gap between
-                // the check and the removal. The task would then remove
-                // itself without re-reading, silently dropping the event.
+                // A single tracker lock makes the dirty check and removal atomic
+                // with event-loop updates.
                 let (mutex, _) = &*in_flight;
                 let mut tracker = mutex.lock().expect("InFlightTracker mutex poisoned");
                 if let Some(task @ InFlightTask { dirty: true, .. }) = tracker.tasks.get_mut(&index)
                 {
-                    // Another event arrived while we were processing,
-                    // clear the flag and re-check.
                     task.dirty = false;
                     continue;
                 }
@@ -225,7 +210,7 @@ impl WatchServer {
 
             // Early exits (cancellation, repo-open failure) skip the
             // atomic dirty-check-and-remove above. Clean up the tracker
-            // entry so `wait_for_in_flight` doesn't block indefinitely.
+            // entry so `wait_for_in_flight` can complete.
             if !cleaned_up {
                 let (mutex, _) = &*in_flight;
                 let mut tracker = mutex.lock().expect("InFlightTracker mutex poisoned");
