@@ -12,14 +12,12 @@ use super::debounce::{DebounceKind, ReindexDebounce, earliest_deadline};
 use super::trace::wtrace;
 
 use crate::{
-    StatusSummary,
     bitset::BitSet,
     connection::{
         IpcStream,
         watch_server::{
             ControlMessage, DOT_GITMODULES_WATCHER_IDX, EventType, InFlightTracker,
-            ROOT_WATCHER_COUNT, WatchList, WatchListItem, WatchServer,
-            update::{cancel_submod_update, wait_for_in_flight},
+            ROOT_WATCHER_COUNT, WatchEntry, WatchServer, update::wait_for_in_flight,
         },
     },
     watch::WatchResult,
@@ -171,25 +169,15 @@ impl WatchServer {
                             } else {
                                 gitmodules_debounce.bump();
                                 for i in ROOT_WATCHER_COUNT..self.watchers.len() {
-                                    if !self.skip_set.contains(i) {
-                                        self.try_spawn_submod_update(
-                                            i,
-                                            &in_flight,
-                                            &pending_status_retries,
-                                        );
-                                    }
+                                    self.try_spawn_submod_update(
+                                        i,
+                                        &in_flight,
+                                        &pending_status_retries,
+                                    );
                                 }
                             }
                         }
-                        Some(EventType::RootRebaseStart) => {
-                            self.root_rebasing = true;
-                        }
-                        Some(EventType::RootRebaseEnd) => {
-                            wait_for_in_flight(&in_flight);
-                            self.root_rebasing = false;
-                            return Ok(HandleEventsExit::ReindexEvent);
-                        }
-                        Some(EventType::SubmoduleChange) if !self.skip_set.contains(index) => {
+                        Some(EventType::SubmoduleChange) => {
                             self.try_spawn_submod_update(
                                 index,
                                 &in_flight,
@@ -197,33 +185,7 @@ impl WatchServer {
                             );
                         }
                         Some(EventType::SubmoduleGitOperation) => {
-                            if let Some(i) = self.submod_for_event(&event)
-                                && !self.skip_set.contains(i)
-                            {
-                                self.try_spawn_submod_update(
-                                    i,
-                                    &in_flight,
-                                    &pending_status_retries,
-                                );
-                            }
-                        }
-                        // Rebases generate an incredible volume of events, and during such an
-                        // operation git continually acquires and releases `index.lock`. The resulting
-                        // watcher traffic can trigger many status reads aginst a half-finished state
-                        // Pause updates for the affected submodule until the rebase completes.
-                        Some(EventType::SubmoduleRebaseStart) => {
                             if let Some(i) = self.submod_for_event(&event) {
-                                cancel_submod_update(i, &in_flight);
-                                self.skip_set.insert(i);
-                                self.submod_statuses.lock().expect("Mutex poisoned").insert(
-                                    self.watchers[i].relative_path.clone(),
-                                    StatusSummary::NEW_COMMITS,
-                                );
-                            }
-                        }
-                        Some(EventType::SubmoduleRebaseEnd) => {
-                            if let Some(i) = self.submod_for_event(&event) {
-                                self.skip_set.remove(i);
                                 self.try_spawn_submod_update(
                                     i,
                                     &in_flight,
@@ -233,7 +195,6 @@ impl WatchServer {
                         }
                         Some(EventType::SubmoduleLockRelease) => {
                             if let Some(i) = self.submod_for_event(&event)
-                                && !self.skip_set.contains(i)
                                 && lock_release_needs_reread(i, &pending_status_retries)
                             {
                                 self.try_spawn_submod_update(
@@ -243,7 +204,7 @@ impl WatchServer {
                                 );
                             }
                         }
-                        Some(EventType::SubmoduleChange) | None => {}
+                        None => {}
                     }
                 }
                 Err(e) => {
@@ -321,9 +282,7 @@ impl WatchServer {
                     needs_reindex = true;
                     break;
                 }
-                if !self.skip_set.contains(idx) {
-                    self.try_spawn_submod_update(idx, in_flight, pending_status_retries);
-                }
+                self.try_spawn_submod_update(idx, in_flight, pending_status_retries);
             }
         }
         needs_reindex
@@ -370,14 +329,14 @@ const fn select_source(index: usize, n_watchers: usize, n_tripwires: usize) -> S
 /// decodes. All `watchers`, then all `tripwires`, then the control channel.
 pub(super) fn register_select<'a>(
     sel: &mut crossbeam_channel::Select<'a>,
-    watchers: &'a WatchList,
-    tripwires: &'a WatchList,
+    watchers: &'a [WatchEntry],
+    tripwires: &'a [WatchEntry],
     control_rx: &'a crossbeam_channel::Receiver<ControlMessage>,
 ) {
-    for WatchListItem { receiver, .. } in watchers {
+    for WatchEntry { receiver, .. } in watchers {
         sel.recv(receiver);
     }
-    for WatchListItem { receiver, .. } in tripwires {
+    for WatchEntry { receiver, .. } in tripwires {
         sel.recv(receiver);
     }
     sel.recv(control_rx);

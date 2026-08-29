@@ -40,8 +40,6 @@ pub struct DebugState {
     pub progress_subscribers: Option<Vec<u32>>,
     pub watcher_count: u32,
     pub watched_paths: Vec<(String, String, u32)>,
-    pub skip_set: Vec<String>,
-    pub root_rebasing: bool,
     pub root_path: String,
     pub socket_name: String,
     pub submodule_statuses: Option<Vec<(String, StatusSummary)>>,
@@ -385,8 +383,6 @@ mod tests {
                         progress_subscribers: None,
                         watcher_count: 0,
                         watched_paths: vec![],
-                        skip_set: vec![],
-                        root_rebasing: false,
                         root_path: String::new(),
                         socket_name: String::new(),
                         submodule_statuses: None,
@@ -403,8 +399,6 @@ mod tests {
                 // | progress_subscribers:None(0)
                 // | watcher_count(0,0,0,0)
                 // | watched_paths:empty(0,0,0,0,0,0,0,0)
-                // | skip_set:empty(0,0,0,0,0,0,0,0)
-                // | root_rebasing:false(0)
                 // | root_path:""(0,0,0,0,0,0,0,0)
                 // | socket_name:""(0,0,0,0,0,0,0,0)
                 // | submodule_statuses:None(0)
@@ -414,7 +408,7 @@ mod tests {
                 &[
                     3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
                     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-                    0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                    0,
                 ],
             ),
             (

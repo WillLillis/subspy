@@ -9,7 +9,7 @@ use crate::{
     DOT_GIT, StatusSummary,
     connection::{
         progress::{ProgressUpdate, broadcast_progress},
-        watch_server::{ROOT_WATCHER_COUNT, WatchListItem, WatchServer},
+        watch_server::{ROOT_WATCHER_COUNT, WatchEntry, WatchServer},
     },
     create_progress_bar,
     git::{parse_gitmodules, submodule_modules_subpath},
@@ -51,8 +51,6 @@ impl WatchServer {
                 self.root_path.join(".gitmodules").display()
             );
         }
-
-        self.root_rebasing = self.root_git_path.join("rebase-merge").exists();
 
         info!("Indexing project at {}", self.root_path.display());
         let n_submodules = gitmodule_entries.len() as u32;
@@ -148,9 +146,8 @@ impl WatchServer {
         status_guard.clear();
         // Bitset accessors require in-bounds indices. `self.watchers` and this
         // pass's submodule slots can differ during a reindex without watcher
-        // replacement, so size both sets for the larger index range.
+        // replacement, so size `pending_rescan` for the larger index range.
         let watcher_slot_count = self.watchers.len().max(ROOT_WATCHER_COUNT + results.len());
-        self.skip_set.clear_and_resize(watcher_slot_count);
         self.pending_rescan.clear_and_resize(watcher_slot_count);
         if place_submod_watches {
             self.modules_path_to_index.clear();
@@ -194,7 +191,7 @@ impl WatchServer {
                 self.workdir_to_index
                     .insert(PathBuf::from(&relative_path), index);
                 self.watchers
-                    .push(WatchListItem::new(relative_path, full_path, rx, watcher));
+                    .push(WatchEntry::new(relative_path, full_path, rx, watcher));
             }
         }
         drop(status_guard);

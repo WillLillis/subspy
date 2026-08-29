@@ -33,12 +33,6 @@ impl WatchServer {
             .map(|w| (w.watch_path.display().to_string(), w.receiver.len() as u32))
             .collect();
 
-        let skip_set: Vec<String> = self
-            .skip_set
-            .iter()
-            .filter_map(|idx| self.watchers.get(idx).map(|w| w.relative_path.clone()))
-            .collect();
-
         let submodule_statuses = try_lock_for(&self.submod_statuses, DEBUG_LOCK_TIMEOUT)
             .map(|guard| guard.iter().map(|(k, v)| (k.clone(), *v)).collect());
 
@@ -83,8 +77,6 @@ impl WatchServer {
             progress_subscribers,
             watcher_count: self.watchers.len() as u32,
             watched_paths,
-            skip_set,
-            root_rebasing: self.root_rebasing,
             root_path: self.root_path.display().to_string(),
             socket_name: ipc_socket_path(&self.root_path),
             submodule_statuses,

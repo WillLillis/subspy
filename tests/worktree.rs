@@ -204,9 +204,8 @@ fn worktree_root_rebase_completes_clean(_run: u32) {
     harness.start_server();
     harness.assert_all_clean();
 
-    // Rebase onto wt-branch. The rebase markers live under the worktree's git
-    // dir (`.git/worktrees/<name>/rebase-merge`); the server must detect their
-    // start/end there and settle back to clean.
+    // Rebase markers for linked worktrees live under the per-worktree `.git` directory
+    // and must trigger status refreshes there.
     harness.root().run_git(&["rebase", "wt-branch"]);
     harness.assert_all_clean();
 }

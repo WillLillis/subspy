@@ -42,14 +42,6 @@ pub(super) fn wait_for_in_flight(state: &(Mutex<InFlightTracker>, Condvar)) {
     drop(guard);
 }
 
-/// Signals cancellation to the in-flight rayon task for `index`, if one exists.
-pub(super) fn cancel_submod_update(index: usize, state: &(Mutex<InFlightTracker>, Condvar)) {
-    let tracker = state.0.lock().expect("InFlightTracker mutex poisoned");
-    if let Some(task) = tracker.tasks.get(&index) {
-        task.cancel.store(true, Ordering::Relaxed);
-    }
-}
-
 impl WatchServer {
     /// Attempts to spawn a rayon task to update the status of the submodule at watcher `index`.
     ///
@@ -259,9 +251,7 @@ impl WatchServer {
         pending_status_retries: &Arc<Mutex<BitSet>>,
     ) {
         for i in self.pending_rescan.iter() {
-            if !self.skip_set.contains(i) {
-                self.try_spawn_submod_update(i, in_flight, pending_status_retries);
-            }
+            self.try_spawn_submod_update(i, in_flight, pending_status_retries);
         }
         self.pending_rescan.clear_and_resize(self.watchers.len());
     }

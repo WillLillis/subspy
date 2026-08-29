@@ -269,14 +269,8 @@ mod tests {
         assert!(bs.contains(5));
     }
 
-    // Mirrors the watch-server skip_set invariant: after a heap bitset is
-    // cleared and resized smaller, the old (now out-of-range) indices must not
-    // be probed. The watch server upholds this by sizing skip_set to the live
-    // watcher count; this asserts the debug backstop catches a regression
-    // instead of letting `contains` read out of bounds. Debug-only: the
-    // assertion compiles out in release, where the access would be UB.
-    #[cfg(debug_assertions)]
     #[test]
+    #[cfg(debug_assertions)]
     #[should_panic(expected = "out of bounds")]
     fn probe_past_shrunk_heap_capacity_is_caught() {
         let mut bs = BitSet::with_capacity(1024); // heap: 16 words, 1024 bits

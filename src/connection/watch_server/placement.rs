@@ -11,7 +11,7 @@ use super::trace::wtrace;
 use crate::{
     DOT_GIT, DOT_GITMODULES,
     connection::watch_server::{
-        ROOT_WATCHER_COUNT, ServerWatcher, WatchListItem, WatchReceiver, WatchServer,
+        ROOT_WATCHER_COUNT, ServerWatcher, WatchEntry, WatchReceiver, WatchServer,
     },
 };
 
@@ -107,7 +107,7 @@ impl WatchServer {
                 Err(e)?
             }
         };
-        self.watchers.push(WatchListItem::new(
+        self.watchers.push(WatchEntry::new(
             DOT_GITMODULES.to_owned(),
             self.root_gitmodules_path.clone(),
             rx,
@@ -155,7 +155,7 @@ impl WatchServer {
             Err(e)?;
         }
 
-        self.watchers.push(WatchListItem::new(
+        self.watchers.push(WatchEntry::new(
             DOT_GIT.to_owned(),
             self.root_git_path.clone(),
             rx,
@@ -206,8 +206,7 @@ impl WatchServer {
                         .unwrap_or(&dir)
                         .to_string_lossy()
                         .into_owned();
-                    self.tripwires
-                        .push(WatchListItem::new(rel, dir, rx, watcher));
+                    self.tripwires.push(WatchEntry::new(rel, dir, rx, watcher));
                 }
                 Err(e) => error!("Failed to place tripwire on {} -- {e}", dir.display()),
             }
