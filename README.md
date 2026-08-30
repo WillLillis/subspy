@@ -63,12 +63,10 @@ Options:
 ~/very_large_project/ > subspy stop # Shutdown the watch server
 ```
 
-#### Shell Prompt Integration
+#### Shell Prompt Integration (*Experimental*)
 
-The `subspy prompt` subcommand outputs submodule status counts for use in shell prompts. It connects to a running watch
-server and returns immediately. If no server is running, it spawns one in the background and produces no output until the
-next invocation.
-
+The `subspy prompt` subcommand outputs submodule status counts for use in shell prompts. By default, it connects to the
+watch server, spawning one if necessary, and waits up to 500ms for a response. Timeouts and runtime errors produce no output.
 The default output is space-separated fields: `<dirty> <staged> <new_commits> <clean> <total>`. A custom format string can
 be provided with `-f`:
 
@@ -85,15 +83,6 @@ subspy_prompt() {
   local s
   s=$(subspy prompt -f '{dirty}!{new_commits}↑' 2>/dev/null) && [ -n "$s" ] && echo " $s"
 }
-```
-
-For [Starship](https://starship.rs), use a [custom command](https://starship.rs/config/#custom-commands):
-
-```toml
-[custom.subspy]
-command = "subspy prompt -f '{dirty}!{staged}+{new_commits}↑'"
-when = "subspy prompt -f '{dirty}!{staged}+{new_commits}↑'"
-format = "[$output]($style) "
 ```
 
 #### Drop-in git replacement (`subspy-git`)
