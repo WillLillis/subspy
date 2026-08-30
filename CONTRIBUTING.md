@@ -395,39 +395,6 @@ It is deliberately not always-on locally: the races rarely reproduce on a fast d
 box, and it must stay out of `.cargo/config.toml`, which would also apply `--cfg
 trace_events` to `cargo build --release` and compile the tracing into production.
 
-### Fuzzer (`xtask/`)
-
-The integration tests cover known scenarios deterministically, but can't cover the
-combinatorial space of git operations happening in arbitrary order. The fuzzer fills
-this gap by performing weighted-random operations and verifying server state against
-`git submodule status` ground truth after each step.
-
-**Operations covered**: write/delete files, stage/unstage, commit, amend, reset
-(soft/mixed/hard), stash/pop, clean, stage/unstage/commit gitlinks, branch checkout
-with submodule update, reindex, and rapid-fire bursts of multiple operations without
-waiting for the server to settle between them.
-
-**Operations NOT covered**: rebases, merges, and cherry-picks are not included in the
-fuzzer because they require carefully constructed divergent history and conflict
-resolution that is difficult to generate randomly while maintaining a consistent state
-model. These are covered by deterministic integration tests instead.
-
-```sh
-cargo xtask fuzz --seed 42 --steps 100 --submodules 5
-cargo xtask fuzz --collect-stats  # writes timing.csv + git_stats.csv
-```
-
-Use `--seed` to reproduce failures. The fuzzer prints the seed, the repo path, and the
-server's debug state on failure.
-
-**Known limitation -- git slowdown over time**: As the fuzzer runs, git object
-accumulation (loose objects, pack files, dangling refs from amends and resets) causes
-all git operations to slow down -- both the fuzzer's own `git add`/`commit`/`reset`
-calls and the `git submodule status` ground truth checks. The fuzzer periodically
-repacks (every 10,000 steps by default) to mitigate this, but very long runs will
-still see increasing per-step times. The watch server itself is unaffected since it
-uses filesystem events rather than scanning.
-
 ## Development
 
 ### Build and test
@@ -436,7 +403,6 @@ uses filesystem events rather than scanning.
 cargo build
 cargo test          # unit + integration tests
 cargo clippy        # lints (pedantic + nursery enabled)
-cargo xtask fuzz    # randomized server fuzzing (runs indefinitely by default)
 
 # Re-run tests with watch-server event tracing (dumped on failure; armed in CI).
 # See "Tracing watch-server failures".
@@ -591,10 +557,3 @@ placement, and each submodule status re-read:
 RUSTFLAGS='--cfg trace_events' RUST_TEST_THREADS=1 \
   cargo test --test <file> -- --nocapture <filter>
 ```
-
-### Fuzzer for reproducing race conditions
-
-If a bug only manifests under specific timing, the fuzzer's `--seed` flag reproduces
-the exact operation sequence. On failure it prints the seed, repo path (preserved for
-inspection), and full `subspy debug` output. Use `--pause-on-failure` to keep the
-server alive for manual investigation.
