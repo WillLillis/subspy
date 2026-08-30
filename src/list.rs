@@ -139,9 +139,8 @@ const IDX_STATUS: usize = 8;
 /// submodule's HEAD for workdir OID/branch, computing status) is
 /// parallelized via rayon.
 ///
-/// `need_submod_head` and `need_local_status` control whether the expensive
-/// operations run at all, allowing callers to skip them when the template
-/// doesn't use the corresponding placeholders.
+/// `need_submod_head` and `need_local_status` select the expensive operations
+/// required by the template.
 fn gather_info(
     root_path: &Path,
     server_statuses: Option<&[(String, StatusSummary)]>,
@@ -215,8 +214,8 @@ fn gather_info(
 
 /// Computes the column width for each placeholder by taking the maximum of
 /// the header label length and all data values, plus any literal overhead
-/// characters inside the braces. Only placeholders that appear in `template`
-/// are measured; unused placeholders keep a width of zero (no padding).
+/// characters inside the braces. Placeholders absent from `template` retain
+/// a width of zero.
 fn compute_placeholder_widths(
     template: &Template<'_, 9>,
     submod_info: &[SubmoduleInfo],
@@ -280,14 +279,14 @@ pub fn list(
     header: bool,
     no_server: bool,
 ) -> ListResult<()> {
-    // Parse once up front; `used` drives which fields we fetch and whether to
-    // contact the server.
+    // The placeholder bitmap controls which metadata fields are fetch and whether
+    // the server is contacted.
     let template = Template::parse(format.unwrap_or(DEFAULT_FORMAT), &PLACEHOLDERS)?;
     let used = *template.used();
 
-    // Only contact (and possibly cold-start) the watch server when the format
-    // template actually references `{status}`; otherwise the statuses are
-    // discarded, so a status-free `--format` shouldn't spawn a daemon.
+    // Contact (and possibly cold-start) the watch server only when `{status}` is
+    // requested and server use is enabled. Other  formats gather all required
+    // fields locally.
     let server_statuses = if no_server || !used[IDX_STATUS] {
         None
     } else {

@@ -39,17 +39,15 @@ const PLACEHOLDERS: [&str; 5] = ["dirty", "staged", "new_commits", "clean", "tot
 /// Outputs a formatted summary of submodule statuses for shell prompt
 /// integration.
 ///
-/// When `use_server` is true, attempts a non-blocking connection to the watch
-/// server. If no server is running, spawns one in the background and exits
-/// with no output so the prompt isn't blocked.
+/// With `use_server`, waits up to `timeout` for a server response, spawning the
+/// server when necessary. Timeout and communication failures produce no output.
 ///
-/// When `use_server` is false, computes status locally via libgit2.
+/// Without `use_server`, computes status locally via libgit2.
 ///
 /// # Errors
 ///
-/// Returns `TemplateError` if the format string is invalid. Any non `TemplateError` error
-/// is intentionally swallowed in this function. We cannot display runtime errors in the prompt,
-/// and garbage "placeholder" data is worse than no data.
+/// Returns [`TemplateError`] if the format string is invalid. Runtime failures
+/// are suppressed because prompt output must remain silent.
 pub fn prompt(
     root_path: &Path,
     use_server: bool,
@@ -146,10 +144,9 @@ fn try_get_statuses(
     let req_msg_len = bincode::encode_into_slice(&req, &mut req_msg, BINCODE_CFG).ok()?;
     write_full_message_fixed(&mut conn, &req_msg[..req_msg_len]).ok()?;
 
-    // Setting the socket timeout per-read is expensive (setsockopt syscall), so we set it
-    // once here and check the deadline at the top of each iteration instead. This limits
-    // a catastrophically slow read to at most one, with the deadline check preventng the
-    // start of another.
+    // Set the socket timeout once to avoid a `setsockopt` syscall per read. The
+    // deadline check prevents another read after the budget expires, so only the
+    // current read can overrun it.
     let remaining = deadline.saturating_duration_since(Instant::now());
     set_recv_timeout(conn.get_ref(), Some(remaining)).ok()?;
 

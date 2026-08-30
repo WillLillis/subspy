@@ -5,10 +5,10 @@
 //! axes, captured in [`LineStyle`]:
 //!
 //! - Quoting mode: porcelain v1 uses `QuoteSpace`, short uses `Standard`.
-//! - Relativization: porcelain v1 is always repo-root-relative; short is
-//!   cwd-relative. Both go through `Relativizer` (porcelain v1 just
-//!   constructs it with `cwd_rel = ""` so it's a no-op rewriter).
-//! - Color: porcelain v1 is plain; short applies git's
+//! - Relativization: porcelain v1 is always repo-root-relative, while short
+//!   is cwd-relative. Both use `Relativizer`, with porcelain v1 constructed
+//!   from an empty `cwd_rel`.
+//! - Color: porcelain v1 is plain, short applies git's
 //!   `WT_STATUS_{UPDATED,CHANGED,UNMERGED,UNTRACKED,...}` colors.
 
 use git2::Repository;
@@ -40,10 +40,9 @@ pub(super) struct LineStyle {
     pub submodule: SubmoduleFormat,
 }
 
-/// How submodule Y characters are derived. Porcelain v1 collapses
-/// `NEW_COMMITS` / `MODIFIED_CONTENT` / `UNTRACKED_CONTENT` into a
-/// single 'M'; short distinguishes them as 'M' / 'm' / '?' so
-/// submodule states are visually distinct from regular files.
+/// How submodule Y characters are derived. Porcelain v1 collapses `NEW_COMMITS`,
+/// `MODIFIED_CONTENT`, and  `UNTRACKED_CONTENT` into a single `M`. Short distinguishes
+/// them as 'M' / 'm' / '?'.
 #[derive(Clone, Copy)]
 pub(super) enum SubmoduleFormat {
     Porcelain,
@@ -90,10 +89,10 @@ pub(super) fn display_xy_lines(
     let index = repo.index()?;
     let conflicts = build_conflict_map(&index)?;
 
-    // git emits tracked changes (including submodules) in one path-sorted stream,
-    // then untracked, then ignored. The tracked file rows come pre-classified
-    // (renames reconciled to match git) from `normalized_tracked_rows`; libgit2
-    // excludes submodules from `non_submod`, so interleave the submodule rows by path.
+    // Git emits tracked changes, including submodules, in one path-sorted stream,
+    // followed by untracked and then ignored. `normalized_tracked_rows`
+    // pre-classifies the tracked file rows and reconciles renames. Interleave the
+    // separately supplied submodule rows by path.
     let tracked = normalized_tracked_rows(repo, entries);
     let mut submods: Vec<SubRow<'_>> = Vec::with_capacity(
         entries.submodules.len()
@@ -141,8 +140,8 @@ pub(super) fn display_xy_lines(
             write_xy_path(out, x, y, path.as_bytes(), rel, null_terminate, style)
         }
         TrackedOrSubRow::Sub(SubRow::Renamed(rename)) => {
-            // `R ` (staged submodule rename). With -z the new and old paths
-            // are NUL-separated; otherwise rendered as `old -> new`.
+            // `R ` is a staged submodule rename. With -z the new and old paths
+            // are NUL-separated. Itherwise they render as `old -> new`.
             let x = XyChar::new('R', style.palette.map(|p| p.updated));
             let y = XyChar::new(' ', None);
             write_xy_prefix(out, x, y)?;
@@ -525,9 +524,8 @@ fn write_branch_header(
         return Ok(());
     }
 
-    // Display path is lossy so a non-UTF-8 ref still renders something.
-    // `find_branch` below needs the strict `&str` form -- if the shorthand
-    // isn't valid UTF-8 we'll skip the upstream suffix instead.
+    // Use a lossy display path so non-UTF-8 refs still render. Upstream lookup
+    // requires a strict `&str`, so invalid UTF-8 omits the upstream suffix.
     let branch_display = String::from_utf8_lossy(head.shorthand_bytes());
     out.write_all(b"## ")?;
     paint_str(out, &branch_display, style.palette.map(|p| p.local_branch))?;

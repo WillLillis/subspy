@@ -71,8 +71,8 @@ struct StatusArgs {
     /// `Some(mode)` when the user passed `--ignored[=<mode>]`.
     ignored_files: Option<IgnoredFiles>,
     branch: bool,
-    /// `--ahead-behind` / `--no-ahead-behind`. `None` = git's default (on);
-    /// only affects formats that emit upstream ahead/behind info.
+    /// `--ahead-behind` or `--no-ahead-behind`. `None` uses git's default (on).
+    /// This only affects formats that emit upstream ahead/behind info.
     ahead_behind: Option<bool>,
     show_stash: bool,
 }
@@ -124,11 +124,9 @@ impl From<Intercept> for ShimStatusRequest {
 
 /// Walk argv looking for an interceptable `status` invocation.
 ///
-/// Returns `Some(intercept)` if every global option was one we know is
-/// safe to honor or ignore, the subcommand was `status`, and every status
-/// flag was one subspy supports. Returns `None` for anything else; the
-/// caller should re-fetch argv from `env::args_os()` and forward to real
-/// git (dispatch may have partially drained `rest` on its way to `None`).
+/// Returns `Some(intercept)` if every global option and status flag  can be
+/// handled locally.. Returns `None` otherwise. The caller then reloads argv
+/// from `env::args_os()` and forwards to real git.
 fn dispatch<I>(mut rest: Peekable<I>) -> Option<Intercept>
 where
     I: Iterator<Item = OsString>,
@@ -156,12 +154,13 @@ where
 /// forwarded to real `git`.
 struct Forward;
 
-/// What dispatch should do after seeing a single arg in the global-option
-/// stream. `Skip` and `SkipWithValue` mean dispatch keeps walking; the
-/// latter signals that the next arg is the value (e.g. `-C <path>`).
+/// What dispatch should do after one global argument.
 enum GlobalAction {
+    /// Continue with the next argument.
     Skip,
+    /// Consume the next argument as this option's value, then continue.
     SkipWithValue,
+    /// Parse the remaining arguments as `status` options.
     StatusFollows,
 }
 
@@ -196,8 +195,8 @@ fn consume_global(
     // -C handling: -C path | -Cpath | -C=path
     if let Some(rest) = arg.strip_prefix("-C") {
         if rest.is_empty() {
-            // Multiple -C is rare and composes oddly across relative paths;
-            // just forward in that case rather than getting it subtly wrong.
+            // Multiple -C options compose relative paths in unusual ways. Forward
+            // them to the real git.
             if intercept.chdir.is_some() {
                 return Err(Forward);
             }
@@ -242,10 +241,9 @@ fn consume_global(
     }
 }
 
-/// Inspects a `-c key=value` payload for settings the shim needs to
-/// honor at render time. Currently only `core.quotepath` is plumbed
-/// through; other config values are ignored at the shim level (they go
-/// to git unchanged when we forward).
+/// Inspects a `-c key=value` payload for settings needed during local rendering.
+/// Currently, only `core.quotepath` is allowed. Other values pass through to git
+/// unchanged when forwarding.
 ///
 /// Returns `Err(Forward)` when a recognized boolean key has an invalid
 /// value (e.g. `core.quotepath=garbage`), so git emits its native
@@ -296,7 +294,8 @@ fn classify_long_global(
         };
     }
 
-    // --config-env=name=envvar | --config-env name=envvar -- ignore.
+    // Consume `--config-env=name=envvar` and `--config-env name=envvar` as accepted
+    // global options.
     if name == "config-env" {
         return if has_attached {
             Ok(GlobalAction::Skip)
@@ -332,10 +331,9 @@ where
     Some(out)
 }
 
-/// Records the chosen output format. Repeated assignments of the same
-/// format are idempotent (matches git: `git status --long --long` is
-/// accepted). A different choice is a conflict; we forward so real git
-/// emits its native error.
+/// Records the chosen output format. Repeating the same format is idempotent,
+/// matching `git status --long --long`. Conflicting choices forward to the real
+/// git for its native error.
 fn set_format(out: &mut StatusArgs, choice: FormatChoice) -> Result<(), Forward> {
     if let Some(existing) = out.format {
         if existing == choice {
@@ -357,8 +355,8 @@ fn classify_status_arg(
     out: &mut StatusArgs,
     seen_double_dash: &mut bool,
 ) -> Result<(), Forward> {
-    // Anything after `--` is a pathspec. This first pathspec increment accepts
-    // only the cwd selectors `.` and `./`; every other spelling forwards.
+    // Arguments after `--` are pathspecs. Accept `.` and `./` as cwd selectors,
+    // forward everything else.
     if *seen_double_dash {
         return if matches!(arg, "." | "./") {
             out.scope = StatusScope::Cwd;
@@ -381,7 +379,7 @@ fn classify_status_arg(
     }
 
     // Format flags. `set_format` returns `Err(Forward)` on a conflict
-    // (e.g. `--short --long`); dispatch falls through and real git emits
+    // (e.g. `--short --long`). Dispatch falls through and real git emits
     // its native error.
     if arg == "--porcelain" {
         return set_format(out, FormatChoice::Porcelain(PorcelainVersion::V1));
@@ -430,10 +428,8 @@ fn classify_status_arg(
         return Ok(());
     }
 
-    // `--ignored` (bare) is git's `--ignored=traditional` shorthand.
-    // `--ignored=<mode>` for `traditional` / `matching` / `no` parses
-    // the value through `parse_ignored`; an unrecognized mode falls
-    // through to forwarding so git's native error is emitted.
+    // Bare `--ignored` means `--ignored=traditional`. Explicit modes are
+    // parsed by `parse_ignored`. Unrecognized modes forward to real git.
     if arg == "--ignored" {
         out.ignored_files = Some(IgnoredFiles::Traditional);
         return Ok(());
@@ -449,16 +445,15 @@ fn classify_status_arg(
         return Ok(());
     }
 
-    // --show-stash: append stash-count info (long: trailer line;
-    // porcelain v2 with --branch: `# stash N`).
+    // --show-stash: append stash-count information. Long format gets a trailer
+    // line, while  porcelain v2 with `--branch` gets `# stash N`.
     if arg == "--show-stash" {
         out.show_stash = true;
         return Ok(());
     }
 
-    // --ahead-behind / --no-ahead-behind: detailed upstream divergence
-    // counts. The two flags conflict; the second one signals Forward
-    // so real git's error path runs.
+    // --ahead-behind / --no-ahead-behind control detailed upstream divergence
+    // counts. The two conflict, so forward the second one to git for the error.
     if arg == "--ahead-behind" {
         if out.ahead_behind == Some(false) {
             return Err(Forward);
@@ -478,9 +473,10 @@ fn classify_status_arg(
     Err(Forward)
 }
 
-/// Parses bundles of the supported short status flags. `-u` has an optional
+/// Parses bundles of supported short status flags. `-u` consumes the remaining
+/// characters as its optional mode and therefore ends the bundle when bare. `-su`
 /// attached mode, so it consumes the rest of the bundle and must be last when
-/// used bare (`-su` is `-s -u`; `-us` is the invalid mode `s`, matching Git).
+/// means `-s -u`, while `-us` supplies the invalide mode `s`.
 fn parse_short_status_bundle(arg: &str, out: &mut StatusArgs) -> Result<(), Forward> {
     let mut rest = arg.strip_prefix('-').ok_or(Forward)?;
     while let Some(flag) = rest.as_bytes().first().copied() {
@@ -534,21 +530,16 @@ fn parse_ignored(s: &str) -> Option<IgnoredFiles> {
     match s {
         "traditional" => Some(IgnoredFiles::Traditional),
         "no" => Some(IgnoredFiles::No),
-        // `matching` is intentionally not intercepted: git shows paths
-        // that *directly match* an ignore pattern, while libgit2's
-        // `recurse_ignored_dirs(true)` enumerates the contents of any
-        // ignored directory regardless of pattern. The two diverge on
-        // common cases (e.g. a `dir/` gitignore line) -- forward to
-        // real git so its semantics apply.
+        // `matching` is forwarded because git selects paths that directly match
+        // an ignore pattern, while libgit2 enumerates contents of ignored subdirectories.
+        // These differ for common  patterns such as `dir/`.
         _ => None,
     }
 }
 
-/// Tries to serve the intercepted status request from subspy. Returns
-/// `Some(SUCCESS)` only when output was produced cleanly; on any error
-/// returns `None` so `main` can forward to real `git` with the original
-/// argv. Output is buffered to a `Vec` and only flushed on success to
-/// avoid double-printing if we error mid-stream.
+/// Tries to serve the intercepted status request from subspy. Returns `Some(SUCCESS)`
+/// after producing a complete output. Errors return `None` so `main` can forward
+/// the original argc to the real git. Output remains buffered until success.
 fn shim_entry(status_args: ShimStatusRequest) -> Option<ExitCode> {
     let project = get_project_path(status_args.dir).ok()?;
     let mut buf: Vec<u8> = Vec::with_capacity(4 * 1024);
@@ -612,15 +603,12 @@ where
     }
 }
 
-/// Resolves the binary to invoke for forwarded git commands. Normally
-/// this is just `"git"`, letting the OS do PATH resolution. When the
-/// shim is renamed to `git`/`git.exe` (as `Sourcetree` requires), `"git"`
-/// would resolve back to us, so we walk `PATH` ourselves for a binary
-/// that isn't us.
+/// Resolves the binary for forwarded git commands. Normally, `"git"` delegates
+/// PATH resolution to the OS. When the shim is renamed to `git` or `git.exe`,
+/// this searches PATH for a distinct canonical executable.
 ///
-/// Returns `None` only in the renamed-as-git case when no other `git` is
-/// findable -- callers must error out rather than retry, otherwise the
-/// shim would fork-bomb itself.
+/// Returns `None` when that  renamed shim cannot find another git  executable.
+/// Callers report an error immediately to prevent recursive spawning.
 fn git_target() -> Option<OsString> {
     git_target_inner(
         env::current_exe().ok().as_deref(),
@@ -644,11 +632,10 @@ const GIT_EXE: &str = "git";
 #[cfg(windows)]
 const GIT_EXE: &str = "git.exe";
 
-/// Walks `path_var` for a `git`/`git.exe` whose canonical path differs
-/// from `me`. Only `GIT_EXE` is considered -- `PATHEXT` is not honored,
-/// so Windows installations that ship a `git.cmd`/`git.bat` wrapper
-/// (e.g. some non-standard layouts) won't be found and the caller
-/// surfaces a clear diagnostic.
+/// Searches `path_var` for a `git`or `git.exe` whose canonical path differs
+/// from `me`. The search uses the exact [`GIT_EXE`] name. Windows installations
+/// exposing only a `git.cmd` or `git.bat` wapper produce `None` (i.e.  `PATHEXT`
+/// is not considered), and the caller produces a diagnostic.
 fn find_real_git(me: Option<&Path>, path_var: &OsStr) -> Option<PathBuf> {
     let me_canonical = me.and_then(|p| std::fs::canonicalize(p).ok());
     for dir in env::split_paths(path_var) {

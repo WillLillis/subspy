@@ -38,10 +38,8 @@ pub enum RepoKind {
     /// A submodule (its `.git` is a _file_ pointing into the parent's
     /// `.git/modules/`) with no submodules of its own.
     Submodule,
-    /// A submodule that itself has submodules. Its statuses are computed
-    /// locally like a superproject, but it is not server-eligible: serving a
-    /// submodule's own superproject role is out of scope (unlike a linked
-    /// worktree, the other gitlink-file shape, which is served).
+    /// A submodule that itself has submodules. Its statuses are computed locally
+    /// like a superproject, but it is not server-eligible.
     SubmoduleWithSubmodules,
     /// A linked worktree (its `.git` is a _file_ pointing into the main repo's
     /// `.git/worktrees/`) with no submodules of its own.
@@ -51,12 +49,9 @@ pub enum RepoKind {
     /// (`.git/worktrees/<name>/`) and shared common dir via `Repository::path` /
     /// `commondir`, then watches and reads status from those.
     WorktreeWithSubmodules,
-    /// A `.git` gitlink *file* we recognize as neither a submodule nor a linked
-    /// worktree: it points outside `.git/modules/` and `.git/worktrees/` (e.g.
-    /// `git init --separate-git-dir`), or it's unparseable/corrupt. Not
-    /// server-eligible -- unlike a linked worktree, which is also a gitlink file
-    /// but is served. Local computation still works for a valid one, while a
-    /// corrupt one fails at `Repository::open`.
+    /// An external or invalid `.git` gitlink file. External gitlinks include
+    /// repositories created with `git init --separate-git-dir`. Valid repositories
+    /// use local status computation, while corrupt gitlinks fail at `Repository::open`.
     OtherGitlink,
     /// Like [`Self::OtherGitlink`], but with a `.gitmodules` file, so its
     /// submodule statuses are computed locally like a superproject.
@@ -76,11 +71,8 @@ impl RepoKind {
         )
     }
 
-    /// Whether a watch server can run for this repo: a top-level superproject,
-    /// or a linked worktree of one. Both have submodules to watch and a git dir
-    /// the server can resolve (for a worktree, `.git/worktrees/<name>/`). A
-    /// submodule's own gitlink and an external (`--separate-git-dir`) gitlink
-    /// are not yet served.
+    /// Whether the watch server supports this repository: a top-level superproject,
+    /// or one of its linked worktree.
     #[must_use]
     pub const fn server_eligible(self) -> bool {
         matches!(self, Self::WithSubmodules | Self::WorktreeWithSubmodules)
@@ -133,9 +125,8 @@ impl StatusSummary {
 }
 
 /// Formats the summary for the `status` command. `STAGED` and `STAGED_NEW`
-/// are intentionally omitted here because the `status` display handles
-/// staging separately; see `list::status_text` for a variant that
-/// includes them.
+/// are intentionally omitted because the status display handles staging
+/// separately. See `list::status_text` for a variant that includes them.
 impl std::fmt::Display for StatusSummary {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if *self == Self::clean() {

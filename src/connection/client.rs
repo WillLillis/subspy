@@ -149,8 +149,8 @@ fn connect_to_server(root_path: &Path, display_progress: bool) -> IpcResult<BufR
 
     spawn_daemon(root_path, None)?;
 
-    // Only build a spinner -- which spawns a steady-tick draw thread -- when
-    // attached to a terminal; non-terminal callers get `None`.
+    // Build the spinner only for terminal callers because its steady tick spawns
+    // a drawning thread.
     let spinner = display_progress.then(|| {
         #[allow(clippy::literal_string_with_formatting_args)]
         let s = ProgressBar::new_spinner()

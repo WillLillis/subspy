@@ -67,15 +67,14 @@ fn after_marker<'a>(haystack: &'a [u8], marker: &[u8]) -> Option<&'a [u8]> {
 /// Whether a `.git` gitlink *file* points at a **linked worktree**.
 ///
 /// Git writes a `commondir` file into every linked worktree's private gitdir
-/// (`<main>/.git/worktrees/<id>/commondir`; see `gitrepository-layout(5)`),
-/// whereas a submodule's gitdir and a `--separate-git-dir` gitdir never have
-/// one.
+/// at `<main>/.git/worktrees/<id>/commondir` (`gitrepository-layout(5)`).
+/// Its presence distinguishes linked worktress from submodule and
+/// `--separate-git-dir` gitdirs.
 ///
-/// `repo_root` is the directory holding the `.git` file; a relative `gitdir:`
-/// target resolves against it (git's rule for gitlink files), while an absolute
-/// one stands alone. Returns `false` if the bytes aren't a `gitdir:` pointer,
-/// the target can't be represented as a path on this platform, or the marker is
-/// absent or unreadable.
+/// `repo_root` is the directory containing the `.git` file. Relative `gitdir:`
+/// target resolves against it, while absolute targets are used directly. Returns
+/// `false`  for malformed pointers, paths unsupported by the platform, and missing
+/// or unreadable `commondir` markers.
 #[must_use]
 pub fn gitlink_points_at_worktree(dot_git_bytes: &[u8], repo_root: &Path) -> bool {
     gitlink_target(dot_git_bytes).is_some_and(|target| gitdir_has_commondir(repo_root, target))
@@ -91,9 +90,9 @@ fn gitdir_has_commondir(repo_root: &Path, target: &[u8]) -> bool {
     gitdir.join("commondir").exists()
 }
 
-/// Whether the gitdir named by `target` (resolved against `repo_root`) contains
-/// git's `commondir` marker. Off Unix a gitdir path must be valid Unicode, so a
-/// non-UTF-8 `target` cannot be resolved and is reported as not-a-worktree.
+/// Whether the gitdir named by `target` contains Git’s `commondir` marker.
+/// Off Unix, gitdir paths must be valid Unicode, so invalid UTF-8 yields
+/// `false`.
 #[cfg(not(unix))]
 fn gitdir_has_commondir(repo_root: &Path, target: &[u8]) -> bool {
     let Ok(target) = std::str::from_utf8(target) else {
@@ -128,11 +127,8 @@ fn resolve_git_dir(submod_path: &Path) -> Option<PathBuf> {
     }
 }
 
-/// Resolves a git ref (e.g. `refs/heads/main`) to an OID by checking loose
-/// refs first, then falling back to `packed-refs`.
-///
-/// Does not follow symbolic refs (chains of `ref:` indirection). This is fine
-/// for branch tips under `refs/heads/`, which are always direct OIDs.
+/// Resolves a direct git ref to an OID by checking loose refs before `packed-refs`.
+/// This is intended for branch tips under `refs/heads/`, which contain direct OIDs.
 fn resolve_ref(git_dir: &Path, ref_target: &str) -> Option<git2::Oid> {
     // Loose ref
     let ref_path = git_dir.join(ref_target);
@@ -218,10 +214,8 @@ fn scan_submodule_props(
     }
 }
 
-/// Cheap byte-scan: returns `true` if `path` is readable and contains the
-/// sub-slice `ignore`. Most repos never set per-submodule ignore, so a
-/// negative answer here lets [`parse_per_submodule_ignore`] short-circuit
-/// without paying the cost of opening a git config.
+/// Cheap byte scan for  `ignore` in a readable file. A `false` result lets
+/// [`parse_per_submodule_ignore`] return before opening a git config.
 fn file_mentions_ignore(path: &Path) -> bool {
     let Ok(bytes) = std::fs::read(path) else {
         return false;
@@ -231,13 +225,11 @@ fn file_mentions_ignore(path: &Path) -> bool {
 
 /// Returns per-submodule `ignore` settings keyed by submodule path.
 ///
-/// Merges `.gitmodules` (read first) with `.git/config` (read second so it
-/// overrides per key). Submodules with no explicit `ignore` entry are
-/// absent from the result.
+/// Merges `.gitmodules` (read first) with `.git/config` (read second so it overrides
+/// per key). Submodules with no explicit `ignore` entry are absent from the result.
 ///
-/// Fast path: if neither config file even mentions the substring `ignore`,
-/// returns an empty map without opening either as a git config (full parse
-/// costs hundreds of microseconds on submodule-heavy repos).
+/// Fast path:  when byte scans find no `ignore` substring in either file, returns
+/// an empty map and avoids full config parsing.
 #[must_use]
 pub fn parse_per_submodule_ignore(
     repo: &Repository,
@@ -256,7 +248,8 @@ pub fn parse_per_submodule_ignore(
         scan_submodule_props(&gm, &mut name_to_path, &mut name_to_ignore);
     }
     if let Ok(repo_cfg) = repo.config() {
-        // Only the ignore side: `.git/config` doesn't redefine paths.
+        // Collect only ignore overrides from `.git/config`. Submodule paths come
+        // from `.gitmodules`.
         scan_submodule_props(&repo_cfg, &mut FxHashMap::default(), &mut name_to_ignore);
     }
 
@@ -266,9 +259,8 @@ pub fn parse_per_submodule_ignore(
         .collect()
 }
 
-/// Parses `.gitmodules` to extract submodule name, path, and branch without
-/// going through `repo.submodules()` (which triggers expensive per-submodule
-/// config snapshot parsing in libgit2).
+/// Parses `.gitmodules` directly via [`git2::Config`] to extract submodule names,
+/// paths, and branches.
 ///
 /// # Errors
 ///
@@ -284,11 +276,11 @@ pub fn parse_gitmodules(
     let mut iter = config.entries(Some("submodule\\..*\\.path"))?;
     while let Some(entry) = iter.next() {
         let entry = entry?;
-        // Skip entries with a non-UTF-8 key or path instead of panicking: a
-        // submodule path is arbitrary bytes on Linux, and git tolerates it.
-        // Mirrors `scan_submodule_props`.
+        // Git permits arbitrary bytes in submodule paths on linux, while `git2::Config`
+        // exposes keys and values as UTF-8. Skip entries it cannot decode. Mirrors
+        // `scan_submodule_props`.
         let Ok(key) = entry.name() else { continue };
-        // The regex filter on entries() guarantees this shape; skip defensively.
+        // The regex filter on `entries()` guarantees this shape
         let Some(name) = key
             .strip_prefix("submodule.")
             .and_then(|s| s.strip_suffix(".path"))

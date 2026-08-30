@@ -18,8 +18,8 @@ use super::{
 };
 
 /// Color slots used by `git status -s`. Names mirror git's `WT_STATUS_*`
-/// constants; values match git's defaults (green for staged / local
-/// branch, red for everything else).
+/// constants. Values match git's defaults: green for staged and local
+/// branch, red for everything else.
 const SHORT_PALETTE: Palette = Palette {
     local_branch: GREEN,
     remote_branch: RED,

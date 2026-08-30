@@ -91,7 +91,7 @@ impl WatchServer {
                     Self::is_index_or_head_path(p)
                         || self.is_submod_refs_heads(p)
                         // On Linux, inotify may only report the MOVED_FROM
-                        // half of a `target.lock`-> target` rename. The filename
+                        // half of a `target.lock`-> `target` rename. The filename
                         // is "index.lock"/"HEAD.lock" rather than "index"/"HEAD",
                         // so `is_index_or_head_path` misses it. Treat a
                         // rename of these lock files as a completed git
@@ -135,8 +135,8 @@ impl WatchServer {
                 // deletion is ignored, acting on it would race with the
                 // immediately following rename. All other events (writes,
                 // renames) are classified as `RootGitOperation` and handled in
-                // the event loop by spawning lock-free rayon tasks to re-check
-                // submodule statuses.
+                // the event loop by spawning rayon tasks to re-check submodule
+                // statuses.
                 //
                 // Detecting HEAD changes is needed for `git checkout`:
                 // the index is updated before HEAD, so rayon tasks spawned

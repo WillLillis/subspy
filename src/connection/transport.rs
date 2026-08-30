@@ -76,12 +76,8 @@ pub fn set_recv_timeout(stream: &IpcStream, timeout: Option<Duration>) -> std::i
 /// Size of the LE u32 length prefix prepended to every IPC message.
 pub(super) const MSG_PREFIX_LEN: usize = size_of::<u32>();
 
-/// Maximum encoded size of any fixed-size IPC message (i.e. messages that
-/// use stack buffers rather than `Vec`s). Currently the largest is
-/// `ServerMessage::Indexing { u32, u32 }` at 12 bytes.
-///
-/// [`write_full_message_fixed`] uses this to combine the length prefix and body
-/// into a single `write_all` call, requiring one syscall instead of two.
+/// Maximum encoded size of a fixed-size IPC message stored in a stack buffer.
+/// The largest is `ServerMessage::Indexing { u32, u32 }` at 12 bytes.
 pub(super) const MAX_FIXED_MSG_LEN: usize = 12;
 
 /// Stack buffer size for [`write_full_message_fixed`]'s single-write fast path.
@@ -141,12 +137,12 @@ pub fn write_full_message_fixed(
 
 /// Reads a length-prefixed message into a stack buffer of size `N`.
 ///
-/// Returns the number of bytes in the message (not including the prefix).
-/// The caller should use `&buffer[..len]` to access the message.
+/// Returns the payload length in bytes. The caller caller accesses it
+/// through `&buffer[..len]`.
 ///
 /// # Errors
 ///
-/// Returns `std::io::Error` if reading fails.
+/// Returns [`std::io::Error`] if reading fails.
 ///
 /// # Panics
 ///

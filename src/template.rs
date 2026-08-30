@@ -93,7 +93,7 @@ pub fn find_placeholder<'a, const N: usize>(
 enum Segment<'t> {
     /// Literal output text, with backslash escapes (`\n`, `\t`, `\{`, ...) resolved
     Literal(String),
-    /// A `{...}` block. `idx`/`name` identify the matched placeholder; `content`
+    /// A `{...}` block. `idx` and `name` identify the matched placeholder. `content`
     /// is the full inside-braces text, so a wrapper like `{(name)}` is preserved
     /// and padded as a unit.
     Placeholder {
@@ -105,8 +105,8 @@ enum Segment<'t> {
 
 /// A format template parsed once into literal/placeholder segments.
 ///
-/// [`parse`](Template::parse) walks and validates the source string once, then
-/// [`expand`](Template::expand) can then be called repeatedly without re-parsing.
+/// [`parse`](Template::parse) validates and vuilds the segments once for repeated
+/// [`expand`](Template::expand) calls.
 #[derive(Debug)]
 pub struct Template<'t, const N: usize> {
     segments: Vec<Segment<'t>>,
@@ -116,7 +116,7 @@ pub struct Template<'t, const N: usize> {
 
 impl<'t, const N: usize> Template<'t, N> {
     /// Parses `template` against `placeholders` in a single pass, validating as
-    /// it goes. Backslash-escaped braces (`\{`, `\}`) are literal; other escapes
+    /// it goes. Backslash-escaped braces (`\{`, `\}`) are literal. Other escapes
     /// (`\n`, `\r`, `\t`, `\\`) are resolved into the literal segments.
     ///
     /// # Errors

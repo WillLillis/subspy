@@ -9,9 +9,9 @@
 //! Path-formatting policy by output mode:
 //! - Long, short, porcelain v2 (without `-z`): cwd-relative through
 //!   this module.
-//! - Porcelain v1: repo-root-relative regardless of cwd; goes through
-//!   `Relativizer::new("")` as a no-op pass-through so the shared
-//!   `xy_line` writer can use a single code path.
+//! - Porcelain v1: repo-root-relative regardless of cwd. It uses
+//!   `Relativizer::new("")` as a pass-through so the shared
+//!   `xy_line` writer can use one code path.
 //! - Porcelain v2 with `-z`: repo-root-relative (paths are stable
 //!   identifiers in `-z` mode).
 //!

@@ -44,7 +44,7 @@ struct RenderOpts<'a> {
 /// Renders the full porcelain v2 output to `out`: optional `# branch.*`
 /// header lines followed by one `1`/`2`/`u`/`?`/`!` line per entry,
 /// terminated by LF or NUL per `opts.null_terminate`. `rel` is the
-/// cwd-aware relativizer; under `-z` it falls back to repo-root paths
+/// cwd-aware relativizer. Under `-z` it falls back to repo-root paths
 /// internally.
 ///
 /// Quoting policy: porcelain v2 doesn't treat a plain space as
@@ -167,7 +167,7 @@ pub fn display_porcelain_v2(
         .filter(|e| e.status() == git2::Status::WT_NEW && entries.path_filter.keeps(e.path_bytes()))
     {
         // Drop the phantom untracked row libgit2 emits for a conflicted
-        // submodule's working tree; git lists it only as an unmerged (`u`) entry.
+        // submodule's working tree. Git lists it only as an unmerged (`u`) entry.
         if path_within_any(entry.path_bytes(), entries.conflicted_paths) {
             continue;
         }
@@ -331,7 +331,7 @@ const fn submodule_cmu(st: StatusSummary) -> (char, char, char) {
 
 /// Writes a non-rename, non-conflict tracked entry as a porcelain v2
 /// `1` line: `1 XY <sub> <m_head> <m_idx> <m_work> <h_head> <h_idx> PATH`.
-/// `sub` is always `N...` here (non-submodule); modes and OIDs come
+/// `sub` is always `N...` here for a non-submodule. Modes and OIDs come
 /// from [`extract_modes_and_oids`].
 fn write_ordinary(
     entry: &git2::StatusEntry<'_>,
@@ -581,7 +581,7 @@ fn write_submodule(
     out: &mut impl Write,
     render_opts: &RenderOpts<'_>,
 ) -> Result<(), io::Error> {
-    // `x`/`y` mirror git's XY notation; `c`/`m`/`u` mirror the
+    // `x` and `y` mirror git's XY notation. `c`, `m`, and `u` mirror the
     // porcelain v2 `S<C><M><U>` sub-field positions.
     let (x, y) = submodule_xy(st);
     let (c, m, u) = submodule_cmu(st);
