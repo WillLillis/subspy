@@ -50,9 +50,8 @@ pub fn needs_quoting(path: &[u8], mode: QuoteMode) -> bool {
 /// caller is responsible for emitting the surrounding `"..."` and for
 /// having checked [`needs_quoting`] when appropriate.
 ///
-/// When `mode.quote_path` is `false`, bytes `>= 0x80` are emitted
-/// verbatim; everything else (control chars, `"`, `\`) is escaped as
-/// usual.
+/// When `mode.quote_path` is `false`, bytes `>= 0x80` are emitted verbatim.
+/// Everything else (control chars, `"`, `\`) is escaped as usual.
 ///
 /// # Errors
 ///

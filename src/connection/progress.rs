@@ -20,17 +20,17 @@ impl ProgressUpdate {
     }
 }
 
-/// Type alias for the progress queue mutex
+/// Progress update queues keyed by client PID.
 pub(super) type ProgressMap = Mutex<FxHashMap<u32, VecDeque<ProgressUpdate>>>;
 
-/// Set of client PIDs that should receive progress updates during indexing
+/// Client PIDs subscribed to indexing progress updates.
 pub(super) type ProgressSubscribers = Mutex<FxHashSet<u32>>;
 
 /// Pushes `progress_val` to the progress queue for every registered subscriber.
 ///
 /// # Panics
 ///
-/// Panics if either mutex has been poisoned
+/// Panics if either mutex has been poisoned.
 #[inline]
 #[expect(clippy::significant_drop_tightening)]
 pub(super) fn broadcast_progress(
@@ -39,7 +39,7 @@ pub(super) fn broadcast_progress(
     progress_val: ProgressUpdate,
 ) {
     let subs = subscribers.lock().expect("Subscribers mutex poisoned");
-    // Avoid locking the progress queue for the common case of no active subscribers
+    // Lock the progress queues only when active subscribers exist.
     if subs.is_empty() {
         return;
     }

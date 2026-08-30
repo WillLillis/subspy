@@ -2,10 +2,9 @@
 //!
 //! [`subspy_entry`] is what the `subspy` binary's main runs, and what the
 //! `subspy-git` shim hands off to when it sees the [`INTERNAL_FLAG`]
-//! sentinel that `spawn_daemon` prepends. That sentinel route lets
-//! `spawn_daemon` use `current_exe()` without caring whether it resolves
-//! to `subspy` or the shim. Whichever binary is running can serve the
-//! daemon role.
+//! sentinel that `spawn_daemon` prepends. That sentinel lets
+//! [`crate::watch::spawn_daemon`] use `current_exe()`, with either resolved
+//! binary able to serve the daemon role.
 
 use std::{ffi::OsString, io, process::ExitCode};
 
@@ -28,8 +27,8 @@ pub const INTERNAL_FLAG: &str = "--subspy-internal";
 /// the appropriate process exit code.
 ///
 /// Silently drops a leading [`INTERNAL_FLAG`] (immediately after the
-/// program name) if present, so daemon-spawned invocations are accepted
-/// without making the flag a public part of the CLI surface.
+/// program name) if present, accepting daemon-spawned invocation while
+/// keeping the flag internal.
 pub fn subspy_entry<I, T>(args: I) -> ExitCode
 where
     I: IntoIterator<Item = T>,
@@ -66,10 +65,9 @@ fn subspy_dispatch<I>(args: I) -> RunResult<()>
 where
     I: IntoIterator<Item = OsString>,
 {
-    // First git2 call in the process triggers libgit2's one-time
-    // global initialization (~80-200K cycles). configure_git2 itself
-    // is ~430 cycles; the rest is init overhead that would otherwise
-    // be paid on the first Repository::open call.
+    // The first git2 call in the process triggers libgit2's one-time
+    // global initialization (~80-200K cycles). Calling `configure_git2`
+    // here pays that cost before the first `Repository::open`.
     configure_git2();
     let cli = Command::new("subspy")
         .subcommand_required(true)
@@ -104,13 +102,12 @@ where
 }
 
 /// Sets up logging and, for the watch server, the panic hook. The watch
-/// server logs to a file in the cache dir (default `info`); client commands
-/// log to stderr (default `warn`).
+/// server logs to a file in the cache directory with an `info` default.
+/// Client commands log to stderr with a `warn` default.
 ///
-/// Logging is best-effort: a setup failure is swallowed and the command runs
-/// unlogged rather than aborting. This matters most for the daemon, which is
-/// spawned detached with a null stderr -- propagating the error would kill the
-/// auto-spawned server silently and break the client that spawned it.
+/// Logging is best-effort, and the command continues after setup failures.
+/// This matters most for the detached daemon, whose null stderr would hide
+/// hide a startup error and leave the spawning client without a server.
 fn setup_logging(command: &Commands) {
     if let Commands::Start(start) = command {
         if let Ok(base) = etcetera::choose_base_strategy() {

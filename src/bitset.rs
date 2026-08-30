@@ -1,7 +1,7 @@
 //! A compact bitset optimized for small dense integer sets.
 //!
-//! Uses an inline `[u64; 8]` (512 bits, one cache line) for the common case (up
-//! to 510 submodules. Falls back to a heap-allocated `Vec<u64>` for larger repos.
+//! Uses an inline `[u64; 8]` of 512 bits (one cache line) for the common case of
+//! up to 510 submodules. Larger repositories fall back to a `Vec<u64>`.
 
 /// A compact bitset for tracking small dense integer sets (watcher indices).
 ///
@@ -48,9 +48,7 @@ impl BitSet {
     }
 
     /// Debug-only bounds check shared by the unchecked accessors. Compiles out
-    /// in release; in debug it converts an out-of-range index (e.g. a watcher
-    /// index past a wrongly-sized bitset) into a panic rather than a silent
-    /// out-of-bounds read.
+    /// in release. In debug it converts an out-of-range index into a panic.
     #[inline]
     fn assert_in_bounds(&self, i: usize) {
         debug_assert!(

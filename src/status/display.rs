@@ -125,7 +125,7 @@ fn print_staged_changes(
 
     // git lists staged files and staged submodule changes (modified/new,
     // deleted, renamed) in one path-sorted stream. The file rows come
-    // pre-classified (renames reconciled to match git) in `tracked_rows`;
+    // pre-classified in `tracked_rows`, with renames reconciled to match git.
     // libgit2 excludes submodules from them, so interleave the submodule rows.
     // Non-staged (worktree-only) entries fall through the `istatus` match below.
     let mut submods: Vec<SubRow<'_>> = Vec::new();
@@ -152,7 +152,7 @@ fn print_staged_changes(
                 s if s.contains(git2::Status::INDEX_MODIFIED) => "modified:   ",
                 s if s.contains(git2::Status::INDEX_DELETED) => "deleted:    ",
                 s if s.contains(git2::Status::INDEX_TYPECHANGE) => "typechange: ",
-                // Worktree-only entry; rendered by the unstaged section instead.
+                // Worktree-only entry rendered by the unstaged section.
                 _ => return Ok(()),
             };
             let Some(index) = entry.head_to_index() else {
@@ -358,8 +358,8 @@ fn print_unstaged_changes(
                 writeln!(out)
             }
         }
-        // Deleted/renamed submodule rows are staged changes; they never appear
-        // in the unstaged section, so this section builds none of them.
+        // Deleted/renamed submodule rows are staged changes. They never appear
+        // in the unstaged section.
         Row::Sub(SubRow::Deleted(_) | SubRow::Renamed(_)) => Ok(()),
     })?;
 
@@ -389,7 +389,7 @@ fn print_untracked_files(
             continue;
         };
         // libgit2 reports a conflicted submodule's working tree as untracked
-        // (`sub/`, or `sub/...` under `-uall`); git shows it only under "Unmerged
+        // (`sub/`, or `sub/...` under `-uall`). Git shows it only under "Unmerged
         // paths", so drop those rows.
         if path_within_any(file, conflicted_paths) {
             continue;
@@ -533,8 +533,8 @@ pub fn display_status(
         conflicted_paths,
         phantom_deletes,
         // Long format renders an unmerged submodule via `print_unmerged_paths`
-        // and relies on it already being excluded from `submodules`; the folded
-        // `S<c><m><u>` status is a porcelain-v2-only concern.
+        // and relies on it already being excluded from `submodules`. The folded
+        // `S<c><m><u>` status is specific to porcelain v2.
         conflicted_submodules: _,
         path_filter,
     } = *entries;
@@ -598,7 +598,7 @@ pub fn display_status(
 
 /// Emits git's `--show-stash` trailer line (`Your stash currently has
 /// N entry/entries`), or nothing when the repo has no stashes. Stashes
-/// are tracked via the `refs/stash` reflog; missing reflog means 0.
+/// are tracked via the `refs/stash` reflog. A missing reflog means 0.
 fn print_stash_trailer(repo: &Repository, out: &mut impl Write) -> Result<(), io::Error> {
     let count = repo.reflog("refs/stash").map_or(0, |r| r.len());
     if count == 0 {

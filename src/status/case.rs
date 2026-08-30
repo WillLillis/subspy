@@ -12,12 +12,12 @@
 //!   two index entries differing only in case (e.g. `Foo.txt` and `foo.txt`,
 //!   committed on a case-sensitive FS) collapse to one working file on
 //!   checkout. libgit2's diff pairs that file with one entry and reports the
-//!   other as a spurious `WT_DELETED`; git instead collapses the pair to a
-//!   single status line, so subspy suppresses the phantom.
+//!   other as a spurious `WT_DELETED`. Git collapses the pair to a single
+//!   status line, so subspy suppresses the phantom.
 //!
 //! Folding is ASCII-only. That matches git for most of its own path
 //! comparisons and covers the Windows/macOS collisions that occur in
-//! practice; full Unicode case-folding is not attempted.
+//! practice. Full Unicode case-folding is not attempted.
 
 use std::borrow::Cow;
 
@@ -74,8 +74,8 @@ impl CaseSensitivity {
 }
 
 /// Byte paths of the phantom deletes in `non_submod`. A case-sensitive
-/// filesystem cannot produce a collision, so `case` short-circuits ahead of
-/// the scan; otherwise a single pass over the statuses returns empty unless
+/// filesystem cannot produce a collision, so `case` short-circuits before
+/// the scan. Otherwise, a single pass over the statuses returns empty unless
 /// something is worktree-deleted, so the common case allocates nothing.
 pub(super) fn phantom_deletes(
     non_submod: &git2::Statuses<'_>,

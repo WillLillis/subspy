@@ -30,8 +30,7 @@ thread_local! {
     static ENCODE_BUF: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
 }
 
-/// Handles an incoming client connection on a dedicated OS thread.
-/// Errors are logged rather than propagated, since each connection is handled independently.
+/// Handles a client connection on a dedicated OS thread and logs per-connection errors.
 #[expect(
     clippy::needless_pass_by_value,
     reason = "owned values required for 'static std::thread::spawn closure"
@@ -48,8 +47,6 @@ pub(super) fn handle_client_connection(
     }
 }
 
-// NOTE: The logic in this function is kept separate from `handle_client_connection` purely to
-// preserve `?` ergonomics.
 fn dispatch_client_message(
     conn: IpcStream,
     control_tx: &crossbeam_channel::Sender<ControlMessage>,
@@ -120,8 +117,7 @@ fn handle_status_request(
     progress: &ProgressMap,
     subscribers: &ProgressSubscribers,
 ) -> WatchResult<()> {
-    // Fast path: status map available immediately (no indexing in progress).
-    // Skip the 3 mutex lock/unlock pairs for progress subscriber management.
+    // An immediately available status map avoids 3 progress subscriber mutex locks/unlocks
     if let Some(guard) = try_lock(statuses) {
         return ENCODE_BUF.with_borrow_mut(|buf| -> WatchResult<()> {
             encode_status_response(&mut conn, guard, buf)?;
@@ -210,9 +206,8 @@ fn encode_status_into(map: &BTreeMap<String, StatusSummary>, buf: &mut Vec<u8>) 
     buf[..MSG_PREFIX_LEN].copy_from_slice(&msg_len.to_le_bytes());
 }
 
-/// Handles a client's request to reindex the watch server. The reindex signal has already
-/// been sent to the main event loop via the control channel; this function handles sending
-/// progress updates back to the client over the IPC connection.
+/// Handles a client's reindex request after the control signal has been sent to
+/// the main event loop. Sends progress updates over the IPC `conn`.
 fn handle_reindex_request(
     mut conn: BufReader<IpcStream>,
     client_pid: u32,
@@ -272,13 +267,12 @@ fn remove_progress_client(
     _ = progress.lock().expect("Mutex poisoned").remove(&client_pid);
 }
 
-/// Attempts to send an index progress message to `conn` for `client_pid`.
-/// Return indicates whether indexing is determined to be complete (a message
-/// is sent where `curr == total`)
+/// Attempts to send an indexing progress message to `conn` for `client_pid`. Returns
+/// `true` after sending an update where `curr == total`.
 ///
 /// # Errors
 ///
-/// Returns `Err` if `bincode` encoding or writing to `conn` fails
+/// Returns `Err` if `bincode` encoding or writing to `conn` fails.
 fn try_send_progress_update(
     conn: &mut BufReader<IpcStream>,
     client_pid: u32,
@@ -309,9 +303,8 @@ fn send_progress_update(conn: &mut BufReader<IpcStream>, curr: u32, total: u32) 
     Ok(())
 }
 
-/// Acquires the `statuses` guard. Every time the lock cannot be acquired
-/// (because it is currently locked by an indexing operation in the main loop), an attempt
-/// is made to send a progress update to the client.
+/// Acquires the `statuses` guard, sending queued progress updates while the main
+/// indexing loop holds the lock.
 fn get_status_guard_with_progress<'a>(
     conn: &mut BufReader<IpcStream>,
     client_pid: u32,

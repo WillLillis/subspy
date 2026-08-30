@@ -43,13 +43,13 @@ pub struct DebugState {
     pub root_path: String,
     pub socket_name: String,
     pub submodule_statuses: Option<Vec<(String, StatusSummary)>>,
-    /// In-flight rayon tasks: `(relative_path, state)` where state is
-    /// "active", "active (cancelling)", "dirty", or "dirty (cancelling)"
+    /// In-flight rayon tasks: `(relative_path, state)`, where state is
+    /// "active", "active (cancelling)", "dirty", or "dirty (cancelling)".
     pub in_flight: Option<Vec<(String, String)>>,
-    /// Progress queues keyed by client PID: `(pid, [(curr, total)])`
+    /// Progress queues keyed by client PID: `(pid, [(curr, total)])`.
     #[expect(clippy::type_complexity)]
     pub progress_queues: Option<Vec<(u32, Vec<(u32, u32)>)>>,
-    /// The last watcher error that triggered a reindex, if any
+    /// The last watcher error that triggered a reindex, if any.
     pub last_watcher_error: Option<String>,
     /// Non-recursive tripwire watches on submodule ancestor directories:
     /// `(watch_path, pending_event_count)`.
@@ -73,9 +73,8 @@ pub enum ServerMessage {
     },
 }
 
-/// Pre-encoded wire bytes for the payload-free messages, so the send paths can
-/// write them directly rather than running a bincode encode (and guarding an
-/// error that can never occur for a fixed unit variant).
+/// Pre-encoded wire bytes for the payload-free messages, allowing their send paths
+/// to write directly with no fallible encoding step.
 pub(super) const SHUTDOWN_REQUEST: [u8; 5] = [0, 1, 0, 0, 0];
 pub(super) const DEBUG_REQUEST: [u8; 5] = [0, 3, 0, 0, 0];
 pub(super) const SHUTDOWN_ACK: [u8; 4] = [2, 0, 0, 0];

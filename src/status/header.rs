@@ -86,8 +86,8 @@ fn rebase_done_display_path(repo: &Repository) -> String {
 /// Reads rebase state from `.git/rebase-merge/` if an interactive or merge-backend
 /// rebase is in progress. Returns `None` if no such rebase is active.
 fn get_rebase_info(repo: &Repository) -> StatusResult<Option<RebaseInfo>> {
-    // Use git2 for state detection; `open_rebase()` is not used because libgit2 does not
-    // support opening interactive rebases started by the git command-line.
+    // Repository state detects interactive rebases started by the git CLI. `open_rebase()`
+    // does not support the full set.
     let state = repo.state();
     let is_interactive = state == git2::RepositoryState::RebaseInteractive;
     if !is_interactive && state != git2::RepositoryState::RebaseMerge {
@@ -155,8 +155,8 @@ fn print_rebase_header(info: &RebaseInfo, stdout: &mut impl Write) -> Result<(),
         for cmd in &info.done_ops {
             writeln!(stdout, "   {cmd}")?;
         }
-        // Only the last two ops are listed; when more were done git points
-        // at the full file (relative to the worktree root) for the rest.
+        // Only the last two ops are listed. When more were completed, git points
+        // to the full file relative to the worktree root.
         if info.total_done > info.done_ops.len() {
             writeln!(stdout, "  (see more in file {})", info.done_file)?;
         }
@@ -311,9 +311,8 @@ enum HeaderBody {
         has_conflicts: bool,
     },
     Bisect {
-        /// Contents of `.git/BISECT_START` -- the branch name git was on
-        /// when `git bisect start` ran, or the short OID if the user
-        /// was detached at the time.
+        /// Contents of `.git/BISECT_START`. The branch name git was on
+        /// when `git bisect start` ran, or the short OID if detached.
         started_from: String,
     },
     ApplyMailbox {
@@ -401,9 +400,9 @@ fn get_header_state(repo: &Repository, ahead_behind: bool) -> StatusResult<Heade
         });
     }
 
-    // `git rebase --apply` uses `rebase-apply/` instead of `rebase-merge/`.
-    // git2 reports this as `RepositoryState::Rebase`, which `get_rebase_info`
-    // doesn't handle since it only reads from `rebase-merge/`.
+    // `git rebase --apply` stores its state in `rebase-apply/` and git2 reports
+    // this as `RepositoryState::Rebase`. Read it separately from the `rebase-merge/`
+    // states handled by `get_rebase_info`.
     let rebase_apply = repo.path().join("rebase-apply");
     if rebase_apply.join("rebasing").exists()
         && let Some((onto_short, head_name)) = read_rebase_onto_and_head(&rebase_apply)

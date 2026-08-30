@@ -74,15 +74,11 @@ pub struct Status {
     #[arg(short = 'z')]
     pub null_terminate: bool,
     /// How to handle submodule changes in the output
-    #[arg(
-        long = "ignore-submodules",
-        value_name = "WHEN",
-        default_value = "none"
-    )]
+    #[arg(long, value_name = "WHEN", default_value = "none")]
     pub ignore_submodules: IgnoreSubmodules,
     /// Show untracked files. Bare `-u` is `-u=all`, matching git (absent is `normal`).
     #[arg(
-        long = "untracked-files",
+        long,
         short = 'u',
         value_name = "MODE",
         default_missing_value = "all",
@@ -91,32 +87,32 @@ pub struct Status {
     pub untracked_files: Option<UntrackedFiles>,
     /// Show ignored files. Bare `--ignored` is `--ignored=traditional`.
     #[arg(
-        long = "ignored",
+        long,
         value_name = "MODE",
         default_missing_value = "traditional",
         num_args = 0..=1
     )]
     pub ignored: Option<IgnoredFiles>,
-    /// Show branch and tracking info (short / porcelain modes;
-    /// long format always shows branch info)
+    /// Show branch and tracking info in short and porcelain modes.
+    /// The long format always shows branch info.
     #[arg(short = 'b', long)]
     pub branch: bool,
     /// Compute and display detailed ahead/behind upstream counts (default).
-    #[arg(long = "ahead-behind", conflicts_with = "no_ahead_behind")]
+    #[arg(long, conflicts_with = "no_ahead_behind")]
     pub ahead_behind: bool,
     /// Skip the commit-graph walk and emit only the divergence
     /// relationship without specific counts.
-    #[arg(long = "no-ahead-behind", conflicts_with = "ahead_behind")]
+    #[arg(long, conflicts_with = "ahead_behind")]
     pub no_ahead_behind: bool,
     /// Quote bytes `>= 0x80` in paths as octal escapes (git's default).
     /// Set to `false` to emit such bytes verbatim (matches
     /// `-c core.quotepath=false`).
-    #[arg(long = "quote-path", default_value_t = true,
+    #[arg(long, default_value_t = true,
           action = clap::ArgAction::Set)]
     pub quote_path: bool,
-    /// Append stash-count info: long format gets a `Your stash currently
-    /// has N entr...` line; porcelain v2 with `--branch` gets `# stash N`.
-    #[arg(long = "show-stash")]
+    /// Append stash-count information. Long format gets git's human-readable stash
+    /// trailer, while porcelain v2 with `--branch` gets `# stash N`.
+    #[arg(long)]
     pub show_stash: bool,
 }
 
@@ -249,8 +245,8 @@ pub enum RunError {
 }
 
 impl RunError {
-    /// Returns `RunError::ProjectPath`, indicating `path` does not point to a non-recursive (not
-    /// a submodule of a submodule) git repository with submodules.
+    /// Builds a [`RunError::ProjectPath`] for repository kinds outside the supported
+    /// top-level superproject and linked-worktree shapes.
     fn server_path(path: PathBuf) -> Self {
         Self::ProjectPath {
             path,
@@ -349,34 +345,30 @@ impl Status {
         } else if let Some(v) = self.porcelain {
             OutputFormat::Porcelain(v)
         } else if self.null_terminate {
-            // Bare `-z` with no explicit format implies porcelain v1, matching
-            // `git status -z` (NUL-delimited machine output, not the human
-            // long format). The shim builds a `Status` and runs it through here
-            // too, so this also fixes `git status -z` via `subspy-git`.
+            // Bare `-z` implies porcelain v1's NUL-delimited machine output, matching
+            // `git status -z`. The shim  also routes `git status -z` through this path.
             OutputFormat::Porcelain(PorcelainVersion::V1)
         } else {
             OutputFormat::Long
         }
     }
 
-    /// Resolves the project path and executes the `status` subcommand,
-    /// writing output to `out`. CLI `main` passes a buffered stdout; the
-    /// shim passes a `Vec<u8>` so it can discard partial output and fall
-    /// back to real `git` if anything fails.
+    /// Resolves the project path and executes the `status` subcommand, writing
+    /// output to `out`. CLI `main` passes buffered stdout. The shim passes a
+    /// `Vec<u8>` so it can discard partial output and fall back to the git on
+    /// path if anything fails.
     ///
     /// # Errors
     ///
     /// Returns `Err` if the project path is invalid or the operation fails.
     pub fn run(self, out: &mut impl io::Write) -> RunResult<()> {
-        // `effective_cwd` is the canonicalized --dir argument (or the
-        // process cwd if --dir was absent), reused as the baseline for
-        // path-formatting in status output. Mirrors `git -C <path>`'s
-        // semantics.
+        // `effective_cwd` is the canonicalized `--dir` value or process cwd. It
+        // is the baseline for status path formatting, matching `git -C <path>`.
         let format = self.output_format();
         let project = get_project_path(self.dir)?;
         let display_progress = std::io::stderr().is_terminal();
-        // Default is on; only the explicit `--no-ahead-behind` flips it off.
-        // `--ahead-behind` is accepted for symmetry but is the default.
+        // Ahead/behind detail follows Git’s enabled default. `--ahead-behind` is
+        // accepted for CLI compatibility, while `--no-ahead-behind` disables it.
         let ahead_behind = !self.no_ahead_behind;
         Ok(status(
             ResolvedStatusRequest {
@@ -477,10 +469,8 @@ impl ProjectPath {
     ///
     /// # Errors
     ///
-    /// Returns a `RunError` describing why the repo can't host a server: a
-    /// gitlink to an external git dir ([`RunError::Gitlink`]), or anything else
-    /// that isn't a non-recursive repo with a `.gitmodules` file
-    /// ([`RunError::ProjectPath`]) -- including a worktree with no submodules.
+    /// Returns [`RunError::Gitlink`] for an external gitdir and [`RunError::ProjectPath`]
+    /// for other unsupported repository kinds.
     pub fn require_with_submodules(self) -> RunResult<PathBuf> {
         if self.kind.server_eligible() {
             return Ok(self.repo_root);
@@ -489,9 +479,8 @@ impl ProjectPath {
             RepoKind::OtherGitlink | RepoKind::OtherGitlinkWithSubmodules => {
                 RunError::Gitlink(self.repo_root)
             }
-            // The server-eligible kinds (WithSubmodules, WorktreeWithSubmodules)
-            // are handled by the guard above; everything else -- including a
-            // worktree with no submodules -- has nothing for a server to watch.
+            // Eligible variants are covered by the guard above and listed here for
+            // exhaustiveness.
             RepoKind::Normal
             | RepoKind::WithSubmodules
             | RepoKind::Submodule
@@ -560,10 +549,9 @@ pub fn get_project_path(path: Option<PathBuf>) -> RunResult<ProjectPath> {
     loop {
         let dot_git_path = current_path.join(DOT_GIT);
         if dot_git_path.exists() {
-            // A `.git` *file* is a gitlink (a submodule, a linked worktree, or
-            // some other external git dir); read its `gitdir:` pointer so
-            // `classify_repo` can tell them apart (`None` means `.git` is a real
-            // directory).
+            // A `.git` file is a gitlink to a submodule, linked worktree, or external
+            // git dir. Read its `gitdir:` pointer for  `classify_repo`. `None` represents
+            // a real `.git` directory.
             let git_file_contents = if dot_git_path.is_file() {
                 let contents =
                     std::fs::read(&dot_git_path).map_err(|error| RunError::ProjectPath {
@@ -574,8 +562,8 @@ pub fn get_project_path(path: Option<PathBuf>) -> RunResult<ProjectPath> {
             } else {
                 None
             };
-            // Confirm a linked worktree structurally (via the `commondir` marker
-            // in its gitdir)
+            // Confirm a linked worktree structurally via the `commondir` marker
+            // in its gitdir.
             let is_linked_worktree = git_file_contents
                 .as_deref()
                 .is_some_and(|bytes| gitlink_points_at_worktree(bytes, current_path));

@@ -1,5 +1,4 @@
-//! ANSI styling primitives that emit straight into a formatter or
-//! writer without intermediate `String` allocation.
+//! ANSI styling primitives that stream directly into a formatter or writer.
 //!
 //! Two flavors:
 //! - [`Paint<T>`] is a `Display` wrapper for content that can fit into a
@@ -41,14 +40,13 @@ impl From<u8> for ColorState {
 
 static COLOR_STATE: AtomicU8 = AtomicU8::new(ColorState::Unset as u8);
 
-/// `NO_COLOR` (per <https://no-color.org>): any non-empty value disables
-/// styling. The answer is cached after the first call so paint emissions
-/// don't pay an env-var read each time.
+/// Returns whether color is enabled under the `NO_COLOR` convetion (<https://no-color.org>).
+/// The result is cached after the first call, so subsequent paint emissions use
+/// an atomic read.
 ///
-/// Tests can force the cache to `Disabled` via [`force_disable`]; the
-/// atomic store overwrites whatever the env-based init resolved to, so
-/// snapshot tests are deterministic even if some other test populated
-/// the cache first.
+/// Tests can override the cache via [`force_disable`]. The atomic store replaces
+/// the environment-derived value and keeps snapshots deterministic across test
+/// orderings.
 fn color_enabled() -> bool {
     match ColorState::from(COLOR_STATE.load(Ordering::Relaxed)) {
         ColorState::Enabled => true,

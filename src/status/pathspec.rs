@@ -1,47 +1,23 @@
-//! The cwd pathspec (`git status -- .`): restricts output to the subtree
-//! rooted at the effective cwd.
+//! Cwd pathspec filtering for `git status -- .`.
 //!
-//! Tools that poll status for a directory pane pass `.` so the result is
-//! scoped to what they display. At the repo root the pathspec selects
-//! everything and is a no-op; from a subdirectory it is a real filter.
+//! The filter selects rows at or below the effective cwd. At the repo root it
+//! admits every row. Filtering raw additions and deletions before rename
+//! pairing reproduces git’s behavior for renames crossing the cwd boundary:
+//! only the selected half remains. Selection is separate from output
+//! relativization, preserving porcelain v1’s repo-root-relative paths.
 //!
-//! Two behaviors of git's filter fall out of *where* it is applied rather
-//! than from this module:
+//! When the cwd lies inside a collapsed untracked directory, libgit2 exposes
+//! only the ancestor row. Git’s scoped result depends on the directory
+//! contents, so [`PathFilter::contains_cwd`] detects this case and
+//! [`super::assemble_status`] declines it for the shim to forward.
+//! [`PathFilter::keeps_ignored`] handles Git’s separate rule for collapsed
+//! ignored directories, which retain the ancestor row.
 //!
-//! - **Renames split.** git matches the pathspec before rename detection, so
-//!   a rename that crosses the boundary degrades to the half that survives
-//!   (`R a/f -> b/f` becomes `D a/f` from `a/`, `A b/f` from `b/`). Subspy
-//!   pairs renames itself in [`super::tracked`], so filtering the raw
-//!   add/delete set there reproduces this without a special case.
-//! - **Paths stay repo-root-relative in porcelain v1.** The pathspec chooses
-//!   *which* rows are emitted, never how they are spelled, so
-//!   [`super::relativize`] is unaffected.
-//!
-//! What this module deliberately does *not* model is git descending into a
-//! collapsed untracked directory to reach the pathspec: from `untr/sub`,
-//! git reports `?? untr/sub/` where libgit2 only ever reports `?? untr/`.
-//! Reproducing it means deciding whether the cwd subtree holds any
-//! non-ignored file (an empty one yields no row at all).
-//! [`PathFilter::contains_cwd`] detects that situation so
-//! [`super::assemble_status`] can decline the request; the shim then forwards
-//! to real git, which is always correct.
-//!
-//! Collapsed ignored directories do not descend either, but Git retains the
-//! ancestor row (`!! ign/` stays `!! ign/` from `ign/x/y`).
-//! [`PathFilter::keeps_ignored`] mirrors that behavior.
-//!
-//! # Path encoding
-//!
-//! Both sides of the comparison are `/`-separated repo-relative bytes, on
-//! every platform. libgit2 reports entry paths in git's on-disk form, which
-//! is always `/`; the cwd side is normalized by
-//! [`super::os_path_to_slash_bytes`], which rewrites `\` to `/` on Windows.
-//! [`super::relativize::Relativizer`] matches paths against the same
-//! convention.
-//!
-//! Case handling comes from [`CaseSensitivity`], resolved once per status
-//! request by [`super::assemble_status`]; this module never consults
-//! `core.ignorecase` itself.
+//! Paths are compared as slash-separated, repo-relative bytes. Libgit2
+//! supplies entry paths in Git’s on-disk form, and
+//! [`super::os_path_to_slash_bytes`] normalizes the cwd on Windows.
+//! [`CaseSensitivity`] supplies the `core.ignorecase` policy resolved by
+//! [`super::assemble_status`].
 
 use super::case::CaseSensitivity;
 
@@ -82,11 +58,7 @@ impl<'a> PathFilter<'a> {
     /// produces it).
     ///
     /// An empty `cwd_rel` means the cwd is the repo root, where `-- .`
-    /// selects the whole repo; that collapses to [`PathFilter::all`] so the
-    /// hot path skips the per-row check entirely.
-    ///
-    /// Takes `cwd_rel_slash`, a buffer the caller owns holding `cwd_rel`
-    /// with `/` appended, so the filter can stay allocation-free and `Copy`.
+    /// selects the whole repo.
     #[must_use]
     pub fn subtree(cwd_rel_slash: &'a [u8], case: CaseSensitivity) -> Self {
         debug_assert!(
@@ -120,11 +92,11 @@ impl<'a> PathFilter<'a> {
         }
     }
 
-    /// Whether `path` is a collapsed directory entry strictly *containing*
-    /// the cwd. This is the case this module can't render faithfully.
+    /// Whether `path` is a collapsed directory entry strictly containing the cwd,
+    /// requiring shim forwarding.
     ///
-    /// Only libgit2's collapsed untracked/ignored directory rows end in `/`,
-    /// so tracked entries never trip this.
+    /// The trailing '/' limits matches to libgit2's collapses unstracked or ignored
+    /// directory rows.
     #[must_use]
     pub fn contains_cwd(&self, path: &[u8]) -> bool {
         match self.scope {
@@ -139,9 +111,9 @@ impl<'a> PathFilter<'a> {
 
     /// Whether an ignored row survives the cwd pathspec.
     ///
-    /// Git keeps a collapsed ignored directory that contains the selected cwd
-    /// rather than descending to the pathspec boundary, so ancestor rows are
-    /// visible here even though ordinary rows use [`Self::keeps`].
+    /// Git keeps a collapsed ignored directory that containing the selected cwd
+    /// at its ancestor path. Such rows remain visible alongside those selected by
+    /// [`Self::keeps`].
     #[must_use]
     pub fn keeps_ignored(&self, path: &[u8]) -> bool {
         self.keeps(path) || self.contains_cwd(path)

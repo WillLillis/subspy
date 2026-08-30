@@ -98,7 +98,7 @@ impl WatchServer {
         let msg = ServerMessage::DebugInfo(Box::new(state));
         let mut buf = Vec::with_capacity(1024);
         if let Err(e) = encode_and_write(conn, msg, &mut buf) {
-            error!("Failed to send debug state -- {e}");
+            error!("Failed to send debug state: {e}");
         }
     }
 }

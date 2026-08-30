@@ -52,7 +52,7 @@ fn hash_span(span: &[u8]) -> u64 {
 /// A rename similarity, kept as the exact ratio `copied / max_size` rather than a
 /// rounded percent. git orders rename candidates by this fine score (two pairs
 /// that both display `R83` are not a tie to git unless their ratios are exactly
-/// equal), so [`Ord`] compares the unrounded ratio; [`Self::percent`] is only for
+/// equal), so [`Ord`] compares the unrounded ratio. [`Self::percent`] is used for
 /// the displayed `R{n}`.
 #[derive(Clone, Copy)]
 pub(super) struct Similarity {
@@ -136,8 +136,8 @@ pub(super) fn score(old: &[u8], new: &[u8]) -> u8 {
 /// over the additions' spans turns the `deletions x additions` matrix git walks
 /// in full into work proportional to the *overlapping* pairs, so a status whose
 /// renames don't all share content (the usual case) costs far less. Returns
-/// `(deletion index, addition index, similarity)`; `None` signatures (unreadable
-/// blobs) contribute nothing.
+/// `(deletion index, addition index, similarity)`. Unreadable signatures
+/// contribute nothing.
 #[must_use]
 pub(super) fn overlapping_pairs(
     deletions: &[Option<Signature>],
@@ -154,8 +154,8 @@ pub(super) fn overlapping_pairs(
     }
 
     let mut pairs = Vec::new();
-    // `copied[add_idx]` accumulates shared bytes for the current deletion; only
-    // the touched entries are reset between deletions, so sparse cases stay cheap.
+    // `copied[add_idx]` accumulates shared bytes for the current deletion. Reset
+    // only the touched entries are between deletions so sparse cases stay cheap.
     let mut copied = vec![0u64; additions.len()];
     let mut touched: Vec<usize> = Vec::new();
     for (del_idx, sig) in deletions.iter().enumerate() {

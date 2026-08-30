@@ -5,9 +5,9 @@
 //! file entries (the watch server supplies submodules), but git emits both in
 //! one stream sorted by path within each section. [`for_each_merged`] merges
 //! the (already path-ordered) file entries with the submodule rows so renderers
-//! reproduce that ordering. The file side stays lazy -- no entries are
-//! collected -- so when there are no submodule rows it is just the file
-//! iterator; only the (small) submodule list is sorted.
+//! reproduce that ordering. The file side remains lazy and uncollected. With
+//! no submodule rows it is simply the file iterator. Only the (small) submodule
+//! list is sorted.
 
 use git2::StatusEntry;
 
@@ -55,14 +55,13 @@ fn entry_sort_key<'e>(entry: &'e StatusEntry<'_>) -> &'e [u8] {
         .unwrap_or_else(|| entry.path_bytes())
 }
 
-/// Calls `on_row` for each row in git's path order, merging the
-/// already-path-ordered `files` with `submods`. `files` stays lazy; `submods`
-/// (bounded by the submodule count) is sorted in place. Paths are compared as
-/// bytes, matching git's `strcmp` ordering and handling non-UTF-8 paths.
+/// Calls `on_row` for each row in git's path order, merging the already
+/// path ordered `files` with `submods`. `files` stays lazy, while `submods`
+/// is bounded by the submodule count and is sorted in place. Paths are compared
 ///
 /// `files` must already be filtered to the entries that render in this section
-/// and be in libgit2's native (destination-path) order -- both hold for a
-/// filtered `git2::Statuses::iter()`.
+/// and follow libgit2's native destination path order. A  filtered [`git2::Statuses::iter`].
+/// satisfies both requirements.
 pub(super) fn for_each_merged<'a, E>(
     files: impl Iterator<Item = StatusEntry<'a>>,
     mut submods: Vec<SubRow<'a>>,
@@ -71,15 +70,14 @@ pub(super) fn for_each_merged<'a, E>(
     submods.sort_by(|x, y| x.key().cmp(y.key()));
     let mut files = files;
     let mut submods = submods.into_iter();
-    // One element of look-ahead per side, held as owned bindings so each branch
-    // emits a value it already has -- no peek-then-unwrap.
+
     let mut pending_file = files.next();
     let mut pending_sub = submods.next();
     loop {
         match (pending_file.take(), pending_sub.take()) {
             (Some(file), Some(sub)) => {
-                // A path is either a file or a submodule, never both, so there
-                // are no exact ties; emit the submodule when it sorts before.
+                // File and submodule paths are disjoint, eliminating exact ties.
+                // Emit the submodule when it sorts first.
                 if sub.key() < entry_sort_key(&file) {
                     on_row(Row::Sub(sub))?;
                     pending_file = Some(file);

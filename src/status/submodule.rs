@@ -32,16 +32,10 @@ pub struct SubmoduleChanges {
 /// Returns submodules that are deleted or renamed in the index relative
 /// to the HEAD commit.
 ///
-/// Renames are detected by matching gitlink OIDs: if a HEAD-tracked
-/// submodule path is missing from the index but its gitlink OID appears
-/// at a different path, it's classified as renamed. The OID match is
-/// the only signal -- gitlinks don't carry similarity-scoreable
-/// content, so a submodule advance + rename in the same commit will
-/// register as a deletion plus a new entry.
-///
-/// Fast path: if no HEAD gitlink is missing from the index, we never
-/// scan the full index -- iteration cost is proportional to the number
-/// of submodules in HEAD, not the size of the index.
+/// Renames are detected by matching gitlink OIDs. A HEAD-tracked submodule
+/// from the index is renamed when its OID appears at another path. Gitlinks
+/// expose OIDs as their matching signal, so a simultaneous submodule
+/// advance and rename appears as a deletion plus a new entry.
 ///
 /// # Errors
 ///
@@ -73,10 +67,9 @@ pub fn submodule_changes(repo: &Repository) -> StatusResult<SubmoduleChanges> {
         }
     })?;
 
-    // Subset of `head_gitlinks` with no stage-0 (merged) entry in the index:
-    // candidates for `git rm` / `git mv` on a submodule. This is the fast-path
-    // gate -- `get_path` is a per-path lookup, so the common clean case never
-    // scans the full index or touches conflict state.
+    // HEAD gitlinks lacking a stage-0 entry are candidates for `git rm` or
+    // `git mv`. Per-path `get_path` lookups form the fast-path gate, allowing the
+    // common case to return before scanning the full index or conflict state.
     let mut missing: Vec<(String, git2::Oid)> = head_gitlinks
         .iter()
         .filter(|(path, _)| index.get_path(Path::new(path), 0).is_none())
@@ -143,23 +136,20 @@ pub fn submodule_changes(repo: &Repository) -> StatusResult<SubmoduleChanges> {
     Ok(changes)
 }
 
-/// Folds each unmerged (conflicted-gitlink) submodule into a single status,
-/// keyed by submodule path. git reports such a submodule only through the
-/// unmerged machinery, never as a separate dirty row, so the renderers use this
-/// to (a) drop it from the normal submodule rows and (b) populate the porcelain
-/// v2 `u`-line's `S<c><m><u>` field.
+/// Folds each unmerged gitlink submodule into one status keyed by path. Git
+/// reports these through the unmerged machinery. Renderers use the result to
+/// remove normal submodule rows and populate procelain v2 `u`-line's `S<c><m><u>`
+/// field.
 ///
 /// The status carries:
-/// - `MODIFIED_CONTENT` / `UNTRACKED_CONTENT` / `DELETED_WORKDIR`: the
-///   submodule's own working-tree state, which libgit2 *does* compute (read from
-///   `dirty_submodules`, the already-gathered submodule statuses).
-/// - `NEW_COMMITS`: libgit2 can't compute this during a conflict (there is no
-///   stage-0 gitlink to compare against), so the submodule's HEAD is compared to
-///   the "ours" stage gitlink -- git's reference for the `c` flag.
 ///
-/// Empty unless the index has gitlink conflicts. Callers gate on a conflict
-/// existing, so the conflict scan and the per-submodule HEAD read happen only
-/// then -- never on the clean happy path.
+/// - `MODIFIED_CONTENT`, `UNTRACKED_CONTENT`, and `DELETED_WORKDIR` from the
+///   previously gathered `dirty_submodules`.
+/// - `NEW_COMMITS` from comparing the submodule's HEAD with the "ours" stage
+///   gitlink, git's reference for the `c` flag during a conflict.
+///
+/// Callers invoke this after detecting a conflict, limiting conflict scan and
+/// submodule HEAD reads to that path.
 ///
 /// # Errors
 ///
@@ -174,8 +164,8 @@ pub fn conflicted_submodule_statuses(
     let mut map = FxHashMap::default();
     for conflict in index.conflicts()? {
         let conflict = conflict?;
-        // Any present stage carries the shared path and the gitlink mode; a
-        // non-gitlink (file) conflict is not a submodule.
+        // Any present stage carries the shared path and the gitlink mode. File
+        // conflicts have a non-gitlink mode and are skipped.
         let Some(any) = conflict
             .our
             .as_ref()
@@ -215,14 +205,9 @@ pub fn conflicted_submodule_statuses(
     Ok(map)
 }
 
-/// Drops submodule statuses whose path is the new side of a rename.
-/// The watch server reports the rename's new path as `STAGED_NEW` (a
-/// fresh gitlink relative to HEAD); that row is already covered by the
-/// rename's `old -> new` line, so we drop it here to match git's output.
-///
-/// In-place; no allocation. Early-exits when `renames` is empty (the
-/// common case). The inner linear scan is fine since rename counts are
-/// 0-2 in any realistic workflow.
+/// Drops submodule statuses whose path is the new side of a rename. The watch
+/// server reports that path as `STAGED_NEW`, a fresh gitlink relative to HEAD.
+/// The rename's `old -> new` line already covers it.
 pub fn filter_rename_new_paths(
     statuses: &mut Vec<(String, StatusSummary)>,
     renames: &[SubmoduleRename],
@@ -233,9 +218,7 @@ pub fn filter_rename_new_paths(
     statuses.retain(|(path, _)| !renames.iter().any(|r| r.new == *path));
 }
 
-/// Returns the bit-mask to AND each status against to honor `mode`. `None`
-/// is unmasked; `All` returns `clean()` so any subsequent test filters out
-/// the entry entirely.
+/// Returns the mask to AND each status against to honor `mode`.
 fn mode_mask(mode: IgnoreSubmodules) -> StatusSummary {
     match mode {
         IgnoreSubmodules::None => StatusSummary::all(),

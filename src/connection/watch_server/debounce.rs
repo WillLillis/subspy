@@ -17,8 +17,7 @@ use super::trace::wtrace;
 /// operation's settled state rather than a mid-flight one.
 const REINDEX_DEBOUNCE: Duration = Duration::from_millis(200);
 
-/// Identifies the source of a [`ReindexDebounce`] in a `cfg(trace_events)` [`wtrace!`]
-/// traces.
+/// Identifies the source of a [`ReindexDebounce`] in a [`wtrace!`] trace.
 #[derive(Clone, Copy, Debug)]
 pub(super) enum DebounceKind {
     /// Armed by a `.gitmodules` change, bumped by root git events.
@@ -36,7 +35,7 @@ pub(super) enum DebounceKind {
 /// `select_deadline` and reindexes when it elapses.
 pub(super) struct ReindexDebounce {
     deadline: Option<Instant>,
-    /// Trace attribution only used by [`wtrace!`] under `cfg(trace_events)`
+    /// Trace attribution only used by [`wtrace!`] under `cfg(trace_events)`.
     #[cfg_attr(not(trace_events), allow(dead_code))]
     kind: DebounceKind,
 }

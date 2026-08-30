@@ -186,9 +186,8 @@ pub struct OutputOpts {
     /// `core.quotepath` (default `true`). When `false`, bytes `>= 0x80`
     /// in paths are emitted verbatim instead of as octal escapes.
     pub quote_path: bool,
-    /// `--show-stash`. Long format appends `Your stash currently has
-    /// N entr...`; porcelain v2 with `--branch` emits `# stash N`.
-    /// Short / porcelain v1 are unaffected.
+    /// `--show-stash`. Long format appends git's human readable stash trailer,
+    /// while porcelain v2 with `--branch` emits `# stash N`.
     pub show_stash: bool,
 }
 
@@ -211,18 +210,18 @@ pub struct StatusEntries<'a> {
     pub deleted_submodules: &'a [String],
     pub renamed_submodules: &'a [SubmoduleRename],
     /// Byte paths of unmerged (conflicted) entries. Renderers drop the phantom
-    /// untracked rows libgit2 emits for a conflicted submodule's working tree;
-    /// git reports such a path only under "Unmerged paths". Empty when the index
+    /// untracked rows libgit2 emits for a conflicted submodule's working tree.
+    /// Git reports such a path only under "Unmerged paths". Empty when the index
     /// has no conflicts.
     pub conflicted_paths: &'a FxHashSet<Vec<u8>>,
     /// Unmerged submodules and their folded status (modified/untracked/new
     /// commits), keyed by path. Already excluded from `submodules` so they don't
-    /// render as a separate dirty row; porcelain v2 uses this for the `u`-line
+    /// render as a separate dirty row. Porcelain v2 uses this for the `u`-line
     /// `S<c><m><u>` field. Empty when the index has no gitlink conflicts.
     pub conflicted_submodules: &'a FxHashMap<String, StatusSummary>,
     /// Byte paths of libgit2's case-collision phantom deletes: a spurious
     /// `WT_DELETED` for a path whose case-variant occupies the one working file
-    /// on a `core.ignorecase` filesystem. Renderers skip these; git collapses
+    /// on a `core.ignorecase` filesystem. Renderers skip these. Git collapses
     /// the collision to a single line. Empty on case-sensitive filesystems and
     /// whenever nothing is worktree-deleted. See [`case`].
     pub phantom_deletes: &'a FxHashSet<Vec<u8>>,
@@ -265,7 +264,7 @@ pub fn build_status_options(opts: OutputOpts, repo_kind: RepoKind) -> git2::Stat
     // Skip the redundant stat-cache refresh pass.
     st_opts.no_refresh(true);
 
-    // libgit2's own rename detection stays OFF; `tracked.rs` reconciles renames
+    // libgit2's own rename detection stays off. `tracked.rs` reconciles renames
     // from the raw add/delete set instead. libgit2 has no separate exact-rename
     // pass (it runs an O(targets x sources) similarity loop even for pure moves)
     // and ignores git's global `diff.renameLimit` skip, so leaning on it is both
@@ -278,9 +277,7 @@ pub fn build_status_options(opts: OutputOpts, repo_kind: RepoKind) -> git2::Stat
     // record with no valid `XY ` prefix.
 
     // Exclude submodules from the plain status walk whenever subspy supplies
-    // their statuses itself -- the watch server at the top level, or local
-    // computation for a (possibly nested) superproject. Otherwise they would
-    // render as bare entries, missing the `(modified content, ...)` detail.
+    // their statuses itself. This preserves the `(modified content, ...)` rendering.
     if repo_kind.has_submodules() {
         st_opts.exclude_submodules(true);
     }
@@ -292,13 +289,12 @@ pub fn build_status_options(opts: OutputOpts, repo_kind: RepoKind) -> git2::Stat
 ///
 /// Pipeline: `git2::statuses`, `submodule_changes`, ignore-submodules
 /// masking, rename-new filter, relativizer, `StatusEntries`. The
-/// `submodule_statuses` closure is the caller's hook for supplying
-/// submodule-level statuses -- production receives them over IPC,
-/// tests fall back to `compute_local_statuses`.
+/// `submodule_statuses` supplies  submodule-level statuses. Production
+/// receives them over IPC, while tests fall back to [`compute_local_statuses`].
 ///
 /// # Errors
 ///
-/// Propagates `StatusError` from the closures and from intermediate
+/// Propagates [`StatusError`] from the closures and from intermediate
 /// libgit2 calls.
 pub fn assemble_status<R>(
     project: &ProjectPath,
@@ -351,7 +347,7 @@ fn assemble_status_scoped<R>(
     // libgit2 emits a phantom `WT_DELETED` for a case-collision (two index
     // entries differing only in case, collapsed to one working file) that git
     // reports as a single line. That is only possible with `core.ignorecase`
-    // and a worktree deletion; cwd filtering also needs the same setting. Read
+    // and a worktree deletion. Cwd filtering also needs the same setting. Read
     // it once whenever either consumer needs it.
     let has_worktree_delete = non_submod
         .iter()
@@ -405,11 +401,8 @@ fn assemble_status_scoped<R>(
     apply_path_filter_to_submodules(&mut submods, &mut submod_changes, path_filter);
     submodule::filter_rename_new_paths(&mut submods, &submod_changes.renamed);
 
-    // An unmerged submodule is reported once, through the conflict machinery,
-    // never also as a separate dirty row. Fold each into its conflict entry:
-    // drop it from the normal submodule rows (every format), and carry its
-    // state (modified/untracked from libgit2, plus a HEAD-vs-ours commit check
-    // libgit2 can't do during a conflict) for the porcelain v2 `u` line.
+    // the conflict machinery owns each unmerged submodule's output. Fold its status
+    // into the conflict entry and remove it from the normal submodule rows.
     let conflicted_submodules = if has_conflicts {
         let folded = submodule::conflicted_submodule_statuses(&repo, &project.repo_root, &submods)?;
         submods.retain(|(path, _)| !folded.contains_key(path));
@@ -493,7 +486,7 @@ fn apply_path_filter_to_submodules(
 ///
 /// # Errors
 ///
-/// Returns `Err` if statuses cannot be retrieved from the repository or watch server
+/// Returns `Err` if statuses cannot be retrieved from the repository or watch server.
 pub fn status(request: ResolvedStatusRequest<'_>, out: &mut impl io::Write) -> StatusResult<()> {
     match render_status(request, StatusScope::All, out)? {
         ShimStatusOutcome::Rendered => Ok(()),
@@ -503,11 +496,8 @@ pub fn status(request: ResolvedStatusRequest<'_>, out: &mut impl io::Write) -> S
     }
 }
 
-/// Retrieves and displays status for the git shim.
-///
-/// Unlike [`status`], this entry point can deliberately decline a request so
-/// the shim can forward the original argv to real Git without treating the
-/// decision as an error.
+/// Retrieves and displays status for the git shim. Returns [`ShimStatusOutcome::Declined`]
+/// when the original argv should be forward to the git on path.
 ///
 /// # Errors
 ///
@@ -656,9 +646,9 @@ enum UpstreamStatus {
     /// No upstream configured (or `HEAD` isn't a resolvable local branch).
     None,
     /// An upstream is configured but its remote-tracking ref is gone (e.g. after
-    /// `git fetch --prune`); `name` is the configured short name.
+    /// `git fetch --prune`). `name` is the configured short name.
     Gone { name: String },
-    /// Upstream `name` exists; the branch diverges from it by `divergence`.
+    /// Upstream `name` exists and the branch diverges from it by `divergence`.
     Tracking {
         name: String,
         divergence: Divergence,
@@ -667,7 +657,7 @@ enum UpstreamStatus {
 
 /// The ahead/behind relationship of a branch to its upstream.
 enum Divergence {
-    /// Ahead/behind commit counts; `(0, 0)` means the tips are equal (up to date).
+    /// Ahead/behind commit counts. `(0, 0)` means the tips are equal.
     Counts(usize, usize),
     /// The tips differ but the counts were skipped (`--no-ahead-behind`).
     Skipped,
@@ -675,14 +665,14 @@ enum Divergence {
 
 /// Resolves the [`UpstreamStatus`] of `head` (the current `HEAD` reference).
 ///
-/// Callers handle the unborn- and detached-HEAD cases themselves; a non-branch
-/// `head` resolves to [`UpstreamStatus::None`].
+/// Callers handle the unborn and detached HEAD cases. A non-branch `head`
+/// resolves to [`UpstreamStatus::None`].
 ///
 /// # Errors
 ///
-/// Propagates a `git2::Error` if a branch tip can't be peeled to a commit or the
-/// ahead/behind graph walk fails -- both indicate repository corruption (a
-/// missing/unreadable commit object), not merely a missing upstream.
+/// Propagates a [`git2::Error`] if a branch tip can't be peeled to a commit or
+/// the ahead/behind graph walk fails. These failures indicate repository corruption
+/// (a missing/unreadable commit object), not just a missing upstream.
 fn upstream_status(
     repo: &Repository,
     head: &git2::Reference<'_>,

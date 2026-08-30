@@ -234,7 +234,7 @@ impl WatchServer {
                         None
                     }
                 }) {
-                    // When set, this is the shutdown self-connection from `WatchServer::watch`
+                    // When set, this is the shutdown self-connection from `WatchServer::watch`.
                     if listener_shutdown.load(Ordering::Acquire) {
                         break;
                     }
@@ -260,7 +260,7 @@ impl WatchServer {
     /// Failures are logged but not propagated.
     fn signal_shutdown(mut conn: BufReader<IpcStream>) {
         if let Err(e) = write_full_message_fixed(&mut conn, &SHUTDOWN_ACK) {
-            error!("Failed to send shutdown ack -- {e}");
+            error!("Failed to send shutdown ack: {e}");
         }
     }
 
@@ -302,7 +302,7 @@ impl WatchServer {
                 HandleEventsExit::WatcherError { index } => {
                     if index < ROOT_WATCHER_COUNT {
                         // Root watcher errors require a full reindex since the
-                        // submodule set may have changed
+                        // submodule set may have changed.
                         self.watchers.clear();
                         self.place_root_watchers()?;
                         true
@@ -336,7 +336,8 @@ impl WatchServer {
 ///
 /// # Errors
 ///
-/// Returns `Err` if communication with a client or interacting with the repository fails
+/// Returns `Err` if resolving or reading the reposiory, setting up IPC or filesystem
+/// watchers, receiving watcher events, or spawning the listener thread fails.
 ///
 /// # Panics
 ///
@@ -344,14 +345,13 @@ impl WatchServer {
 #[expect(clippy::significant_drop_tightening)]
 pub fn watch(root_dir: &Path, display_progress: bool) -> WatchResult<()> {
     let (control_tx, control_rx) = crossbeam_channel::unbounded();
-    // Resolve the git-dir layout once up front: a linked worktree keeps its
-    // index/HEAD/modules in `.git/worktrees/<name>/`, not `<root>/.git`.
+    // Resolve the git-dir layout once up front. Linked worktree keeps their
+    // index, HEAD, and modules in `.git/worktrees/<name>/`.
     let layout = GitLayout::resolve(root_dir)?;
     let mut server = WatchServer::new(root_dir, &layout, control_rx);
 
-    // Lock status map before accepting connections so clients block (with
-    // progress updates) until initial indexing completes instead of reading
-    // an empty map.
+    // Lock the status map before accepting connections so clients wait (with
+    // progress updates) until initial indexing completes.
     let status_lock = Arc::clone(&server.submod_statuses);
     let status_guard = status_lock.lock().expect("Mutex poisoned");
 
@@ -364,9 +364,8 @@ pub fn watch(root_dir: &Path, display_progress: bool) -> WatchResult<()> {
     let _ = ipc_connect(&ipc_socket_path(root_dir));
     let _ = listener_handle.join();
 
-    // Socket file cleanup can't be tied to IpcListener's Drop because the
-    // listener is moved into a background thread. Crashes that skip this are
-    // handled by create_listener's stale socket recovery on next startup.
+    // Clean up the socket after the listener thread exits. `create_listener`
+    // removes any stale socket left by a crash on the next startup.
     cleanup_socket(root_dir);
     result
 }

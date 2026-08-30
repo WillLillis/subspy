@@ -26,7 +26,7 @@ pub use transport::{
     ipc_socket_path, read_full_message, read_full_message_fixed, set_recv_timeout,
     uses_filesystem_sockets, write_full_message_fixed,
 };
-/// Common bincode configuration used to encode/decode messages between the client and server
+/// Bincode configuration shared by the IPC client and server.
 pub const BINCODE_CFG: bincode::config::Configuration<
     bincode::config::LittleEndian,
     bincode::config::Fixint,
@@ -74,7 +74,7 @@ impl std::fmt::Display for VersionMismatchError {
 ///
 /// # Panics
 ///
-/// Panics if `mutex` has been poisoned
+/// Panics if `mutex` has been poisoned.
 fn try_lock<T>(mutex: &Mutex<T>) -> Option<MutexGuard<'_, T>> {
     try_lock_for(mutex, Duration::ZERO)
 }
@@ -84,7 +84,7 @@ fn try_lock<T>(mutex: &Mutex<T>) -> Option<MutexGuard<'_, T>> {
 ///
 /// # Panics
 ///
-/// Panics if `mutex` has been poisoned
+/// Panics if `mutex` has been poisoned.
 #[inline]
 fn try_lock_for<T>(mutex: &Mutex<T>, timeout: Duration) -> Option<MutexGuard<'_, T>> {
     let start = Instant::now();

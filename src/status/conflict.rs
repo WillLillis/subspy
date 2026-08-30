@@ -23,14 +23,14 @@ pub(super) struct ConflictEntry {
 /// conflicted submodule's working tree as `WT_NEW` because, lacking a stage-0
 /// gitlink, it no longer recognizes the path as a submodule).
 ///
-/// The conflict iterator already yields nothing on a clean index, so there is no
-/// `has_conflicts()` guard -- that call is itself a full O(n) entry scan, so a
-/// guard would only double-scan a conflicted index. Callers gate this instead.
+/// The conflict iterator is empty for a clean index. An upfront `has_conflicts()`
+/// check would add a full O(n) entry scan and double-scan a conflicted index, so
+/// callers perform this gating.
 pub(super) fn conflicted_paths(index: &git2::Index) -> StatusResult<FxHashSet<Vec<u8>>> {
     let mut paths = FxHashSet::default();
     for conflict in index.conflicts()? {
         let conflict = conflict?;
-        // Every side of a given conflict shares the same path; take whichever is
+        // Every side of a given conflict shares the same path. Take whichever is
         // present (a delete/modify conflict is missing one side).
         if let Some(entry) = conflict.our.or(conflict.their).or(conflict.ancestor) {
             paths.insert(entry.path);
@@ -41,8 +41,8 @@ pub(super) fn conflicted_paths(index: &git2::Index) -> StatusResult<FxHashSet<Ve
 
 /// Whether `path` is at-or-under any of the `conflicted` paths. Used to drop the
 /// untracked rows libgit2 emits for a conflicted submodule's working tree
-/// (`sub/`, or `sub/...` under `-uall`) when `sub` is a conflicted gitlink path;
-/// git shows it only under "Unmerged paths". Byte-exact, so non-UTF-8 paths match.
+/// (`sub/`, or `sub/...` under `-uall`) when `sub` is a conflicted gitlink path.
+/// Git shows it only under "Unmerged paths".
 pub(super) fn path_within_any(path: &[u8], conflicted: &FxHashSet<Vec<u8>>) -> bool {
     conflicted.iter().any(|prefix| path_within(path, prefix))
 }

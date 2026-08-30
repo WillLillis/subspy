@@ -36,9 +36,9 @@ impl TrackedRow<'_> {
     }
 }
 
-/// A subspy-built ordinary `1`-line row (a below-threshold rename split into its
-/// halves, or an add/delete that did not pair). `x`/`y` use porcelain v2's `.`
-/// for the unmodified slot; v1/short map that to a blank.
+/// A subspy-built ordinary `1`-line row for a below-threshold rename split into
+/// its halves or an unpaired addition or deletion. `x` and `y` use porcelain v2's
+/// `.` for the unmodified slot. v1 and short use a blank.
 pub(super) struct SyntheticOrdinary {
     pub x: char,
     pub y: char,
@@ -135,22 +135,21 @@ pub(super) fn for_each_tracked_row<'a, E>(
     Ok(())
 }
 
-/// Reconciles `entries`' tracked changes into a stream of [`TrackedRow`]s whose
-/// rename classification matches git.
+/// Reconciles `entries`' tracked changes into [`TrackedRow`]s whose rename
+/// classification matches git.
 ///
-/// Renames are reconciled from the raw add/delete set (libgit2's own rename
-/// detection is off; see [`super::build_status_options`]), mirroring git's
-/// phases:
-///   1. collect raw changes (additions, deletions, everything else as entries);
-///   2. pair exact (same-blob) renames with no limit, as git does;
-///   3. only if the remaining inexact matrix fits under `diff.renameLimit`,
-///      pair inexact renames by similarity.
+/// Renames reconciliation starts from the raw addition and deletion set because
+/// libgit2's own rename is disabled. See [`super::build_status_options`]). The
+/// phases mirror git:
 ///
-/// What this cannot match: git breaks ties among equal-similarity candidates
-/// using its internal `rename_src` array order through an unstable `qsort`. That
-/// is undocumented, depends on unrelated diff entries, and is not portable
-/// across git's platforms, so a handful of adversarial near-duplicate cases (all
-/// pairings equally valid renames) may pick a different equal blob than git.
+///   1. Collect raw additions, deletions, and other entries.
+///   2. Pair exact same-blob renames with no limit.
+///   3. Pair remaining candidates by similarity when their matrix fits under
+///      `diff.renameLimit`.
+///
+/// Equal-similarity ties may differ from git. Git resolves them through the
+/// internal `rename_src` array order and an unstable `qsort`. That ordering is
+/// undocumented, depends on unrelated diff entries, and varies by platform.
 pub(super) fn normalized_tracked_rows<'a>(
     repo: &Repository,
     entries: &StatusEntries<'a>,
@@ -160,8 +159,8 @@ pub(super) fn normalized_tracked_rows<'a>(
     let mut deletions = Vec::new();
     collect_initial_tracked_rows(entries, &mut rows, &mut additions, &mut deletions);
 
-    // git's exact rename pass runs with no rename limit, so do it first and
-    // unconditionally; it also shrinks the inexact matrix the limit applies to.
+    // git's exact rename pass runs with no rename limit, so run it first. This
+    // also shrinks the inexact matrix governed by the limit.
     pair_exact_renames(&mut rows, &mut additions, &mut deletions);
 
     // Similarity-pair the remaining candidates, unless git would skip inexact
@@ -220,10 +219,9 @@ fn collect_initial_tracked_rows<'a>(
                 rows.push(TrackedRow::Entry(entry));
             }
         } else if st == git2::Status::INDEX_DELETED {
-            // A rename's source is always a clean index deletion (the old path
-            // has no worktree presence), so an exact match suffices here; a
-            // `git rm --cached` (`INDEX_DELETED | WT_NEW`) is not a rename source
-            // and stays on the entry path.
+            // A rename source is a clean index deletion with no worktree presence,
+            // so an exact match suffices. `git rm --cached` produces
+            // `INDEX_DELETED | WT_NEW` and stays an ordinary entry.
             if let Some(side) = deleted_side(&entry) {
                 deletions.push(side);
             } else {
@@ -478,9 +476,9 @@ pub(super) fn extract_modes_and_oids(entry: &git2::StatusEntry<'_>) -> EntryMode
     }
 }
 
-/// Similarity score (0-100) between two blob OIDs, for a single rename pair (no
-/// signature reuse). Equal OIDs short-circuit to 100; an unreadable blob falls
-/// back to 100 (treat as a pure rename rather than fabricate a split).
+/// Similarity score from 0 to 100 between two blob OIDs for one rename pair.
+/// Equal OIDs short-circuit to 100. An unreadable blob also returns 100,
+/// treating the pair as a pure rename.
 pub(super) fn rename_similarity(repo: &Repository, old_oid: git2::Oid, new_oid: git2::Oid) -> u8 {
     if old_oid == new_oid {
         return 100;
