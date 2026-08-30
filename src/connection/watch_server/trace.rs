@@ -321,7 +321,7 @@ impl TraceSink {
 thread_local! {
     /// The sink installed on the current thread. [`emit`] records events into it
     /// when present and prints them directly otherwise. Direct printing supports
-    /// manual daemon and fuzzer runs.
+    /// manual daemon runs.
     static SINK: RefCell<Option<Arc<TraceSink>>> = const { RefCell::new(None) };
 }
 
