@@ -13,7 +13,7 @@ readme = "README.md"
 description = "A 'git status' caching utility for repositories with many submodules"
 keywords = ["cli", "git"]
 categories = ["command-line-utilities", "development-tools"]
-
+publish = ["crates-io"]
 
 [lints.clippy]
 dbg_macro = "deny"
