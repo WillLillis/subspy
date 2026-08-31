@@ -33,6 +33,8 @@ pub(super) enum HandleEventsExit {
     Shutdown { conn: BufReader<IpcStream> },
     /// A filesystem watcher at `index` reported an error.
     WatcherError { index: usize },
+    /// A tripwire watcher at `index` reported an error.
+    TripwireError { index: usize },
 }
 
 /// The source a [`crossbeam_channel::Select`] operation came from.
@@ -133,7 +135,7 @@ impl WatchServer {
                         Err(e) => {
                             wait_for_in_flight(&in_flight);
                             error!("Tripwire watcher error: {e}");
-                            return Ok(HandleEventsExit::ReindexEvent);
+                            return Ok(HandleEventsExit::TripwireError { index: tripwire });
                         }
                     }
                     continue;

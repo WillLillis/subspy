@@ -295,6 +295,7 @@ impl WatchServer {
                 HandleEventsExit::ReindexRequest { replace_watchers } => {
                     if replace_watchers {
                         self.watchers.clear();
+                        self.tripwires.clear();
                         self.place_root_watchers()?;
                     }
                     replace_watchers
@@ -313,6 +314,11 @@ impl WatchServer {
                         self.watchers[index].receiver = new_rx;
                         false
                     }
+                }
+                HandleEventsExit::TripwireError { index } => {
+                    self.tripwires.remove(index);
+                    self.watchers.truncate(ROOT_WATCHER_COUNT);
+                    true
                 }
             };
 
