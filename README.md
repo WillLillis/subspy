@@ -23,8 +23,24 @@ any time a change is detected in one of these locations. For sufficiently many s
 
 ### Installation
 
-Installing subspy requires the [Rust toolchain](https://rust-lang.org/tools/install/).
-Note that the project's current Minimum Supported Rust Version (MSRV) is 1.87.0.
+Prebuilt archives for Windows x64, Linux x64, and macOS ARM64 are available from the
+[GitHub releases page](https://github.com/WillLillis/subspy/releases). Each archive contains both `subspy` (the standalone
+CLI) and `subspy-git` (the shim covered below).
+
+If [`cargo-binstall`](https://github.com/cargo-bins/cargo-binstall) is installed, it can select and install the appropriate
+prebuilt archive:
+
+```sh
+cargo binstall subspy
+```
+
+To build and install from crates.io, install the [Rust toolchain](https://rust-lang.org/tools/install/) and run:
+
+```sh
+cargo install subspy --locked
+```
+
+The project can also be built and installed from source:
 
 ```sh
 > git clone https://github.com/WillLillis/subspy
@@ -32,7 +48,7 @@ Note that the project's current Minimum Supported Rust Version (MSRV) is 1.87.0.
 > cargo install --path . --locked
 ```
 
-This installs two binaries: `subspy` (the standalone CLI) and `subspy-git` (the shim covered below).
+The project's current Minimum Supported Rust Version (MSRV) is 1.87.0.
 
 ### Usage
 
@@ -195,7 +211,3 @@ changes on disk again. SubSpy never modifies your repository, so the remedy is a
 need to increase the system limit (e.g. `sudo sysctl fs.inotify.max_user_watches=<value>`).
 - On Windows, AF_UNIX sockets are used for IPC, which requires Windows 10 version 1809 (October 2018 Update) or Windows
 Server 2019 or later.
-
-### Future Improvements
-
-- [ ] crates.io releases if desired
