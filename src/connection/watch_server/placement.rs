@@ -1,10 +1,8 @@
-use std::{
-    collections::BTreeSet,
-    path::{Path, PathBuf},
-};
+use std::path::Path;
 
 use log::error;
 use notify::Watcher as _;
+use rustc_hash::FxHashSet;
 
 use super::trace::wtrace;
 
@@ -149,49 +147,152 @@ impl WatchServer {
         Ok(())
     }
 
-    /// Returns the distinct absolute ancestor directories of every submodule. These
-    /// include each submodule's parent, every directory between it and the repository
-    /// root, and the root itself when at least one submodule exists.
-    ///
-    /// For example, a submodule at `libs/foo` contributes `<root>/libs` and `<root>`.
-    fn tripwire_dirs(&self) -> BTreeSet<PathBuf> {
-        let mut dirs = BTreeSet::new();
-        if self.workdir_to_index.is_empty() {
-            return dirs;
-        }
-        dirs.insert(self.root_path.clone());
-        for rel in self.workdir_to_index.keys() {
-            let mut cur = rel.as_path();
-            while let Some(parent) = cur.parent() {
-                if parent.as_os_str().is_empty() {
-                    break;
-                }
-                dirs.insert(self.root_path.join(parent));
-                cur = parent;
+    /// Reconciles tripwire watches with the current submodule set. Existing coverage
+    /// is retained, missing coverage is established before obsolete watchers are dropped.
+    pub(super) fn place_tripwires(&mut self) {
+        // Deduplicate root-relative ancestor paths for every candidate and shared
+        // parent
+        let mut desired = FxHashSet::default();
+        if !self.workdir_to_index.is_empty() {
+            desired.insert(Path::new(""));
+            for workdir in self.workdir_to_index.keys() {
+                desired.extend(
+                    workdir
+                        .ancestors()
+                        .skip(1)
+                        .filter(|parent| !parent.as_os_str().is_empty()),
+                );
             }
         }
-        dirs
-    }
+        let root_path = &self.root_path;
+        let tripwires = &mut self.tripwires;
+        let old_len = tripwires.len();
+        debug_assert!(
+            tripwires
+                .windows(2)
+                .all(|pair| pair[0].watch_path < pair[1].watch_path)
+        );
 
-    /// (Re)places the tripwire watches from the current submodule set. Failures
-    /// are logged and not propagated.
-    pub(super) fn place_tripwires(&mut self) {
-        self.tripwires.clear();
-        for dir in self.tripwire_dirs() {
-            match Self::place_watch(&dir, notify::RecursiveMode::NonRecursive) {
+        // Search only the original, sorted prefix while appending additions.
+        // This establishes new coverage before obsolete entries are removed.
+        for &relative in &desired {
+            let exists = tripwires[..old_len]
+                .binary_search_by(|entry| {
+                    entry
+                        .watch_path
+                        .strip_prefix(root_path)
+                        .unwrap_or(&entry.watch_path)
+                        .cmp(relative)
+                })
+                .is_ok();
+            if exists {
+                continue;
+            }
+
+            let watch_path = root_path.join(relative);
+            match Self::place_watch(&watch_path, notify::RecursiveMode::NonRecursive) {
                 Ok((rx, watcher)) => {
                     wtrace!(|s| TripwirePlaced {
-                        path: s.intern_path(&dir)
+                        path: s.intern_path(&watch_path)
                     });
-                    let rel = dir
-                        .strip_prefix(&self.root_path)
-                        .unwrap_or(&dir)
-                        .to_string_lossy()
-                        .into_owned();
-                    self.tripwires.push(WatchEntry::new(rel, dir, rx, watcher));
+                    tripwires.push(WatchEntry::new(
+                        relative.to_string_lossy().into_owned(),
+                        watch_path,
+                        rx,
+                        watcher,
+                    ));
                 }
-                Err(e) => error!("Failed to place tripwire on {}: {e}", dir.display()),
+                Err(e) => error!("Failed to place tripwire on {}: {e}", watch_path.display()),
             }
         }
+
+        let added = tripwires.len() > old_len;
+        tripwires.retain(|entry| {
+            let relative = entry
+                .watch_path
+                .strip_prefix(root_path)
+                .unwrap_or(&entry.watch_path);
+            desired.contains(relative)
+        });
+        if added {
+            tripwires.sort_unstable_by(|a, b| a.watch_path.cmp(&b.watch_path));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use tempfile::TempDir;
+
+    use super::*;
+    use crate::connection::watch_server::layout::GitLayout;
+
+    fn receiver_for(server: &WatchServer, path: &Path) -> WatchReceiver {
+        server
+            .tripwires
+            .iter()
+            .find(|entry| entry.watch_path == path)
+            .unwrap_or_else(|| panic!("no tripwire for {}", path.display()))
+            .receiver
+            .clone()
+    }
+
+    #[test]
+    fn tripwire_reconciliation_preserves_unchanged_coverage() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+        std::fs::create_dir(root.join("libs")).unwrap();
+        std::fs::create_dir(root.join("vendor")).unwrap();
+
+        let (_tx, rx) = crossbeam_channel::unbounded();
+        let layout = GitLayout::from_dirs(root.join(".git"), root.join(".git"));
+        let mut server = WatchServer::new(root, &layout, rx);
+
+        server
+            .workdir_to_index
+            .insert(PathBuf::from("libs/a"), ROOT_WATCHER_COUNT);
+        server.place_tripwires();
+
+        let root_receiver = receiver_for(&server, root);
+        let libs_receiver = receiver_for(&server, &root.join("libs"));
+
+        // Reconciliation with unchanged topology must preserve both watchers
+        // and any events already queued on their receivers.
+        server.place_tripwires();
+
+        assert!(root_receiver.same_channel(&receiver_for(&server, root)));
+        assert!(libs_receiver.same_channel(&receiver_for(&server, &root.join("libs"))));
+
+        // Replace one parent directory with another. The repository-root
+        // tripwire remains useful and must survive the topology change.
+        server.workdir_to_index.clear();
+        server
+            .workdir_to_index
+            .insert(PathBuf::from("vendor/b"), ROOT_WATCHER_COUNT);
+        server.place_tripwires();
+
+        assert!(root_receiver.same_channel(&receiver_for(&server, root)));
+
+        let paths: Vec<_> = server
+            .tripwires
+            .iter()
+            .map(|entry| entry.watch_path.clone())
+            .collect();
+        assert_eq!(paths, vec![root.to_path_buf(), root.join("vendor")]);
+
+        // The add-one/remove-one reconciliation above leaves the vector the
+        // same length. A second pass verifies that it was nevertheless sorted
+        // and that the newly added watcher is now retained.
+        let vendor_receiver = receiver_for(&server, &root.join("vendor"));
+        server.place_tripwires();
+
+        assert!(vendor_receiver.same_channel(&receiver_for(&server, &root.join("vendor"))));
+
+        // Removing the final submodule removes all tripwire coverage.
+        server.workdir_to_index.clear();
+        server.place_tripwires();
+        assert!(server.tripwires.is_empty());
     }
 }
