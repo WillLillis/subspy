@@ -191,17 +191,27 @@ impl WatchServer {
                                     &in_flight,
                                     &pending_status_retries,
                                 );
+                            } else {
+                                // A relevant event under `.git/modules`, but no current route.
+                                // This probably means the worktree/gitdir topology changed while
+                                // watchers weren't active. Reconcile from disk after the burst.
+                                tripwire_debounce.arm();
                             }
                         }
                         Some(EventType::SubmoduleLockRelease) => {
-                            if let Some(i) = self.submod_for_event(&event)
-                                && lock_release_needs_reread(i, &pending_status_retries)
-                            {
-                                self.try_spawn_submod_update(
-                                    i,
-                                    &in_flight,
-                                    &pending_status_retries,
-                                );
+                            if let Some(i) = self.submod_for_event(&event) {
+                                if lock_release_needs_reread(i, &pending_status_retries) {
+                                    self.try_spawn_submod_update(
+                                        i,
+                                        &in_flight,
+                                        &pending_status_retries,
+                                    );
+                                }
+                            } else {
+                                // A relevant event under `.git/modules`, but no current route.
+                                // This probably means the worktree/gitdir topology changed while
+                                // watchers weren't active. Reconcile from disk after the burst.
+                                tripwire_debounce.arm();
                             }
                         }
                         None => {}
