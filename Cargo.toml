@@ -14,6 +14,7 @@ description = "A 'git status' caching utility for repositories with many submodu
 keywords = ["cli", "git"]
 categories = ["command-line-utilities", "development-tools"]
 publish = ["crates-io"]
+exclude = ["/assets/**"]
 
 [lints.clippy]
 dbg_macro = "deny"
