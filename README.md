@@ -1,5 +1,9 @@
 # SubSpy
 
+<p align="center">
+  <img src="assets/subspy.png" alt="subspy logo: an amber periscope above a submerged Git branch" width="900">
+</p>
+
 A faster `git status` when working in repositories with many submodules.
 
 ### The Problem
