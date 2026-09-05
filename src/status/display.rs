@@ -13,6 +13,7 @@ use crate::{
 use super::{
     PathFilter, StatusEntries, StatusResult,
     conflict::path_within_any,
+    effective_status::{Corrections, effective_status},
     header::{print_header, print_unmerged_paths},
     interleave::{Row, SubRow, for_each_merged},
     relativize::Relativizer,
@@ -143,10 +144,10 @@ fn print_staged_changes(
     );
 
     for_each_tracked_row(tracked_rows, submods, |row| match row {
-        TrackedOrSubRow::File(TrackedRow::Entry(entry)) => {
+        TrackedOrSubRow::File(TrackedRow::Entry(entry, st)) => {
             // RENAMED before MODIFIED: git2 sets both on a rename that also
             // changes content, and git labels it `renamed:`, not `modified:`.
-            let istatus = match entry.status() {
+            let istatus = match st {
                 s if s.contains(git2::Status::INDEX_NEW) => "new file:   ",
                 s if s.contains(git2::Status::INDEX_RENAMED) => "renamed:    ",
                 s if s.contains(git2::Status::INDEX_MODIFIED) => "modified:   ",
@@ -260,7 +261,7 @@ fn print_staged_changes(
 /// and dirty-submodule entries. Returns `true` if anything was printed.
 fn print_unstaged_changes(
     non_submod: &Statuses<'_>,
-    phantom_deletes: &FxHashSet<Vec<u8>>,
+    corrections: &Corrections,
     path_filter: PathFilter<'_>,
     submodule_statuses: &[(String, StatusSummary)],
     rm_in_workdir: bool,
@@ -277,10 +278,11 @@ fn print_unstaged_changes(
     // interleaves files with the unstaged submodule rows. libgit2 excludes
     // submodules from `non_submod`.
     let files = non_submod.iter().filter(|e| {
-        let st = e.status();
+        let Some(st) = effective_status(e.status(), e.path_bytes(), corrections) else {
+            return false;
+        };
         path_filter.keeps(e.path_bytes())
             && !st.contains(git2::Status::CONFLICTED)
-            && (phantom_deletes.is_empty() || !phantom_deletes.contains(e.path_bytes()))
             && st.intersects(
                 git2::Status::WT_MODIFIED
                     | git2::Status::WT_DELETED
@@ -302,11 +304,11 @@ fn print_unstaged_changes(
             // RENAMED before MODIFIED, matching the staged section above. (git
             // does not detect unstaged worktree renames, so WT_RENAMED does not
             // arise in practice, but keep the ordering consistent and correct.)
-            let istatus = match entry.status() {
-                s if s.contains(git2::Status::WT_RENAMED) => "renamed:    ",
-                s if s.contains(git2::Status::WT_MODIFIED) => "modified:   ",
-                s if s.contains(git2::Status::WT_DELETED) => "deleted:    ",
-                s if s.contains(git2::Status::WT_TYPECHANGE) => "typechange: ",
+            let istatus = match effective_status(entry.status(), entry.path_bytes(), corrections) {
+                Some(s) if s.contains(git2::Status::WT_RENAMED) => "renamed:    ",
+                Some(s) if s.contains(git2::Status::WT_MODIFIED) => "modified:   ",
+                Some(s) if s.contains(git2::Status::WT_DELETED) => "deleted:    ",
+                Some(s) if s.contains(git2::Status::WT_TYPECHANGE) => "typechange: ",
                 _ => return Ok(()),
             };
             if !header {
@@ -531,7 +533,7 @@ pub fn display_status(
         deleted_submodules,
         renamed_submodules,
         conflicted_paths,
-        phantom_deletes,
+        corrections,
         // Long format renders an unmerged submodule via `print_unmerged_paths`
         // and relies on it already being excluded from `submodules`. The folded
         // `S<c><m><u>` status is specific to porcelain v2.
@@ -548,8 +550,8 @@ pub fn display_status(
 
     let rm_in_workdir = non_submod.iter().any(|e| {
         path_filter.keeps(e.path_bytes())
-            && e.status().contains(git2::Status::WT_DELETED)
-            && (phantom_deletes.is_empty() || !phantom_deletes.contains(e.path_bytes()))
+            && effective_status(e.status(), e.path_bytes(), corrections)
+                .is_some_and(|st| st.contains(git2::Status::WT_DELETED))
     }) || submodules
         .iter()
         .any(|(_, st)| st.contains(StatusSummary::DELETED_WORKDIR));
@@ -567,7 +569,7 @@ pub fn display_status(
     let has_conflicts = print_unmerged_paths(repo, path_filter, rel, out)?;
     let changed_in_workdir = print_unstaged_changes(
         non_submod,
-        phantom_deletes,
+        corrections,
         path_filter,
         submodules,
         rm_in_workdir,

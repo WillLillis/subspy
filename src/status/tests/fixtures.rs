@@ -372,6 +372,31 @@ pub fn setup_skip_worktree_suppresses(root: &Path) {
         .write("b.txt", "modified\n");
 }
 
+/// A skip-worktree file absent from the worktree: the shape a sparse checkout
+/// leaves behind for every excluded path. libgit2 reports `WT_DELETED` here
+/// even though git reports nothing.
+pub fn setup_skip_worktree_absent(root: &Path) {
+    let repo = Repo::init(root);
+    repo.write("a.txt", "a\n")
+        .write("b.txt", "b\n")
+        .add_all()
+        .commit("initial");
+    repo.run_git(&["update-index", "--skip-worktree", "a.txt"]);
+    std::fs::remove_file(root.join("a.txt")).unwrap();
+}
+
+/// A skip-worktree file that is absent *and* carries a staged change. git
+/// still prints the staged change (`M `), so the deletion must be masked
+/// rather than the whole row suppressed.
+pub fn setup_skip_worktree_absent_with_staged_change(root: &Path) {
+    let repo = Repo::init(root);
+    repo.write("a.txt", "a\n").add_all().commit("initial");
+    // Stage before flagging: git refuses to stage a path once it is sparse.
+    repo.write("a.txt", "staged\n").add("a.txt");
+    repo.run_git(&["update-index", "--skip-worktree", "a.txt"]);
+    std::fs::remove_file(root.join("a.txt")).unwrap();
+}
+
 pub fn setup_bisect(root: &Path) {
     let repo = Repo::init(root);
     repo.write("a.txt", "one\n").add_all().commit("one");

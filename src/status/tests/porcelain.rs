@@ -31,7 +31,8 @@ use super::fixtures::{
     setup_modified_workdir, setup_moved_modified_staged, setup_moved_modified_unstaged,
     setup_rename_limit_drops_exact_staged, setup_rename_limit_exceeded_staged,
     setup_rename_limit_mixed_staged, setup_renamed_staged, setup_renamed_then_worktree_deleted,
-    setup_renames_basename_preserving, setup_staged_modified, setup_staged_new,
+    setup_renames_basename_preserving, setup_skip_worktree_absent,
+    setup_skip_worktree_absent_with_staged_change, setup_staged_modified, setup_staged_new,
     setup_submodule_gitlink_conflict, setup_submodule_gitlink_conflict_dirty, setup_untracked,
     setup_untracked_in_dir, setup_upstream_ahead, setup_upstream_behind, setup_upstream_diverged,
     setup_upstream_gone, setup_upstream_up_to_date,
@@ -195,6 +196,15 @@ const CASES: &[Case] = &[
     plain("MM (staged + workdir)", setup_staged_plus_workdir),
     plain("deleted (staged)", setup_deleted_staged),
     plain("deleted (workdir)", setup_deleted_workdir),
+    // libgit2 reports `WT_DELETED` for a sparse-excluded (skip-worktree) path
+    // that is absent from the worktree; git reports nothing. The second case
+    // pins that a real staged change on such a path still renders as `M `,
+    // so the deletion is masked rather than the row dropped.
+    plain("skip-worktree absent", setup_skip_worktree_absent),
+    plain(
+        "skip-worktree absent + staged change",
+        setup_skip_worktree_absent_with_staged_change,
+    ),
     plain("renamed (staged)", setup_renamed_staged),
     // Staged rename, then the new file deleted from the worktree: `2 RD` with a
     // zero workdir mode. Guards the synthetic rename's worktree status + m_work.

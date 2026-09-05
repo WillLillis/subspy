@@ -10,7 +10,7 @@
 //! (each blob hashed once, with a size short-circuit) via [`super::rename_score`].
 
 use git2::Repository;
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 
 use super::{StatusEntries, interleave::SubRow, rename_score};
 
@@ -21,7 +21,9 @@ const DEFAULT_RENAME_LIMIT: usize = 1000;
 /// raw libgit2 entry, or a synthetic row subspy built to match git's
 /// classification (a split add/delete, or a paired rename).
 pub(super) enum TrackedRow<'a> {
-    Entry(git2::StatusEntry<'a>),
+    /// A libgit2 entry paired with its [`super::effective_status`] result, so
+    /// renderers never re-read the uncorrected `entry.status()`.
+    Entry(git2::StatusEntry<'a>, git2::Status),
     SyntheticOrdinary(SyntheticOrdinary),
     SyntheticRename(SyntheticRename),
 }
@@ -29,7 +31,7 @@ pub(super) enum TrackedRow<'a> {
 impl TrackedRow<'_> {
     fn key(&self) -> &[u8] {
         match self {
-            Self::Entry(entry) => entry_sort_key(entry),
+            Self::Entry(entry, _) => entry_sort_key(entry),
             Self::SyntheticOrdinary(row) => &row.path,
             Self::SyntheticRename(row) => &row.new.path,
         }
@@ -178,14 +180,13 @@ pub(super) fn normalized_tracked_rows<'a>(
     rows
 }
 
-/// Whether `entry` is a tracked change the normalized stream renders as a
-/// file row: not clean, not untracked, not ignored, not a case-collision
-/// phantom delete. Conflicts pass this filter (they render as entry rows).
-fn is_tracked_change(st: git2::Status, path: &[u8], phantom_deletes: &FxHashSet<Vec<u8>>) -> bool {
-    st != git2::Status::CURRENT
-        && st != git2::Status::WT_NEW
-        && !st.contains(git2::Status::IGNORED)
-        && (phantom_deletes.is_empty() || !phantom_deletes.contains(path))
+/// Whether `st` is a tracked change the normalized stream renders as a file
+/// row: not clean, not untracked, not ignored. Conflicts pass this filter
+/// (they render as entry rows). `st` is the row's
+/// [`super::effective_status`] result, so rows libgit2 invented have already
+/// been dropped before this is reached.
+fn is_tracked_change(st: git2::Status) -> bool {
+    st != git2::Status::CURRENT && st != git2::Status::WT_NEW && !st.contains(git2::Status::IGNORED)
 }
 
 /// git's `too_many_rename_candidates`: the inexact rename matrix is too big when
@@ -201,13 +202,15 @@ fn collect_initial_tracked_rows<'a>(
     additions: &mut Vec<RenameSide>,
     deletions: &mut Vec<RenameSide>,
 ) {
-    for entry in entries.non_submod.iter().filter(|entry| {
-        entries.path_filter.keeps(entry.path_bytes())
-            && is_tracked_change(entry.status(), entry.path_bytes(), entries.phantom_deletes)
+    for (entry, st) in entries.non_submod.iter().filter_map(|entry| {
+        if !entries.path_filter.keeps(entry.path_bytes()) {
+            return None;
+        }
+        let st = entries.effective(&entry)?;
+        is_tracked_change(st).then_some((entry, st))
     }) {
-        let st = entry.status();
         if st.contains(git2::Status::CONFLICTED) {
-            rows.push(TrackedRow::Entry(entry));
+            rows.push(TrackedRow::Entry(entry, st));
         } else if st.contains(git2::Status::INDEX_NEW) {
             // `.contains`, not `==`: a staged add whose new file was also
             // changed in the worktree (`INDEX_NEW | WT_MODIFIED`, etc.) is still
@@ -216,7 +219,7 @@ fn collect_initial_tracked_rows<'a>(
             if let Some(side) = added_side(&entry) {
                 additions.push(side);
             } else {
-                rows.push(TrackedRow::Entry(entry));
+                rows.push(TrackedRow::Entry(entry, st));
             }
         } else if st == git2::Status::INDEX_DELETED {
             // A rename source is a clean index deletion with no worktree presence,
@@ -225,10 +228,10 @@ fn collect_initial_tracked_rows<'a>(
             if let Some(side) = deleted_side(&entry) {
                 deletions.push(side);
             } else {
-                rows.push(TrackedRow::Entry(entry));
+                rows.push(TrackedRow::Entry(entry, st));
             }
         } else {
-            rows.push(TrackedRow::Entry(entry));
+            rows.push(TrackedRow::Entry(entry, st));
         }
     }
 }
@@ -445,7 +448,14 @@ pub(super) struct EntryModesAndOids {
 
 /// Resolves the modes and OIDs for a `1`/`2` line. For workdir-only changes,
 /// HEAD falls back to index (they're identical when the file isn't staged).
-pub(super) fn extract_modes_and_oids(entry: &git2::StatusEntry<'_>) -> EntryModesAndOids {
+///
+/// `st` is the row's [`super::effective_status`] result, not `entry.status()`:
+/// a correction that cleared a worktree deletion also has to correct the
+/// worktree mode libgit2 derived from that deletion.
+pub(super) fn extract_modes_and_oids(
+    entry: &git2::StatusEntry<'_>,
+    st: git2::Status,
+) -> EntryModesAndOids {
     let m_idx = entry
         .head_to_index()
         .map(|d| u32::from(d.new_file().mode()))
@@ -461,6 +471,14 @@ pub(super) fn extract_modes_and_oids(entry: &git2::StatusEntry<'_>) -> EntryMode
     let m_work = entry
         .index_to_workdir()
         .map_or(m_idx, |d| u32::from(d.new_file().mode()));
+    // Mode 0 means libgit2 saw no worktree file. If the correction layer
+    // cleared the deletion anyway the file is sparse-excluded, not deleted,
+    // and git reports the index mode.
+    let m_work = if m_work == 0 && !st.contains(git2::Status::WT_DELETED) {
+        m_idx
+    } else {
+        m_work
+    };
     let h_idx = entry
         .head_to_index()
         .map(|d| d.new_file().id())

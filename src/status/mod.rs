@@ -22,6 +22,7 @@
 mod case;
 mod conflict;
 mod display;
+mod effective_status;
 mod header;
 mod interleave;
 mod pathspec;
@@ -55,6 +56,7 @@ use crate::{
 };
 
 pub use case::CaseSensitivity;
+pub use effective_status::Corrections;
 pub use pathspec::PathFilter;
 pub use relativize::Relativizer;
 pub use submodule::{SubmoduleChanges, SubmoduleRename, compute_local_statuses, submodule_changes};
@@ -219,14 +221,19 @@ pub struct StatusEntries<'a> {
     /// render as a separate dirty row. Porcelain v2 uses this for the `u`-line
     /// `S<c><m><u>` field. Empty when the index has no gitlink conflicts.
     pub conflicted_submodules: &'a FxHashMap<String, StatusSummary>,
-    /// Byte paths of libgit2's case-collision phantom deletes: a spurious
-    /// `WT_DELETED` for a path whose case-variant occupies the one working file
-    /// on a `core.ignorecase` filesystem. Renderers skip these. Git collapses
-    /// the collision to a single line. Empty on case-sensitive filesystems and
-    /// whenever nothing is worktree-deleted. See [`case`].
-    pub phantom_deletes: &'a FxHashSet<Vec<u8>>,
+    /// Where libgit2's reported status diverges from git's for this request.
+    /// Apply with [`StatusEntries::effective`] rather than reading
+    /// `entry.status()` directly.
+    pub corrections: &'a Corrections,
     /// Cwd pathspec selection shared by every renderer.
     pub path_filter: PathFilter<'a>,
+}
+
+impl StatusEntries<'_> {
+    /// git's view of `entry`. `None` when git renders no row for it.
+    pub(super) fn effective(&self, entry: &git2::StatusEntry<'_>) -> Option<git2::Status> {
+        effective_status::effective_status(entry.status(), entry.path_bytes(), self.corrections)
+    }
 }
 
 enum AssembleOutcome<T> {
@@ -344,11 +351,9 @@ fn assemble_status_scoped<R>(
         FxHashSet::default()
     };
 
-    // libgit2 emits a phantom `WT_DELETED` for a case-collision (two index
-    // entries differing only in case, collapsed to one working file) that git
-    // reports as a single line. That is only possible with `core.ignorecase`
-    // and a worktree deletion. Cwd filtering also needs the same setting. Read
-    // it once whenever either consumer needs it.
+    // Both status corrections only ever clear a `WT_DELETED`, so neither can
+    // apply without one. Cwd filtering needs `core.ignorecase` regardless, so
+    // read it once whenever either consumer needs it.
     let has_worktree_delete = non_submod
         .iter()
         .any(|e| e.status().contains(git2::Status::WT_DELETED));
@@ -361,7 +366,14 @@ fn assemble_status_scoped<R>(
                 .and_then(|c| c.get_bool("core.ignorecase"))
                 .unwrap_or(false),
     );
-    let phantom_deletes = case::phantom_deletes(&non_submod, case_sensitivity);
+    let corrections = if has_worktree_delete {
+        Corrections {
+            phantom_deletes: effective_status::phantom_deletes(&non_submod, case_sensitivity),
+            skip_worktree: effective_status::skip_worktree_paths(&repo),
+        }
+    } else {
+        Corrections::default()
+    };
 
     let path_filter = match scope {
         StatusScope::All => PathFilter::all(),
@@ -432,7 +444,7 @@ fn assemble_status_scoped<R>(
         renamed_submodules: &submod_changes.renamed,
         conflicted_paths: &conflicted_paths,
         conflicted_submodules: &conflicted_submodules,
-        phantom_deletes: &phantom_deletes,
+        corrections: &corrections,
         path_filter,
     };
 
