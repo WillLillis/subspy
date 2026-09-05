@@ -14,7 +14,7 @@ use crate::{
     list::{ListError, list},
     prompt::{PromptError, prompt},
     reindex::{ReindexError, reindex},
-    shutdown::{ShutdownError, shutdown},
+    shutdown::{ShutdownError, shutdown, shutdown_all},
     status::{
         IgnoreSubmodules, IgnoredFiles, OutputFormat, OutputOpts, PorcelainVersion,
         ResolvedStatusRequest, StatusError, UntrackedFiles, status,
@@ -28,7 +28,7 @@ pub enum Commands {
     Start(Start),
     /// Display the status of a watched git project
     Status(Status),
-    /// Shutdown a watch server
+    /// Shutdown one or all watch servers
     Stop(Stop),
     /// Reindex a watch server
     Reindex(Reindex),
@@ -119,8 +119,11 @@ pub struct Status {
 #[derive(Args, Debug)]
 pub struct Stop {
     /// The directory to shutdown a watcher for
-    #[arg(index = 1)]
+    #[arg(index = 1, conflicts_with = "all")]
     pub dir: Option<PathBuf>,
+    /// Best-effort shutdown of every watch server on this machine
+    #[arg(short, long)]
+    pub all: bool,
 }
 
 #[derive(Args, Debug)]
@@ -330,6 +333,9 @@ impl Stop {
     ///
     /// Returns `Err` if the project path is invalid or the operation fails.
     pub fn run(self) -> RunResult<()> {
+        if self.all {
+            return Ok(shutdown_all()?);
+        }
         let repo_root = get_project_path(self.dir)?.require_with_submodules()?;
         Ok(shutdown(&repo_root)?)
     }

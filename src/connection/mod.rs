@@ -15,17 +15,20 @@ use thiserror::Error;
 
 pub mod client;
 mod client_handler;
+mod discovery;
 mod progress;
 mod protocol;
 mod transport;
 pub mod watch_server;
 
+pub use discovery::discover_ipc_endpoints;
 pub use protocol::{ClientMessage, ClientRequest, DebugState, ServerMessage};
 pub use transport::{
     IpcListener, IpcStream, cleanup_socket, create_listener, encode_and_write, ipc_connect,
-    ipc_socket_path, read_full_message, read_full_message_fixed, set_recv_timeout,
-    uses_filesystem_sockets, write_full_message_fixed,
+    ipc_socket_path, read_full_message, read_full_message_fixed, server_not_started,
+    set_recv_timeout, uses_filesystem_sockets, write_full_message_fixed,
 };
+
 /// Bincode configuration shared by the IPC client and server.
 pub const BINCODE_CFG: bincode::config::Configuration<
     bincode::config::LittleEndian,
@@ -51,6 +54,15 @@ pub enum IpcError {
 }
 
 pub type IpcResult<T> = Result<T, IpcError>;
+
+/// Errors from a shutdown request to a discovered endpoint.
+#[derive(Debug, Error)]
+pub(crate) enum ShutdownEndpointError {
+    #[error(transparent)]
+    Connect(std::io::Error),
+    #[error(transparent)]
+    Exchange(IpcError),
+}
 
 /// Error returned when the client and server IPC versions do not match.
 #[derive(Clone, Debug, Error)]
