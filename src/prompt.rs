@@ -13,9 +13,8 @@ use thiserror::Error;
 use crate::{
     StatusSummary,
     connection::{
-        BINCODE_CFG, ClientMessage, ClientRequest, ServerMessage, client::server_not_started,
-        ipc_connect, ipc_socket_path, read_full_message, set_recv_timeout,
-        write_full_message_fixed,
+        BINCODE_CFG, ClientMessage, ClientRequest, ServerMessage, ipc_connect, ipc_socket_path,
+        read_full_message, server_not_started, set_recv_timeout, write_full_message_fixed,
     },
     git::parse_gitmodules,
     status::compute_local_statuses,

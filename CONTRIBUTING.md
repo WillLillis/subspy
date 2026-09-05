@@ -90,6 +90,7 @@ each with its own renderer. Long stands alone; short + porcelain v1 share an
 | `mod.rs` | Spine: `IpcError`, `BINCODE_CFG` / `IPC_VERSION`, `VersionMismatchError`, the `try_lock` helpers, and grouped re-exports of `protocol` / `transport` so callers keep stable `connection::X` paths |
 | `protocol.rs` | IPC message types (`ClientRequest`, `ClientMessage`, `ServerMessage`, `DebugState`) and their wire-format stability tests |
 | `transport.rs` | Platform-specific sockets (`IpcStream` / `IpcListener`, connect/listen/cleanup) and length-prefixed framing (`read_full_message`, `write_full_message_fixed`, `encode_and_write`) |
+| `discovery.rs` | Enumerates watch-server sockets for `subspy stop --all` (`/proc/net/unix` on Linux, temp-dir scan elsewhere) |
 | `progress.rs` | Progress-update vocabulary shared by the server and client handler (`ProgressUpdate`, `ProgressMap`, `ProgressSubscribers`, `broadcast_progress`) |
 | `client.rs` | Client-side IPC (connect, send request, receive response) |
 | `client_handler.rs` | Server-side IPC message dispatch and progress delivery to subscribed clients |
@@ -422,7 +423,8 @@ RUSTFLAGS='--cfg trace_events' cargo test
 - **Windows**: Uses `uds_windows` for AF_UNIX sockets (requires Windows 10 1809+).
   When `std::os::windows::net::UnixStream` stabilizes in std, the `uds_windows`
   dependency can be dropped.
-- **macOS**: Uses Apple's FSEvents API via the `notify` crate. No special configuration needed.
+- **macOS**: Uses Apple's FSEvents API via the `notify` crate. Note that local sockets
+  are *files* in `$TMPDIR`. A crashed server leaves a socket file behind.
 
 ## Common Pitfalls
 

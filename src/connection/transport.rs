@@ -3,6 +3,7 @@
 
 use core::hash::{Hash as _, Hasher as _};
 use std::{
+    ffi::{OsStr, OsString},
     io::{BufReader, Read, Write as _},
     path::Path,
     time::Duration,
@@ -11,12 +12,14 @@ use std::{
 use bincode::Encode;
 #[cfg(not(target_os = "windows"))]
 use interprocess::local_socket::{
-    GenericFilePath, GenericNamespaced, ListenerOptions, Name, NameType as _, ToFsName as _,
-    ToNsName as _,
+    GenericFilePath, GenericNamespaced, ListenerOptions, Name, ToFsName as _, ToNsName as _,
 };
 use rustc_hash::FxHasher;
 
 use super::{BINCODE_CFG, IpcResult};
+
+pub(super) const SOCKET_NAME_PREFIX: &str = "subspy-";
+pub(super) const SOCKET_NAME_SUFFIX: &str = ".sock";
 
 // Platform-specific IPC stream and listener types.
 //
@@ -38,18 +41,45 @@ pub type IpcListener = interprocess::local_socket::Listener;
 #[cfg(target_os = "windows")]
 pub type IpcListener = uds_windows::UnixListener;
 
-/// Returns `true` if IPC uses filesystem sockets that need manual cleanup.
-#[cfg(target_os = "windows")]
+/// Whether IPC uses filesystem sockets that need manual cleanup.
+///
+/// Only Linux and Android have an abstract namespace, where the kernel drops the
+/// socket when the owning process exits. Everywhere else a socket is a file in
+/// the temp directory that outlives a crashed server.
 #[must_use]
 pub const fn uses_filesystem_sockets() -> bool {
-    true // uds_windows always uses filesystem sockets
+    cfg!(not(any(target_os = "linux", target_os = "android")))
 }
 
-/// Returns `true` if IPC uses filesystem sockets that need manual cleanup.
-#[cfg(not(target_os = "windows"))]
+/// Returns `true` if the error indicates no server is listening.
+///
+/// Covers the common cases: no socket exists (`NotFound`), server not
+/// accepting (`ConnectionRefused`), and stale/dead sockets that produce
+/// `ConnectionReset` or `ConnectionAborted`. On Windows, `WSAEINVAL`
+/// (error 10022) from a stale `AF_UNIX` socket file is also treated as
+/// retryable.
+#[inline]
 #[must_use]
-pub fn uses_filesystem_sockets() -> bool {
-    !GenericNamespaced::is_supported()
+pub fn server_not_started(error: &std::io::Error) -> bool {
+    if matches!(
+        error.kind(),
+        std::io::ErrorKind::ConnectionRefused
+            | std::io::ErrorKind::NotFound
+            | std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::ConnectionAborted
+    ) {
+        return true;
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        const WSAEINVAL: i32 = 10022;
+        if error.raw_os_error() == Some(WSAEINVAL) {
+            return true;
+        }
+    }
+
+    false
 }
 
 /// Sets the receive timeout on the IPC stream.
@@ -199,37 +229,35 @@ pub fn read_full_message(
 
 /// Returns the socket path used for IPC on the current platform.
 ///
-/// On Unix with namespace support, returns a short name like `{hash}.sock`.
-/// On Unix without namespace support or on Windows, returns a filesystem
-/// path like `/tmp/{hash}.sock` or `%TEMP%\{hash}.sock`.
+/// On Unix with namespace support, returns a short name like `subspy-{hash}.sock`.
+/// On Unix without namespace support or on Windows, returns a filesystem path
+/// like `{tmpdir}/subspy-{hash}.sock`.
 #[must_use]
-pub fn ipc_socket_path(path: &Path) -> String {
+pub fn ipc_socket_path(path: &Path) -> OsString {
     let mut hasher = FxHasher::default();
     path.hash(&mut hasher);
     let hash = hasher.finish();
 
-    #[cfg(not(target_os = "windows"))]
-    if GenericNamespaced::is_supported() {
-        return format!("{hash}.sock");
+    if !uses_filesystem_sockets() {
+        return socket_name(hash).into();
     }
 
-    #[cfg(target_os = "windows")]
-    {
-        let temp = std::env::temp_dir();
-        format!("{}\\{hash}.sock", temp.display())
-    }
+    let mut sock_path = std::env::temp_dir();
+    sock_path.push(socket_name(hash));
+    sock_path.into_os_string()
+}
 
-    #[cfg(not(target_os = "windows"))]
-    format!("/tmp/{hash}.sock")
+fn socket_name(hash: u64) -> String {
+    format!("{SOCKET_NAME_PREFIX}{hash}{SOCKET_NAME_SUFFIX}")
 }
 
 /// Converts a socket path string into an `interprocess` `Name`.
 #[cfg(not(target_os = "windows"))]
-fn ipc_name(sock_path: &str) -> std::io::Result<Name<'_>> {
-    if GenericNamespaced::is_supported() {
-        sock_path.to_string().to_ns_name::<GenericNamespaced>()
+fn ipc_name(sock_path: &OsStr) -> std::io::Result<Name<'_>> {
+    if uses_filesystem_sockets() {
+        sock_path.to_fs_name::<GenericFilePath>()
     } else {
-        sock_path.to_string().to_fs_name::<GenericFilePath>()
+        sock_path.to_ns_name::<GenericNamespaced>()
     }
 }
 
@@ -239,7 +267,7 @@ fn ipc_name(sock_path: &str) -> std::io::Result<Name<'_>> {
 /// # Errors
 ///
 /// Returns `std::io::Error` if the connection cannot be established.
-pub fn ipc_connect(sock_path: &str) -> std::io::Result<IpcStream> {
+pub fn ipc_connect(sock_path: &OsStr) -> std::io::Result<IpcStream> {
     #[cfg(not(target_os = "windows"))]
     {
         use interprocess::local_socket::traits::Stream as _;
@@ -282,7 +310,7 @@ pub fn create_listener(root_dir: &Path) -> std::io::Result<IpcListener> {
             Ok(listener) => Ok(listener),
             Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
                 if uses_filesystem_sockets()
-                    && ipc_connect(&sock_path).is_err()
+                    && ipc_connect(&sock_path).is_err_and(|error| server_not_started(&error))
                     && std::fs::remove_file(&sock_path).is_ok()
                 {
                     let name = ipc_name(&sock_path)?;
@@ -300,7 +328,7 @@ pub fn create_listener(root_dir: &Path) -> std::io::Result<IpcListener> {
             Ok(listener) => Ok(listener),
             Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
                 if uses_filesystem_sockets()
-                    && ipc_connect(&sock_path).is_err()
+                    && ipc_connect(&sock_path).is_err_and(|error| server_not_started(&error))
                     && std::fs::remove_file(&sock_path).is_ok()
                 {
                     Ok(uds_windows::UnixListener::bind(&sock_path)?)

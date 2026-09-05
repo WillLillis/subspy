@@ -78,7 +78,9 @@ impl WatchServer {
             watcher_count: self.watchers.len() as u32,
             watched_paths,
             root_path: self.root_path.display().to_string(),
-            socket_name: ipc_socket_path(&self.root_path),
+            socket_name: ipc_socket_path(&self.root_path)
+                .into_string()
+                .unwrap_or_else(|name| name.to_string_lossy().into_owned()),
             submodule_statuses,
             in_flight: in_flight_tasks,
             progress_queues,

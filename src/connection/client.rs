@@ -2,6 +2,7 @@
 //! and reading responses.
 
 use std::{
+    ffi::OsStr,
     io::BufReader,
     path::Path,
     time::{Duration, Instant},
@@ -14,9 +15,10 @@ use crate::{
     StatusSummary,
     connection::{
         BINCODE_CFG, ClientMessage, ClientRequest, DebugState, IPC_VERSION, IpcResult, IpcStream,
-        ServerMessage, VersionMismatchError, ipc_connect, ipc_socket_path,
+        ServerMessage, ShutdownEndpointError, VersionMismatchError, ipc_connect, ipc_socket_path,
         protocol::{DEBUG_REQUEST, SHUTDOWN_REQUEST},
-        read_full_message, read_full_message_fixed, write_full_message_fixed,
+        read_full_message, read_full_message_fixed, server_not_started, set_recv_timeout,
+        write_full_message_fixed,
     },
     create_progress_bar,
     watch::spawn_daemon,
@@ -126,6 +128,35 @@ pub fn request_shutdown(root_path: &Path) -> IpcResult<()> {
     Ok(())
 }
 
+/// Sends a shutdown request to an endpoint returned by `discover_ipc_endpoints`,
+/// handing the response back for the caller to report.
+///
+/// # Errors
+///
+/// Returns `Err` if the endpoint is unreachable, or if encoding or decoding fails.
+pub(crate) fn request_shutdown_endpoint(
+    endpoint: &OsStr,
+) -> Result<ServerMessage, ShutdownEndpointError> {
+    const ENDPOINT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
+
+    let conn = ipc_connect(endpoint).map_err(ShutdownEndpointError::Connect)?;
+    set_recv_timeout(&conn, Some(ENDPOINT_SHUTDOWN_TIMEOUT))
+        .map_err(|e| ShutdownEndpointError::Exchange(e.into()))?;
+    let mut conn = BufReader::new(conn);
+    write_full_message_fixed(&mut conn, &SHUTDOWN_REQUEST)
+        .map_err(|e| ShutdownEndpointError::Exchange(e.into()))?;
+
+    // VersionMismatch { u8 } = 5 bytes is the largest possible response.
+    let mut buffer = [0u8; 5];
+    let msg_len = read_full_message_fixed(&mut conn, &mut buffer)
+        .map_err(|e| ShutdownEndpointError::Exchange(e.into()))?;
+    let (resp, _): (ServerMessage, usize) =
+        bincode::borrow_decode_from_slice(&buffer[..msg_len], BINCODE_CFG)
+            .map_err(|e| ShutdownEndpointError::Exchange(e.into()))?;
+
+    Ok(resp)
+}
+
 /// How long [`connect_to_server`] waits for a freshly-spawned daemon to
 /// accept connections before giving up. Empirically matches `prompt`'s
 /// per-call budget and is long enough for normal cold starts (sub-100ms
@@ -189,37 +220,6 @@ fn connect_to_server(root_path: &Path, display_progress: bool) -> IpcResult<BufR
         }
         std::thread::yield_now();
     }
-}
-
-/// Returns `true` if the error indicates no server is listening.
-///
-/// Covers the common cases: no socket exists (`NotFound`), server not
-/// accepting (`ConnectionRefused`), and stale/dead sockets that produce
-/// `ConnectionReset` or `ConnectionAborted`. On Windows, `WSAEINVAL`
-/// (error 10022) from a stale `AF_UNIX` socket file is also treated as
-/// retryable.
-#[inline]
-#[must_use]
-pub fn server_not_started(e: &std::io::Error) -> bool {
-    if matches!(
-        e.kind(),
-        std::io::ErrorKind::ConnectionRefused
-            | std::io::ErrorKind::NotFound
-            | std::io::ErrorKind::ConnectionReset
-            | std::io::ErrorKind::ConnectionAborted
-    ) {
-        return true;
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        const WSAEINVAL: i32 = 10022;
-        if e.raw_os_error() == Some(WSAEINVAL) {
-            return true;
-        }
-    }
-
-    false
 }
 
 /// Sends a status request to the watch server for `root_path`.

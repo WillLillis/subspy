@@ -67,7 +67,7 @@ Usage: subspy <COMMAND>
 Commands:
   start    Start a watch server on a git project [aliases: watch, w]
   status   Display the status of a watched git project [aliases: st, s]
-  stop     Shutdown a watch server
+  stop     Shutdown one or all watch servers
   reindex  Reindex a watch server [aliases: re, r]
   debug    Dump the internal state of the watch server [aliases: dbg, d]
   list     List submodule metadata [aliases: ls, l]

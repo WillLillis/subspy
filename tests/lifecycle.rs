@@ -9,10 +9,38 @@ use subspy::{
     StatusSummary,
     connection::{
         BINCODE_CFG, ClientMessage, ClientRequest, IPC_VERSION, ServerMessage,
-        client::request_reindex, ipc_connect, ipc_socket_path, read_full_message_fixed,
-        uses_filesystem_sockets, write_full_message_fixed,
+        client::request_reindex, discover_ipc_endpoints, ipc_connect, ipc_socket_path,
+        read_full_message_fixed, uses_filesystem_sockets, write_full_message_fixed,
     },
 };
+
+#[test]
+fn running_server_is_discoverable_at_derived_endpoint() {
+    let harness = common::HarnessBuilder::new().submodule("sub_a").build();
+    let expected = ipc_socket_path(harness.root().path());
+    let endpoints = discover_ipc_endpoints().unwrap();
+
+    assert!(
+        endpoints.contains(&expected),
+        "derived endpoint {expected:?} was not present in discovered endpoints {endpoints:?}"
+    );
+}
+
+fn create_stale_socket(path: &std::ffi::OsStr) {
+    #[cfg(unix)]
+    {
+        use std::{os::unix::net::UnixListener, path::Path};
+
+        let listener = UnixListener::bind(Path::new(path)).unwrap();
+        drop(listener);
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let listener = uds_windows::UnixListener::bind(path).unwrap();
+        drop(listener);
+    }
+}
 
 #[apply(common::repeat)]
 fn shutdown_completes_cleanly(_run: u32) {
@@ -121,9 +149,10 @@ fn stale_socket_file_recovered_on_start(_run: u32) {
         .no_server()
         .build();
 
-    // Create a stale socket file (no server listening)
+    // Create a stale socket (no server listening). Dropping a bound listener
+    // leaves the socket pathname behind.
     let sock_path = ipc_socket_path(harness.root().path());
-    std::fs::write(&sock_path, "stale").unwrap();
+    create_stale_socket(&sock_path);
     assert!(std::path::Path::new(&sock_path).exists());
 
     // Server should detect the stale socket, remove it, and start successfully
