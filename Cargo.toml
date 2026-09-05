@@ -64,6 +64,9 @@ rustc-hash = "2"
 thiserror.workspace = true
 thread_local = "1.1"
 
+[target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dependencies]
+libc = "0.2.189"
+
 [target.'cfg(target_os = "windows")'.dependencies]
 uds_windows = "1.2.1"
 

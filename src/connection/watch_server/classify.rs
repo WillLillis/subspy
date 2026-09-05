@@ -26,7 +26,7 @@ pub(super) enum EventType {
 }
 
 /// Determines whether `event` is relevant by its [`kind`](`notify::Event::kind`).
-const fn event_is_relevant(event: &notify::Event) -> bool {
+pub(super) const fn event_is_relevant(event: &notify::Event) -> bool {
     matches!(
         event.kind,
         EventKind::Remove(_)

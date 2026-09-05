@@ -46,6 +46,17 @@ impl WatchServer {
         Ok((rx, watcher))
     }
 
+    pub(super) fn place_idle_watcher(&self) -> notify::Result<WatchEntry> {
+        let (rx, watcher) = Self::place_watch(&self.root_path, notify::RecursiveMode::Recursive)?;
+
+        Ok(WatchEntry::new(
+            ".".to_owned(),
+            self.root_path.clone(),
+            rx,
+            watcher,
+        ))
+    }
+
     /// Places a recursive watch on a submodule working directory. A missing directory
     /// yields a watcher with no registered paths.
     ///

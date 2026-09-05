@@ -25,6 +25,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
     thread::JoinHandle,
+    time::Duration,
 };
 
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -43,7 +44,7 @@ use crate::{
     watch::WatchResult,
 };
 
-use classify::EventType;
+use classify::{EventType, event_is_relevant};
 use event_loop::HandleEventsExit;
 use layout::GitLayout;
 use update::InFlightTracker;
@@ -55,6 +56,7 @@ use super::progress::{ProgressMap, ProgressSubscribers};
 const ROOT_WATCHER_COUNT: usize = 2;
 const DOT_GITMODULES_WATCHER_IDX: usize = 0;
 const DOT_GIT_WATCHER_IDX: usize = 1;
+const IDLE_SERVER_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// The submodule status map
 pub(super) type StatusMap = Mutex<BTreeMap<String, StatusSummary>>;
@@ -287,6 +289,63 @@ impl WatchServer {
         let status_lock = Arc::clone(&self.submod_statuses);
         loop {
             let new_submod_watches = match exit_reason {
+                HandleEventsExit::Park => {
+                    let idle_watcher = self.place_idle_watcher()?;
+
+                    // Arming the idle watcher above walks the tree, and inotify
+                    // delivers each of those `opendir` calls to every watch on
+                    // the same directory - including the hot watchers, which are
+                    // still armed. Filtering by relevance keeps that self-inflicted
+                    // `Access(Open)` burst from reading as real activity. A
+                    // watcher error still counts: the hot loop reindexes on those.
+                    let hot_activity =
+                        self.watchers
+                            .iter()
+                            .chain(self.tripwires.iter())
+                            .any(|entry| {
+                                entry
+                                    .receiver
+                                    .try_iter()
+                                    .any(|res| res.map_or(true, |event| event_is_relevant(&event)))
+                            });
+
+                    if hot_activity {
+                        // The timeout raced with filesystem activity. Preserve the hot
+                        // state and use the existing reindex path.
+                        self.watchers.truncate(ROOT_WATCHER_COUNT);
+                        true
+                    } else {
+                        self.watchers.clear();
+                        self.tripwires.clear();
+                        self.pending_rescan.clear_and_resize(0);
+                        self.workdir_to_index.clear();
+                        self.modules_path_to_index.clear();
+                        // Indexing spreads allocations across glibc's per-thread
+                        // arenas, and `free` returns blocks to the arena rather
+                        // than to the OS. Dropping the watchers doesn't release
+                        // that, so without this a parked server measures larger
+                        // than a hot one.
+                        // SAFETY: `malloc_trim` takes glibc's arena locks itself
+                        // and is safe to call from any thread.
+                        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+                        unsafe {
+                            libc::malloc_trim(0);
+                        }
+                        exit_reason = self.handle_parked(&idle_watcher)?;
+                        continue;
+                    }
+                }
+                HandleEventsExit::Wake => {
+                    self.watchers.clear();
+                    self.tripwires.clear();
+                    self.place_root_watchers()?;
+                    true
+                }
+                HandleEventsExit::IdleWatcherError => {
+                    let idle_watcher = self.place_idle_watcher()?;
+                    exit_reason = self.handle_parked(&idle_watcher)?;
+                    continue;
+                }
                 HandleEventsExit::ReindexEvent => {
                     self.watchers.truncate(ROOT_WATCHER_COUNT);
                     true

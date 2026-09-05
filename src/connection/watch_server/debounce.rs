@@ -80,11 +80,3 @@ impl ReindexDebounce {
         });
     }
 }
-
-/// Returns the earlier of two optional deadlines (or `None` if both are absent).
-pub(super) fn earliest_deadline(a: Option<Instant>, b: Option<Instant>) -> Option<Instant> {
-    match (a, b) {
-        (Some(a), Some(b)) => Some(a.min(b)),
-        (a, b) => a.or(b),
-    }
-}
