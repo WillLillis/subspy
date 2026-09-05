@@ -17,7 +17,9 @@ use std::{
 
 use crate::paint::{Paint, RED, paint_into};
 
-use super::{PathFilter, StatusResult, relativize::Relativizer};
+use super::{
+    PathFilter, StatusResult, effective_status::is_skip_worktree, relativize::Relativizer,
+};
 
 /// Length of the short-OID prefix git uses in `status` output (matches
 /// `core.abbrev`'s default of 7 hex chars).
@@ -491,6 +493,36 @@ pub fn print_header(
 ) -> StatusResult<()> {
     let state = get_header_state(repo, ahead_behind)?;
     print_header_state(&state, stdout)?;
+    print_sparse_checkout_notice(repo, stdout)?;
+    Ok(())
+}
+
+/// Prints git's `You are in a sparse checkout with N% of tracked files
+/// present.` notice, followed by the blank line git puts after it.
+fn print_sparse_checkout_notice(repo: &Repository, stdout: &mut impl Write) -> StatusResult<()> {
+    let sparse = repo
+        .config()
+        .and_then(|c| c.get_bool("core.sparseCheckout"))
+        .unwrap_or(false);
+    if !sparse {
+        return Ok(());
+    }
+    let index = repo.index()?;
+    let total = index.len();
+    // An empty index has no share to report, and git prints nothing for an
+    // unborn repo even with sparse checkout enabled.
+    if total == 0 {
+        return Ok(());
+    }
+    // git's integer arithmetic from `wt_status_check_sparse_checkout`: the
+    // complement of the skipped share, truncated, not rounded.
+    let skipped = index.iter().filter(is_skip_worktree).count();
+    let present = 100 - (100 * skipped) / total;
+    writeln!(
+        stdout,
+        "You are in a sparse checkout with {present}% of tracked files present."
+    )?;
+    writeln!(stdout)?;
     Ok(())
 }
 

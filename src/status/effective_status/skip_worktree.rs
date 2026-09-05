@@ -12,6 +12,12 @@
 use git2::{IndexEntryExtendedFlag, Repository};
 use rustc_hash::FxHashSet;
 
+/// Whether `entry` carries `SKIP_WORKTREE`. Also used by the long format's
+/// sparse-checkout header, which reports how many entries are flagged.
+pub fn is_skip_worktree(entry: &git2::IndexEntry) -> bool {
+    IndexEntryExtendedFlag::from_bits_truncate(entry.flags_extended).is_skip_worktree()
+}
+
 /// Byte paths of every index entry flagged `SKIP_WORKTREE`. An unreadable
 /// index yields an empty set, leaving statuses untouched.
 pub fn skip_worktree_paths(repo: &Repository) -> FxHashSet<Vec<u8>> {
@@ -20,9 +26,7 @@ pub fn skip_worktree_paths(repo: &Repository) -> FxHashSet<Vec<u8>> {
     };
     index
         .iter()
-        .filter(|entry| {
-            IndexEntryExtendedFlag::from_bits_truncate(entry.flags_extended).is_skip_worktree()
-        })
+        .filter(is_skip_worktree)
         .map(|entry| entry.path)
         .collect()
 }
