@@ -82,6 +82,7 @@ where
 
     match command {
         Commands::Start(watch_options) => {
+            init_server_thread_pool();
             let result = watch_options.run();
             if let Err(ref err) = result {
                 error!("Fatal: {err}");
@@ -99,6 +100,20 @@ where
         Commands::List(list_options) => list_options.run(),
         Commands::Prompt(prompt_options) => prompt_options.run(),
     }
+}
+
+/// Bounds rayon's global pool for the watch server, the only long-lived
+/// process and so the only one that accumulates per-worker allocator arenas.
+/// Status reads are stat-bound, so workers past the cap cost an arena each
+/// without adding throughput. Machines at or under it are left alone. Must run
+/// before anything touches rayon.
+fn init_server_thread_pool() {
+    let threads = std::thread::available_parallelism()
+        .map_or(1, std::num::NonZero::get)
+        .min(16);
+    let _ = rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .build_global();
 }
 
 /// Sets up logging and, for the watch server, the panic hook. The watch
