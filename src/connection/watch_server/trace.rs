@@ -111,6 +111,8 @@ pub(super) enum TraceEvent {
     TripwirePlaced { path: Arc<OsStr> },
     /// The deferred-reindex debounce window expired. A reindex will run.
     ReindexExpired,
+    /// The parked-state watcher reported an error.
+    IdleWatcherError,
     /// A debounced reindex deadline was (re)armed. The reindex runs once the
     /// window elapses without further events. `kind` says which debounce.
     ReindexDeferred {
@@ -168,6 +170,7 @@ impl fmt::Display for TraceEvent {
                 write!(f, "tripwire {}", Path::new(path).display())
             }
             Self::ReindexExpired => f.write_str("reindex debounce expired -> reindexing"),
+            Self::IdleWatcherError => f.write_str("idle watcher reported an error"),
             Self::ReindexDeferred { kind, deadline } => {
                 write!(f, "deferring {kind:?} reindex -> deadline {deadline:?}")
             }

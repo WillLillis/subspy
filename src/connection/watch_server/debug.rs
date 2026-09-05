@@ -15,7 +15,10 @@ const DEBUG_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
 
 impl WatchServer {
     /// Gathers a snapshot of the server's internal state for diagnostic purposes.
-    fn gather_debug_state(&self, in_flight: &(Mutex<InFlightTracker>, Condvar)) -> DebugState {
+    fn gather_debug_state(
+        &self,
+        in_flight: Option<&(Mutex<InFlightTracker>, Condvar)>,
+    ) -> DebugState {
         let watched_paths: Vec<(String, String, u32)> = self
             .watchers
             .iter()
@@ -36,25 +39,27 @@ impl WatchServer {
         let submodule_statuses = try_lock_for(&self.submod_statuses, DEBUG_LOCK_TIMEOUT)
             .map(|guard| guard.iter().map(|(k, v)| (k.clone(), *v)).collect());
 
-        let in_flight_tasks = try_lock_for(&in_flight.0, DEBUG_LOCK_TIMEOUT).map(|guard| {
-            guard
-                .tasks
-                .iter()
-                .map(|(idx, state)| {
-                    let rel_path = self
-                        .watchers
-                        .get(*idx)
-                        .map_or("(unknown)", |w| w.relative_path.as_str());
-                    let cancelled = state.cancel.load(Ordering::Relaxed);
-                    let state_str = match (state.dirty, cancelled) {
-                        (false, false) => "active",
-                        (false, true) => "active (cancelling)",
-                        (true, false) => "dirty",
-                        (true, true) => "dirty (cancelling)",
-                    };
-                    (rel_path.to_owned(), state_str.to_owned())
-                })
-                .collect()
+        let in_flight_tasks = in_flight.and_then(|in_flight| {
+            try_lock_for(&in_flight.0, DEBUG_LOCK_TIMEOUT).map(|guard| {
+                guard
+                    .tasks
+                    .iter()
+                    .map(|(idx, state)| {
+                        let rel_path = self
+                            .watchers
+                            .get(*idx)
+                            .map_or("(unknown)", |w| w.relative_path.as_str());
+                        let cancelled = state.cancel.load(Ordering::Relaxed);
+                        let state_str = match (state.dirty, cancelled) {
+                            (false, false) => "active",
+                            (false, true) => "active (cancelling)",
+                            (true, false) => "dirty",
+                            (true, true) => "dirty (cancelling)",
+                        };
+                        (rel_path.to_owned(), state_str.to_owned())
+                    })
+                    .collect()
+            })
         });
 
         let progress_queues = try_lock_for(&self.progress_queue, DEBUG_LOCK_TIMEOUT).map(|guard| {
@@ -94,9 +99,9 @@ impl WatchServer {
     pub(super) fn handle_debug_request(
         &self,
         conn: &mut BufReader<IpcStream>,
-        in_flight: &Arc<(Mutex<InFlightTracker>, Condvar)>,
+        in_flight: Option<&Arc<(Mutex<InFlightTracker>, Condvar)>>,
     ) {
-        let state = self.gather_debug_state(in_flight);
+        let state = self.gather_debug_state(in_flight.map(Arc::as_ref));
         let msg = ServerMessage::DebugInfo(Box::new(state));
         let mut buf = Vec::with_capacity(1024);
         if let Err(e) = encode_and_write(conn, msg, &mut buf) {

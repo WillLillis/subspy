@@ -3,12 +3,14 @@ use std::{
     ops::Bound,
     path::Path,
     sync::{Arc, Condvar, Mutex},
+    time::Instant,
 };
 
 use log::error;
 use notify::{EventKind, event::ModifyKind};
 
-use super::debounce::{DebounceKind, ReindexDebounce, earliest_deadline};
+use super::classify::event_is_relevant;
+use super::debounce::{DebounceKind, ReindexDebounce};
 use super::trace::wtrace;
 
 use crate::{
@@ -25,6 +27,12 @@ use crate::{
 
 /// Reason `handle_events` exited its select loop
 pub(super) enum HandleEventsExit {
+    /// The hot watcher set has been idle long enough to park.
+    Park,
+    /// The parked-state watcher observed filesystem activity.
+    Wake,
+    /// The parked-state watcher reported an error.
+    IdleWatcherError,
     /// A filesystem event requires a reindex.
     ReindexEvent,
     /// A reindex was requested by a client.
@@ -44,6 +52,8 @@ enum SelectSource {
     Watcher(usize),
     /// Index of the selected filesystem watcher in [`WatchServer::tripwires`].
     Tripwire(usize),
+    /// The idle timer fired.
+    Idle,
     /// A message on [`WatchServer::control_rx`] channel from the listener thread.
     Control,
 }
@@ -55,6 +65,7 @@ impl WatchServer {
     ///     - a client message requesting a reindex is received
     ///     - a client message requesting a shutdown is received
     ///     - a watcher error is detected
+    ///     - the idle timer expires
     #[expect(clippy::too_many_lines)]
     pub(super) fn handle_events(&mut self) -> WatchResult<HandleEventsExit> {
         // Shared state for parallel submodule status updates
@@ -76,31 +87,43 @@ impl WatchServer {
         self.drain_pending_rescans(&in_flight, &pending_status_retries);
 
         let mut sel = crossbeam_channel::Select::new();
-        register_select(&mut sel, &self.watchers, &self.tripwires, &self.control_rx);
+        register_select(
+            &mut sel,
+            &self.watchers,
+            &self.tripwires,
+            None,
+            &self.control_rx,
+        );
+        let idle_deadline = Instant::now() + super::IDLE_SERVER_TIMEOUT;
 
         loop {
-            #[allow(clippy::single_match_else)]
-            let oper = if let Some(deadline) =
-                earliest_deadline(gitmodules_debounce.deadline(), tripwire_debounce.deadline())
-            {
-                match sel.select_deadline(deadline) {
-                    Ok(oper) => oper,
-                    Err(_) => {
-                        // No new events within the debounce window, so trigger
-                        // the deferred reindex.
-                        wtrace!(ReindexExpired);
-                        wait_for_in_flight(&in_flight);
-                        return Ok(HandleEventsExit::ReindexEvent);
-                    }
+            let deadline = next_deadline(
+                gitmodules_debounce.deadline(),
+                tripwire_debounce.deadline(),
+                idle_deadline,
+            );
+            let Ok(oper) = sel.select_deadline(deadline) else {
+                let exit = deadline_expiry(
+                    gitmodules_debounce.deadline(),
+                    tripwire_debounce.deadline(),
+                    idle_deadline,
+                    Instant::now(),
+                );
+                if matches!(&exit, HandleEventsExit::Park) {
+                    wtrace!(ReindexExpired);
                 }
-            } else {
-                sel.select()
+                wait_for_in_flight(&in_flight);
+                return Ok(exit);
             };
             // Decode which receiver fired. The `Control` and `Tripwire` arms fully
             // handle their event, while the Watcher arm yields the watcher index for
             // the match below.
-            let index = match select_source(oper.index(), self.watchers.len(), self.tripwires.len())
-            {
+            let index = match select_source(
+                oper.index(),
+                self.watchers.len(),
+                self.tripwires.len(),
+                false,
+            ) {
                 SelectSource::Control => match oper.recv(&self.control_rx)? {
                     ControlMessage::Reindex { replace_watchers } => {
                         wait_for_in_flight(&in_flight);
@@ -111,7 +134,7 @@ impl WatchServer {
                         return Ok(HandleEventsExit::Shutdown { conn });
                     }
                     ControlMessage::Debug { mut conn } => {
-                        self.handle_debug_request(&mut conn, &in_flight);
+                        self.handle_debug_request(&mut conn, Some(&in_flight));
                         continue;
                     }
                 },
@@ -141,6 +164,9 @@ impl WatchServer {
                     continue;
                 }
                 SelectSource::Watcher(index) => index,
+                SelectSource::Idle => {
+                    unreachable!("idle watcher is not registered in the hot event loop")
+                }
             };
 
             match oper.recv(&self.watchers[index].receiver)? {
@@ -223,6 +249,48 @@ impl WatchServer {
                     wait_for_in_flight(&in_flight);
                     return Ok(self.handle_watcher_error(index, &e));
                 }
+            }
+        }
+    }
+
+    /// Waits for activity or control input while the hot watcher set is parked.
+    pub(super) fn handle_parked(&self, idle_watcher: &WatchEntry) -> WatchResult<HandleEventsExit> {
+        let mut sel = crossbeam_channel::Select::new();
+        register_select(&mut sel, &[], &[], Some(idle_watcher), &self.control_rx);
+
+        loop {
+            let oper = sel.select();
+            let source = select_source(oper.index(), 0, 0, true);
+            match source {
+                SelectSource::Idle => match oper.recv(&idle_watcher.receiver)? {
+                    // Arming a recursive watch makes notify walk the tree, and
+                    // its own `opendir` calls come back as one `Access(Open)`
+                    // per directory (~9k on boost). Waking on those would
+                    // re-park and re-arm forever, so the parked loop applies the
+                    // same relevance filter the hot loop does.
+                    Ok(event) => {
+                        if event_is_relevant(&event) {
+                            return Ok(HandleEventsExit::Wake);
+                        }
+                    }
+                    Err(error) => {
+                        error!("Idle watcher error: {error}");
+                        wtrace!(IdleWatcherError);
+                        return Ok(HandleEventsExit::IdleWatcherError);
+                    }
+                },
+                SelectSource::Control => match oper.recv(&self.control_rx)? {
+                    ControlMessage::Reindex { .. } => {
+                        return Ok(HandleEventsExit::Wake);
+                    }
+                    ControlMessage::Shutdown { conn } => {
+                        return Ok(HandleEventsExit::Shutdown { conn });
+                    }
+                    ControlMessage::Debug { mut conn } => {
+                        self.handle_debug_request(&mut conn, None);
+                    }
+                },
+                SelectSource::Watcher(_) | SelectSource::Tripwire(_) => unreachable!(),
             }
         }
     }
@@ -320,6 +388,36 @@ fn lock_release_needs_reread(index: usize, pending_status_retries: &Mutex<BitSet
         .remove(index)
 }
 
+/// Chooses the next hot-loop deadline, giving reindex deadlines priority on ties.
+fn next_deadline(gitmodules: Option<Instant>, tripwire: Option<Instant>, idle: Instant) -> Instant {
+    let reindex = [gitmodules, tripwire].into_iter().flatten().min();
+
+    match reindex {
+        Some(deadline) if deadline <= idle => deadline,
+        _ => idle,
+    }
+}
+
+/// Converts an elapsed hot-loop deadline into the corresponding loop exit.
+fn deadline_expiry(
+    gitmodules: Option<Instant>,
+    tripwire: Option<Instant>,
+    idle: Instant,
+    now: Instant,
+) -> HandleEventsExit {
+    let reindex_expired = [gitmodules, tripwire]
+        .into_iter()
+        .flatten()
+        .any(|deadline| deadline <= now);
+
+    if reindex_expired {
+        HandleEventsExit::ReindexEvent
+    } else {
+        debug_assert!(idle <= now);
+        HandleEventsExit::Park
+    }
+}
+
 /// Decodes an index returned by a [`crossbeam_channel::Select`] configured by
 /// [`register_select`].
 ///
@@ -327,11 +425,18 @@ fn lock_release_needs_reread(index: usize, pending_status_retries: &Mutex<BitSet
 /// followed by the submodule watchers (totalling `n_watchers`). Those indices pass
 /// through unchanged. Tripwire indices are rebased by `n_watchers`, followed by
 /// the control channel.
-const fn select_source(index: usize, n_watchers: usize, n_tripwires: usize) -> SelectSource {
+const fn select_source(
+    index: usize,
+    n_watchers: usize,
+    n_tripwires: usize,
+    has_idle: bool,
+) -> SelectSource {
     if index < n_watchers {
         SelectSource::Watcher(index)
     } else if index < n_watchers + n_tripwires {
         SelectSource::Tripwire(index - n_watchers)
+    } else if has_idle && index == n_watchers + n_tripwires {
+        SelectSource::Idle
     } else {
         SelectSource::Control
     }
@@ -343,12 +448,16 @@ pub(super) fn register_select<'a>(
     sel: &mut crossbeam_channel::Select<'a>,
     watchers: &'a [WatchEntry],
     tripwires: &'a [WatchEntry],
+    idle_watcher: Option<&'a WatchEntry>,
     control_rx: &'a crossbeam_channel::Receiver<ControlMessage>,
 ) {
     for WatchEntry { receiver, .. } in watchers {
         sel.recv(receiver);
     }
     for WatchEntry { receiver, .. } in tripwires {
+        sel.recv(receiver);
+    }
+    if let Some(WatchEntry { receiver, .. }) = idle_watcher {
         sel.recv(receiver);
     }
     sel.recv(control_rx);
@@ -363,17 +472,48 @@ mod tests {
         // `handle_events` registers receivers as: watchers, then tripwires, then
         // the control channel. For 2 watchers + 1 tripwire that is watchers
         // [0, 1], tripwire [2], control [3].
-        assert!(matches!(select_source(0, 2, 1), SelectSource::Watcher(0)));
-        assert!(matches!(select_source(1, 2, 1), SelectSource::Watcher(1)));
-        assert!(matches!(select_source(2, 2, 1), SelectSource::Tripwire(0)));
-        assert!(matches!(select_source(3, 2, 1), SelectSource::Control));
+        assert!(matches!(
+            select_source(0, 2, 1, false),
+            SelectSource::Watcher(0)
+        ));
+        assert!(matches!(
+            select_source(1, 2, 1, false),
+            SelectSource::Watcher(1)
+        ));
+        assert!(matches!(
+            select_source(2, 2, 1, false),
+            SelectSource::Tripwire(0)
+        ));
+        assert!(matches!(
+            select_source(3, 2, 1, false),
+            SelectSource::Control
+        ));
 
         // No tripwires: the control channel sits immediately after the watchers.
-        assert!(matches!(select_source(2, 2, 0), SelectSource::Control));
+        assert!(matches!(
+            select_source(2, 2, 0, false),
+            SelectSource::Control
+        ));
 
         // The tripwire band is reported as a 0-based index local to `tripwires`.
-        assert!(matches!(select_source(2, 2, 3), SelectSource::Tripwire(0)));
-        assert!(matches!(select_source(4, 2, 3), SelectSource::Tripwire(2)));
-        assert!(matches!(select_source(5, 2, 3), SelectSource::Control));
+        assert!(matches!(
+            select_source(2, 2, 3, false),
+            SelectSource::Tripwire(0)
+        ));
+        assert!(matches!(
+            select_source(4, 2, 3, false),
+            SelectSource::Tripwire(2)
+        ));
+        assert!(matches!(
+            select_source(5, 2, 3, false),
+            SelectSource::Control
+        ));
+
+        // With an idle watcher, it occupies the slot immediately before control.
+        assert!(matches!(select_source(5, 2, 3, true), SelectSource::Idle));
+        assert!(matches!(
+            select_source(6, 2, 3, true),
+            SelectSource::Control
+        ));
     }
 }
