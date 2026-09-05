@@ -127,8 +127,7 @@ pub fn display_porcelain_v2(
 
     for_each_tracked_row(tracked, submods, |row| match row {
         TrackedOrSubRow::File(row) => match row {
-            TrackedRow::Entry(entry) => {
-                let st = entry.status();
+            TrackedRow::Entry(entry, st) => {
                 if st.contains(git2::Status::CONFLICTED) {
                     write_conflict(
                         &entry,
@@ -138,9 +137,9 @@ pub fn display_porcelain_v2(
                         &render_opts,
                     )
                 } else if st.intersects(git2::Status::INDEX_RENAMED | git2::Status::WT_RENAMED) {
-                    write_renamed(repo, &entry, out, &render_opts)
+                    write_renamed(repo, &entry, st, out, &render_opts)
                 } else {
-                    write_ordinary(&entry, out, &render_opts)
+                    write_ordinary(&entry, st, out, &render_opts)
                 }
             }
             TrackedRow::SyntheticOrdinary(row) => write_synthetic_ordinary(&row, out, &render_opts),
@@ -335,17 +334,18 @@ const fn submodule_cmu(st: StatusSummary) -> (char, char, char) {
 /// from [`extract_modes_and_oids`].
 fn write_ordinary(
     entry: &git2::StatusEntry<'_>,
+    st: git2::Status,
     out: &mut impl Write,
     render_opts: &RenderOpts<'_>,
 ) -> Result<(), io::Error> {
-    let (x, y) = regular_xy(entry.status());
+    let (x, y) = regular_xy(st);
     let EntryModesAndOids {
         m_head,
         m_idx,
         m_work,
         h_head,
         h_idx,
-    } = extract_modes_and_oids(entry);
+    } = extract_modes_and_oids(entry, st);
     write!(
         out,
         "1 {x}{y} N... {m_head:06o} {m_idx:06o} {m_work:06o} {h_head} {h_idx} ",
@@ -395,10 +395,10 @@ fn write_synthetic_ordinary(
 fn write_renamed(
     repo: &Repository,
     entry: &git2::StatusEntry<'_>,
+    st: git2::Status,
     out: &mut impl Write,
     render_opts: &RenderOpts<'_>,
 ) -> Result<(), io::Error> {
-    let st = entry.status();
     let (x, y) = regular_xy(st);
     // For renames, both paths come from the diff delta - `entry.path()` is
     // the entry's key, which is just the old path again.
@@ -421,7 +421,7 @@ fn write_renamed(
         m_work,
         h_head,
         h_idx,
-    } = extract_modes_and_oids(entry);
+    } = extract_modes_and_oids(entry, st);
     let score = rename_similarity(repo, h_head, h_idx);
     write!(
         out,

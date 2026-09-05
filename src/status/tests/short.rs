@@ -40,6 +40,16 @@ const CASES: &[Case] = &[
         branch: false,
     },
     Case {
+        name: "skip_worktree_absent",
+        setup: Setup::Plain(setup_skip_worktree_absent),
+        branch: false,
+    },
+    Case {
+        name: "skip_worktree_absent_with_staged_change",
+        setup: Setup::Plain(setup_skip_worktree_absent_with_staged_change),
+        branch: false,
+    },
+    Case {
         name: "staged_modified",
         setup: Setup::Plain(setup_staged_modified),
         branch: false,

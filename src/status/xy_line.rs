@@ -114,14 +114,13 @@ pub(super) fn display_xy_lines(
     submods.extend(entries.renamed_submodules.iter().map(SubRow::Renamed));
 
     for_each_tracked_row(tracked, submods, |row| match row {
-        TrackedOrSubRow::File(TrackedRow::Entry(entry)) => {
-            let st = entry.status();
+        TrackedOrSubRow::File(TrackedRow::Entry(entry, st)) => {
             if st.contains(git2::Status::CONFLICTED) {
                 write_conflict(&entry, &conflicts, out, rel, null_terminate, style)
             } else if st.intersects(git2::Status::INDEX_RENAMED | git2::Status::WT_RENAMED) {
-                write_renamed(&entry, out, rel, null_terminate, style)
+                write_renamed(&entry, st, out, rel, null_terminate, style)
             } else {
-                write_ordinary(&entry, out, rel, null_terminate, style)
+                write_ordinary(&entry, st, out, rel, null_terminate, style)
             }
         }
         TrackedOrSubRow::File(TrackedRow::SyntheticOrdinary(row)) => {
@@ -339,12 +338,13 @@ fn ordinary_colors(style: &LineStyle) -> (Option<Style>, Option<Style>) {
 /// Writes a non-rename, non-conflict tracked entry as `XY PATH<term>`.
 fn write_ordinary(
     entry: &git2::StatusEntry<'_>,
+    st: git2::Status,
     out: &mut impl Write,
     rel: &Relativizer<'_>,
     null_terminate: bool,
     style: &LineStyle,
 ) -> io::Result<()> {
-    let (x, y) = regular_xy(entry.status());
+    let (x, y) = regular_xy(st);
     let (x_color, y_color) = ordinary_colors(style);
     write_xy_prefix(out, XyChar::new(x, x_color), XyChar::new(y, y_color))?;
     write_path(out, entry.path_bytes(), rel, null_terminate, style)?;
@@ -356,12 +356,12 @@ fn write_ordinary(
 /// `-z` rename form: path first, no arrow, no quoting).
 fn write_renamed(
     entry: &git2::StatusEntry<'_>,
+    st: git2::Status,
     out: &mut impl Write,
     rel: &Relativizer<'_>,
     null_terminate: bool,
     style: &LineStyle,
 ) -> io::Result<()> {
-    let st = entry.status();
     let (x, y) = regular_xy(st);
     let (x_color, y_color) = ordinary_colors(style);
 
