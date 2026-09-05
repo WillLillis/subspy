@@ -42,6 +42,10 @@ const CASES: &[Case] = &[
         setup: Setup::Plain(setup_skip_worktree_absent),
     },
     Case {
+        name: "sparse_checkout",
+        setup: Setup::Plain(setup_sparse_checkout),
+    },
+    Case {
         name: "skip_worktree_absent_with_staged_change",
         setup: Setup::Plain(setup_skip_worktree_absent_with_staged_change),
     },

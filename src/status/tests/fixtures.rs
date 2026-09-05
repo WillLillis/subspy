@@ -385,6 +385,19 @@ pub fn setup_skip_worktree_absent(root: &Path) {
     std::fs::remove_file(root.join("a.txt")).unwrap();
 }
 
+/// A real sparse checkout: `core.sparseCheckout` on with some tracked paths
+/// excluded. Exercises the long format's `You are in a sparse checkout with
+/// N% of tracked files present.` notice.
+pub fn setup_sparse_checkout(root: &Path) {
+    let repo = Repo::init(root);
+    repo.write("included.txt", "inc\n")
+        .write("exc/a.txt", "a\n")
+        .write("exc/b.txt", "b\n")
+        .add_all()
+        .commit("initial");
+    repo.run_git(&["sparse-checkout", "set", "--no-cone", "included.txt"]);
+}
+
 /// A skip-worktree file that is absent *and* carries a staged change. git
 /// still prints the staged change (`M `), so the deletion must be masked
 /// rather than the whole row suppressed.

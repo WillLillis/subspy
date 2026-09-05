@@ -15,7 +15,7 @@ mod skip_worktree;
 use rustc_hash::FxHashSet;
 
 pub(super) use case_collision::phantom_deletes;
-pub(super) use skip_worktree::skip_worktree_paths;
+pub(super) use skip_worktree::{is_skip_worktree, skip_worktree_paths};
 
 /// Where libgit2's answer needs correcting for this status request.
 #[derive(Debug, Default)]
