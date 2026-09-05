@@ -38,6 +38,14 @@ pub(super) const fn event_is_relevant(event: &notify::Event) -> bool {
     )
 }
 
+/// Determines whether an event should wake a parked server.
+///
+/// Recursive watch registration reports the watcher's own directory opens as
+/// `Access(Open)`, and should be ignored.
+pub(super) const fn event_is_idle_activity(event: &notify::Event) -> bool {
+    !matches!(event.kind, EventKind::Access(AccessKind::Open(_)))
+}
+
 impl WatchServer {
     /// Converts a watcher event to a relevant [`EventType`], if possible.
     fn classify_event(&self, event: &notify::Event, watcher_idx: usize) -> Option<EventType> {
