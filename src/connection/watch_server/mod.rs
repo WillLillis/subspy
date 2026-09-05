@@ -44,7 +44,7 @@ use crate::{
     watch::WatchResult,
 };
 
-use classify::{EventType, event_is_relevant};
+use classify::{EventType, event_is_idle_activity};
 use event_loop::HandleEventsExit;
 use layout::GitLayout;
 use update::InFlightTracker;
@@ -303,10 +303,9 @@ impl WatchServer {
                             .iter()
                             .chain(self.tripwires.iter())
                             .any(|entry| {
-                                entry
-                                    .receiver
-                                    .try_iter()
-                                    .any(|res| res.map_or(true, |event| event_is_relevant(&event)))
+                                entry.receiver.try_iter().any(|res| {
+                                    res.map_or(true, |event| event_is_idle_activity(&event))
+                                })
                             });
 
                     if hot_activity {

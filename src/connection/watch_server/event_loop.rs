@@ -9,7 +9,7 @@ use std::{
 use log::error;
 use notify::{EventKind, event::ModifyKind};
 
-use super::classify::event_is_relevant;
+use super::classify::event_is_idle_activity;
 use super::debounce::{DebounceKind, ReindexDebounce};
 use super::trace::wtrace;
 
@@ -94,7 +94,7 @@ impl WatchServer {
             None,
             &self.control_rx,
         );
-        let idle_deadline = Instant::now() + super::IDLE_SERVER_TIMEOUT;
+        let mut idle_deadline = Instant::now() + super::IDLE_SERVER_TIMEOUT;
 
         loop {
             let deadline = next_deadline(
@@ -141,6 +141,7 @@ impl WatchServer {
                 SelectSource::Tripwire(tripwire) => {
                     match oper.recv(&self.tripwires[tripwire].receiver)? {
                         Ok(event) => {
+                            idle_deadline = Instant::now() + super::IDLE_SERVER_TIMEOUT;
                             // A structural change (workdir appearing/disappearing) needs
                             // a reindex to re-arm watches. Any other tripwire event seen
                             // while one is already pending just pushes the window out.
@@ -171,6 +172,7 @@ impl WatchServer {
 
             match oper.recv(&self.watchers[index].receiver)? {
                 Ok(event) => {
+                    idle_deadline = Instant::now() + super::IDLE_SERVER_TIMEOUT;
                     // Of the watcher events, only the root `.git/` and `.gitmodules` ones
                     // extend a pending structural reindex (tripwire events arm and bump
                     // it too, above). A restoring git op churns `.git/modules/<name>`
@@ -267,9 +269,9 @@ impl WatchServer {
                     // its own `opendir` calls come back as one `Access(Open)`
                     // per directory (~9k on boost). Waking on those would
                     // re-park and re-arm forever, so the parked loop applies the
-                    // same relevance filter the hot loop does.
+                    // same setup-noise filter as the park transition.
                     Ok(event) => {
-                        if event_is_relevant(&event) {
+                        if event_is_idle_activity(&event) {
                             return Ok(HandleEventsExit::Wake);
                         }
                     }
