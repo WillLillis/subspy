@@ -277,6 +277,7 @@ fn opts_for(branch: bool) -> OutputOpts {
         ahead_behind: true,
         quote_path: true,
         show_stash: false,
+        relative_paths: true,
     }
 }
 

@@ -16,7 +16,7 @@ use crate::{
     reindex::{ReindexError, reindex},
     shutdown::{ShutdownError, shutdown, shutdown_all},
     status::{
-        IgnoreSubmodules, IgnoredFiles, OutputFormat, OutputOpts, PorcelainVersion,
+        ConfigDefaults, IgnoreSubmodules, IgnoredFiles, OutputFormat, OutputOpts, PorcelainVersion,
         ResolvedStatusRequest, StatusError, UntrackedFiles, status,
     },
     watch::{WatchError, spawn_daemon},
@@ -105,15 +105,17 @@ pub struct Status {
     #[arg(long, conflicts_with = "ahead_behind")]
     pub no_ahead_behind: bool,
     /// Quote bytes `>= 0x80` in paths as octal escapes (git's default).
-    /// Set to `false` to emit such bytes verbatim (matches
-    /// `-c core.quotepath=false`).
-    #[arg(long, default_value_t = true,
-          action = clap::ArgAction::Set)]
-    pub quote_path: bool,
+    /// Set to `false` to emit such bytes verbatim. Absent, `core.quotepath`
+    /// supplies the value.
+    #[arg(long, action = clap::ArgAction::Set)]
+    pub quote_path: Option<bool>,
     /// Append stash-count information. Long format gets git's human-readable stash
     /// trailer, while porcelain v2 with `--branch` gets `# stash N`.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "no_show_stash")]
     pub show_stash: bool,
+    /// Omit stash-count information, overriding `status.showStash`.
+    #[arg(long, conflicts_with = "show_stash")]
+    pub no_show_stash: bool,
 }
 
 #[derive(Args, Debug)]
@@ -372,10 +374,21 @@ impl Status {
         // is the baseline for status path formatting, matching `git -C <path>`.
         let format = self.output_format();
         let project = get_project_path(self.dir)?;
+        // Config supplies the value for every option the user left unset.
+        let defaults = ConfigDefaults::read(&project.repo_root);
         let display_progress = std::io::stderr().is_terminal();
         // Ahead/behind detail follows Git’s enabled default. `--ahead-behind` is
         // accepted for CLI compatibility, while `--no-ahead-behind` disables it.
         let ahead_behind = !self.no_ahead_behind;
+        // clap keeps the two stash flags mutually exclusive, so neither being
+        // present is what hands the decision to `status.showStash`.
+        let show_stash = if self.show_stash {
+            true
+        } else if self.no_show_stash {
+            false
+        } else {
+            defaults.show_stash
+        };
         Ok(status(
             ResolvedStatusRequest {
                 project: &project,
@@ -385,12 +398,13 @@ impl Status {
                     format,
                     null_terminate: self.null_terminate,
                     ignore_submodules: self.ignore_submodules,
-                    untracked_files: self.untracked_files.unwrap_or_default(),
+                    untracked_files: self.untracked_files.unwrap_or(defaults.untracked_files),
                     ignored_files: self.ignored.unwrap_or_default(),
                     branch: self.branch,
                     ahead_behind,
-                    quote_path: self.quote_path,
-                    show_stash: self.show_stash,
+                    quote_path: self.quote_path.unwrap_or(defaults.quote_path),
+                    show_stash,
+                    relative_paths: defaults.relative_paths,
                 },
             },
             out,

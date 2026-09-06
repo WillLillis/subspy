@@ -278,6 +278,7 @@ const fn default_opts() -> OutputOpts {
         ahead_behind: true,
         quote_path: true,
         show_stash: false,
+        relative_paths: true,
     }
 }
 
