@@ -19,7 +19,7 @@ use subspy::{
     cli::get_project_path,
     entry::{INTERNAL_FLAG, subspy_entry},
     status::{
-        IgnoreSubmodules, IgnoredFiles, OutputFormat, OutputOpts, PorcelainVersion,
+        ConfigDefaults, IgnoreSubmodules, IgnoredFiles, OutputFormat, OutputOpts, PorcelainVersion,
         ResolvedStatusRequest, ShimStatusOutcome, StatusScope, UntrackedFiles, status_for_shim,
     },
 };
@@ -41,7 +41,7 @@ fn main() -> ExitCode {
     // fall through to real `git` so the consumer sees git's native
     // output and exit code instead of a `subspy-git: ...` error.
     if let Some(intercept) = dispatch(rest)
-        && let Some(exit) = shim_entry(intercept.into())
+        && let Some(exit) = shim_entry(intercept)
     {
         return exit;
     }
@@ -60,7 +60,7 @@ struct Intercept {
 /// Mirrors the subset of `git status` flags subspy can serve. Kept separate
 /// from `cli::Status` so it stays comparable in tests and never leaks
 /// subspy-only flags into the shim's surface.
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct StatusArgs {
     scope: StatusScope,
     format: Option<FormatChoice>,
@@ -74,7 +74,8 @@ struct StatusArgs {
     /// `--ahead-behind` or `--no-ahead-behind`. `None` uses git's default (on).
     /// This only affects formats that emit upstream ahead/behind info.
     ahead_behind: Option<bool>,
-    show_stash: bool,
+    /// `--show-stash` or `--no-show-stash`. `None` defers to `status.showStash`.
+    show_stash: Option<bool>,
 }
 
 /// User's explicit choice of `git status` output format. `None` in
@@ -90,33 +91,34 @@ enum FormatChoice {
 }
 
 struct ShimStatusRequest {
-    dir: Option<PathBuf>,
     scope: StatusScope,
     output: OutputOpts,
 }
 
-impl From<Intercept> for ShimStatusRequest {
-    fn from(value: Intercept) -> Self {
-        let format = match value.args.format {
+impl ShimStatusRequest {
+    /// Config supplies every option argv left unset, matching git's precedence.
+    /// Needs `defaults`, so it runs after the project path is resolved.
+    fn new(args: StatusArgs, quote_path: Option<bool>, defaults: ConfigDefaults) -> Self {
+        let format = match args.format {
             Some(FormatChoice::Short) => OutputFormat::Short,
             Some(FormatChoice::Porcelain(v)) => OutputFormat::Porcelain(v),
-            None if value.args.null_terminate => OutputFormat::Porcelain(PorcelainVersion::V1),
+            None if args.null_terminate => OutputFormat::Porcelain(PorcelainVersion::V1),
             Some(FormatChoice::Long) | None => OutputFormat::Long,
         };
         Self {
-            dir: value.chdir,
-            scope: value.args.scope,
+            scope: args.scope,
             output: OutputOpts {
                 format,
-                null_terminate: value.args.null_terminate,
-                ignore_submodules: value.args.ignore_submodules,
-                untracked_files: value.args.untracked_files.unwrap_or_default(),
-                ignored_files: value.args.ignored_files.unwrap_or_default(),
-                branch: value.args.branch,
-                ahead_behind: value.args.ahead_behind.unwrap_or(true),
-                // Set by parsing `-c core.quotepath=<bool>`. git's default is `true`
-                quote_path: value.quote_path.unwrap_or(true),
-                show_stash: value.args.show_stash,
+                null_terminate: args.null_terminate,
+                ignore_submodules: args.ignore_submodules,
+                untracked_files: args.untracked_files.unwrap_or(defaults.untracked_files),
+                ignored_files: args.ignored_files.unwrap_or_default(),
+                branch: args.branch,
+                ahead_behind: args.ahead_behind.unwrap_or(true),
+                // `-c core.quotepath=<bool>` beats the config file.
+                quote_path: quote_path.unwrap_or(defaults.quote_path),
+                show_stash: args.show_stash.unwrap_or(defaults.show_stash),
+                relative_paths: defaults.relative_paths,
             },
         }
     }
@@ -448,7 +450,11 @@ fn classify_status_arg(
     // --show-stash: append stash-count information. Long format gets a trailer
     // line, while  porcelain v2 with `--branch` gets `# stash N`.
     if arg == "--show-stash" {
-        out.show_stash = true;
+        out.show_stash = Some(true);
+        return Ok(());
+    }
+    if arg == "--no-show-stash" {
+        out.show_stash = Some(false);
         return Ok(());
     }
 
@@ -540,8 +546,15 @@ fn parse_ignored(s: &str) -> Option<IgnoredFiles> {
 /// Tries to serve the intercepted status request from subspy. Returns `Some(SUCCESS)`
 /// after producing a complete output. Errors return `None` so `main` can forward
 /// the original argc to the real git. Output remains buffered until success.
-fn shim_entry(status_args: ShimStatusRequest) -> Option<ExitCode> {
-    let project = get_project_path(status_args.dir).ok()?;
+fn shim_entry(intercept: Intercept) -> Option<ExitCode> {
+    let Intercept {
+        chdir,
+        quote_path,
+        args,
+    } = intercept;
+    let project = get_project_path(chdir).ok()?;
+    let status_args =
+        ShimStatusRequest::new(args, quote_path, ConfigDefaults::read(&project.repo_root));
     let mut buf: Vec<u8> = Vec::with_capacity(4 * 1024);
     let request = ResolvedStatusRequest {
         project: &project,
@@ -1028,7 +1041,7 @@ mod tests {
     #[test]
     fn show_stash_intercepts() {
         let got = dispatch(&os(&["status", "--show-stash"])).unwrap();
-        assert!(got.args.show_stash);
+        assert_eq!(got.args.show_stash, Some(true));
     }
 
     #[test]
@@ -1093,7 +1106,8 @@ mod tests {
     fn status_long_intercept_runs_default_long_renderer() {
         // `--long` is the default renderer in the shim request too.
         let intercept = dispatch(&os(&["status", "--long"])).unwrap();
-        let request: ShimStatusRequest = intercept.into();
+        let request =
+            ShimStatusRequest::new(intercept.args, intercept.quote_path, ConfigDefaults::GIT);
         assert!(matches!(request.output.format, OutputFormat::Long));
     }
 

@@ -20,6 +20,7 @@
 //! - [`quote`]: C-style path quoting (the `core.quotePath` semantics)
 
 mod case;
+mod config;
 mod conflict;
 mod display;
 mod effective_status;
@@ -57,6 +58,7 @@ use crate::{
 };
 
 pub use case::CaseSensitivity;
+pub use config::ConfigDefaults;
 pub use effective_status::Corrections;
 pub use pathspec::PathFilter;
 pub use relativize::Relativizer;
@@ -195,6 +197,10 @@ pub struct OutputOpts {
     /// `--show-stash`. Long format appends git's human readable stash trailer,
     /// while porcelain v2 with `--branch` emits `# stash N`.
     pub show_stash: bool,
+    /// `status.relativePaths` (default `true`). When `false`, paths stay
+    /// repo-root-relative in the formats that would otherwise report them
+    /// relative to the cwd. Config only: git has no flag for it.
+    pub relative_paths: bool,
 }
 
 /// Porcelain-specific format flags (`-z`, `--branch`, `--ahead-behind`,
@@ -458,7 +464,12 @@ fn assemble_status_scoped<R>(
     // - Porcelain v2: cwd-relative without `-z`, repo-root-relative
     //   with `-z` (where paths are stable identifiers).
     // - Short and long: cwd-relative.
-    let rel = relativize::Relativizer::new(&cwd_rel, opts.quote_path);
+    //
+    // An empty cwd is the repo root, so clearing it is what turns
+    // `status.relativePaths=false` into repo-root output. `cwd_rel` itself must
+    // stay intact: the cwd pathspec filter above is keyed on it.
+    let format_cwd: &[u8] = if opts.relative_paths { &cwd_rel } else { b"" };
+    let rel = relativize::Relativizer::new(format_cwd, opts.quote_path);
 
     let entries = StatusEntries {
         non_submod: &non_submod,
