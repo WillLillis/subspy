@@ -79,11 +79,13 @@ pub fn display_porcelain_v2(
 
     if branch {
         write_branch_headers(repo, out, ahead_behind, null_terminate)?;
-        if show_stash {
-            // Stashes are tracked via the `refs/stash` reflog: count
-            // entries to get the stash count. Missing reflog (no stashes
-            // ever made) means 0.
-            let count = repo.reflog("refs/stash").map_or(0, |r| r.len());
+    }
+    // Independent of `--branch`, and omitted entirely at zero. Stashes are
+    // tracked via the `refs/stash` reflog: count entries to get the stash
+    // count. Missing reflog (no stashes ever made) means 0.
+    if show_stash {
+        let count = repo.reflog("refs/stash").map_or(0, |r| r.len());
+        if count > 0 {
             write!(out, "# stash {count}{}", line_terminator(null_terminate))?;
         }
     }

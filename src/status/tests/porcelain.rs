@@ -36,7 +36,7 @@ use super::fixtures::{
     setup_staged_modified, setup_staged_new, setup_submodule_gitlink_conflict,
     setup_submodule_gitlink_conflict_dirty, setup_untracked, setup_untracked_in_dir,
     setup_upstream_ahead, setup_upstream_behind, setup_upstream_diverged, setup_upstream_gone,
-    setup_upstream_up_to_date,
+    setup_upstream_up_to_date, setup_with_stashes,
 };
 
 fn setup_empty_repo(root: &Path) {
@@ -201,6 +201,7 @@ const CASES: &[Case] = &[
         "skip-worktree absent + staged change",
         setup_skip_worktree_absent_with_staged_change,
     ),
+    plain("with stashes", setup_with_stashes),
     plain("renamed (staged)", setup_renamed_staged),
     // Staged rename, then the new file deleted from the worktree: `2 RD` with a
     // zero workdir mode. Guards the synthetic rename's worktree status + m_work.
@@ -413,6 +414,9 @@ fn git_status_args(opts: OutputOpts) -> Vec<String> {
     }
     if opts.branch {
         a.push("--branch".into());
+    }
+    if opts.show_stash {
+        a.push("--show-stash".into());
     }
     if !opts.ahead_behind {
         a.push("--no-ahead-behind".into());
@@ -739,6 +743,45 @@ fn v2_branch() {
         UntrackedFiles::Normal,
         IgnoredFiles::No,
     );
+    for c in CASES {
+        run_case(c, opts);
+    }
+}
+
+/// git emits `# stash <n>` whenever `--show-stash` is set and the count is
+/// above zero, independent of `--branch`. Most cases have no stashes, so this
+/// arm covers the suppression; `with stashes` covers the emission.
+#[test]
+fn v2_show_stash() {
+    let opts = OutputOpts {
+        format: OutputFormat::Porcelain(PorcelainVersion::V2),
+        null_terminate: false,
+        ignore_submodules: IgnoreSubmodules::None,
+        untracked_files: UntrackedFiles::Normal,
+        ignored_files: IgnoredFiles::No,
+        branch: false,
+        ahead_behind: true,
+        quote_path: true,
+        show_stash: true,
+    };
+    for c in CASES {
+        run_case(c, opts);
+    }
+}
+
+#[test]
+fn v2_branch_show_stash() {
+    let opts = OutputOpts {
+        format: OutputFormat::Porcelain(PorcelainVersion::V2),
+        null_terminate: false,
+        ignore_submodules: IgnoreSubmodules::None,
+        untracked_files: UntrackedFiles::Normal,
+        ignored_files: IgnoredFiles::No,
+        branch: true,
+        ahead_behind: true,
+        quote_path: true,
+        show_stash: true,
+    };
     for c in CASES {
         run_case(c, opts);
     }
