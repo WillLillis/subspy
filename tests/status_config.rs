@@ -163,6 +163,55 @@ fn show_stash_flag_overrides_config() {
     }
 }
 
+/// Detaches HEAD so the long-format header abbreviates an OID.
+fn repo_with_detached_head() -> TempDir {
+    let tmp = TempDir::new().unwrap();
+    init_repo(tmp.path());
+    std::fs::write(tmp.path().join("f.txt"), "a\n").unwrap();
+    commit_all(tmp.path(), "one");
+    std::fs::write(tmp.path().join("f.txt"), "b\n").unwrap();
+    commit_all(tmp.path(), "two");
+    git(tmp.path(), &["checkout", "-q", "HEAD~1"]);
+    tmp
+}
+
+#[test]
+fn core_abbrev() {
+    // 4 is git's minimum and `no` disables abbreviation. `auto` is the path
+    // taken when the key is unset, where the length comes from the object count.
+    for value in ["4", "7", "12", "40", "no", "auto"] {
+        let tmp = repo_with_detached_head();
+        git(tmp.path(), &["config", "core.abbrev", value]);
+        assert_all_agree(tmp.path(), &["status"]);
+    }
+}
+
+#[test]
+fn core_abbrev_unset() {
+    let tmp = repo_with_detached_head();
+    assert_all_agree(tmp.path(), &["status"]);
+}
+
+/// A worktree detached at creation has no `checkout:` reflog entry, so git has
+/// no target to name.
+#[test]
+fn detached_worktree_without_reflog() {
+    let tmp = repo_with_detached_head();
+    let linked = tmp.path().join("linked");
+    git(
+        tmp.path(),
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            linked.to_str().unwrap(),
+            "HEAD",
+        ],
+    );
+    assert_all_agree(&linked, &["status"]);
+}
+
 #[test]
 fn status_relative_paths() {
     // Only observable from a subdirectory, and never in porcelain v1 (always
