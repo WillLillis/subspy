@@ -304,10 +304,14 @@ fn print_unstaged_changes(
             // RENAMED before MODIFIED, matching the staged section above. (git
             // does not detect unstaged worktree renames, so WT_RENAMED does not
             // arise in practice, but keep the ordering consistent and correct.)
+            // An intent-to-add path is unstaged but reads as a new file, not a
+            // modification: git hides its index entry while the file exists.
+            let is_intent_to_add = corrections.intent_to_add.contains(entry.path_bytes());
             let istatus = match effective_status(entry.status(), entry.path_bytes(), corrections) {
                 Some(s) if s.contains(git2::Status::WT_RENAMED) => "renamed:    ",
-                Some(s) if s.contains(git2::Status::WT_MODIFIED) => "modified:   ",
                 Some(s) if s.contains(git2::Status::WT_DELETED) => "deleted:    ",
+                Some(_) if is_intent_to_add => "new file:   ",
+                Some(s) if s.contains(git2::Status::WT_MODIFIED) => "modified:   ",
                 Some(s) if s.contains(git2::Status::WT_TYPECHANGE) => "typechange: ",
                 _ => return Ok(()),
             };

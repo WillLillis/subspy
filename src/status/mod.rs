@@ -351,9 +351,8 @@ fn assemble_status_scoped<R>(
         FxHashSet::default()
     };
 
-    // Both status corrections only ever clear a `WT_DELETED`, so neither can
-    // apply without one. Cwd filtering needs `core.ignorecase` regardless, so
-    // read it once whenever either consumer needs it.
+    // Cwd filtering needs `core.ignorecase`, and so does the case-collision
+    // correction, so read it once whenever either consumer needs it.
     let has_worktree_delete = non_submod
         .iter()
         .any(|e| e.status().contains(git2::Status::WT_DELETED));
@@ -366,14 +365,7 @@ fn assemble_status_scoped<R>(
                 .and_then(|c| c.get_bool("core.ignorecase"))
                 .unwrap_or(false),
     );
-    let corrections = if has_worktree_delete {
-        Corrections {
-            phantom_deletes: effective_status::phantom_deletes(&non_submod, case_sensitivity),
-            skip_worktree: effective_status::skip_worktree_paths(&repo),
-        }
-    } else {
-        Corrections::default()
-    };
+    let corrections = Corrections::detect(&repo, &non_submod, case_sensitivity);
 
     let path_filter = match scope {
         StatusScope::All => PathFilter::all(),

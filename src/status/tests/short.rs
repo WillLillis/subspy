@@ -45,6 +45,16 @@ const CASES: &[Case] = &[
         branch: false,
     },
     Case {
+        name: "intent_to_add",
+        setup: Setup::Plain(setup_intent_to_add),
+        branch: false,
+    },
+    Case {
+        name: "intent_to_add_deleted",
+        setup: Setup::Plain(setup_intent_to_add_deleted),
+        branch: false,
+    },
+    Case {
         name: "skip_worktree_absent",
         setup: Setup::Plain(setup_skip_worktree_absent),
         branch: false,

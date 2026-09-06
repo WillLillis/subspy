@@ -180,6 +180,40 @@ pub(super) fn normalized_tracked_rows<'a>(
     rows
 }
 
+/// Builds the row git renders for an intent-to-add path.
+///
+/// While the file is present git hides the index entry, so nothing is staged
+/// and the worktree side reads as an addition against an empty index side.
+/// Once the file is gone it stops hiding it and reports a plain deletion, with
+/// HEAD falling back to the index entry it was previously hiding.
+fn intent_to_add_row(entry: &git2::StatusEntry<'_>, st: git2::Status) -> SyntheticOrdinary {
+    let path = entry.path_bytes().to_vec();
+    let modes = extract_modes_and_oids(entry, st);
+    if st.contains(git2::Status::WT_DELETED) {
+        SyntheticOrdinary {
+            x: '.',
+            y: 'D',
+            m_head: modes.m_idx,
+            m_idx: modes.m_idx,
+            m_work: 0,
+            h_head: modes.h_idx,
+            h_idx: modes.h_idx,
+            path,
+        }
+    } else {
+        SyntheticOrdinary {
+            x: '.',
+            y: 'A',
+            m_head: 0,
+            m_idx: 0,
+            m_work: modes.m_work,
+            h_head: git2::Oid::ZERO_SHA1,
+            h_idx: git2::Oid::ZERO_SHA1,
+            path,
+        }
+    }
+}
+
 /// Whether `st` is a tracked change the normalized stream renders as a file
 /// row: not clean, not untracked, not ignored. Conflicts pass this filter
 /// (they render as entry rows). `st` is the row's
@@ -211,6 +245,15 @@ fn collect_initial_tracked_rows<'a>(
     }) {
         if st.contains(git2::Status::CONFLICTED) {
             rows.push(TrackedRow::Entry(entry, st));
+        } else if entries
+            .corrections
+            .intent_to_add
+            .contains(entry.path_bytes())
+        {
+            // Ahead of the `INDEX_NEW` arm: libgit2 reports these as staged
+            // adds, but git hides the index entry from the HEAD-to-index diff,
+            // so they are not rename destinations.
+            rows.push(TrackedRow::SyntheticOrdinary(intent_to_add_row(&entry, st)));
         } else if st.contains(git2::Status::INDEX_NEW) {
             // `.contains`, not `==`: a staged add whose new file was also
             // changed in the worktree (`INDEX_NEW | WT_MODIFIED`, etc.) is still

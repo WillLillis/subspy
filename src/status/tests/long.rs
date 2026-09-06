@@ -42,6 +42,14 @@ const CASES: &[Case] = &[
         setup: Setup::Plain(setup_skip_worktree_absent),
     },
     Case {
+        name: "intent_to_add",
+        setup: Setup::Plain(setup_intent_to_add),
+    },
+    Case {
+        name: "intent_to_add_deleted",
+        setup: Setup::Plain(setup_intent_to_add_deleted),
+    },
+    Case {
         name: "sparse_checkout",
         setup: Setup::Plain(setup_sparse_checkout),
     },
