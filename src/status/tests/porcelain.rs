@@ -640,6 +640,7 @@ const fn opts_with(
         quote_path: true,
         show_stash: false,
         relative_paths: true,
+        status_hints: true,
     }
 }
 
@@ -846,6 +847,7 @@ fn v2_show_stash() {
         quote_path: true,
         show_stash: true,
         relative_paths: true,
+        status_hints: true,
     };
     for c in CASES {
         run_case(c, opts);
@@ -865,6 +867,7 @@ fn v2_branch_show_stash() {
         quote_path: true,
         show_stash: true,
         relative_paths: true,
+        status_hints: true,
     };
     for c in CASES {
         run_case(c, opts);
@@ -956,6 +959,7 @@ fn v1_quotepath_false() {
         quote_path: false,
         show_stash: false,
         relative_paths: true,
+        status_hints: true,
     };
     for c in CASES {
         run_case(c, opts);
@@ -975,6 +979,7 @@ fn v2_quotepath_false() {
         quote_path: false,
         show_stash: false,
         relative_paths: true,
+        status_hints: true,
     };
     for c in CASES {
         run_case(c, opts);
@@ -995,6 +1000,7 @@ fn v1_branch_no_ahead_behind() {
         quote_path: true,
         show_stash: false,
         relative_paths: true,
+        status_hints: true,
     };
     for c in CASES {
         run_case(c, opts);
@@ -1015,6 +1021,7 @@ fn v2_branch_no_ahead_behind() {
         quote_path: true,
         show_stash: false,
         relative_paths: true,
+        status_hints: true,
     };
     for c in CASES {
         run_case(c, opts);

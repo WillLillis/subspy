@@ -212,6 +212,78 @@ fn detached_worktree_without_reflog() {
     assert_all_agree(&linked, &["status"]);
 }
 
+/// Staged, unstaged, and untracked changes at once, so every long-format
+/// section header and its hints render.
+fn repo_with_all_sections() -> TempDir {
+    let tmp = TempDir::new().unwrap();
+    init_repo(tmp.path());
+    std::fs::write(tmp.path().join("tracked.txt"), "a\n").unwrap();
+    std::fs::write(tmp.path().join("gone.txt"), "c\n").unwrap();
+    commit_all(tmp.path(), "init");
+    std::fs::write(tmp.path().join("staged.txt"), "n\n").unwrap();
+    git(tmp.path(), &["add", "staged.txt"]);
+    git(tmp.path(), &["rm", "-q", "gone.txt"]);
+    std::fs::write(tmp.path().join("tracked.txt"), "modified\n").unwrap();
+    std::fs::write(tmp.path().join("untracked.txt"), "u\n").unwrap();
+    tmp
+}
+
+/// Leaves a conflicted merge in progress.
+fn repo_mid_merge() -> TempDir {
+    let tmp = TempDir::new().unwrap();
+    init_repo(tmp.path());
+    std::fs::write(tmp.path().join("f.txt"), "base\n").unwrap();
+    commit_all(tmp.path(), "base");
+    git(tmp.path(), &["branch", "feat"]);
+    std::fs::write(tmp.path().join("f.txt"), "master\n").unwrap();
+    commit_all(tmp.path(), "master");
+    git(tmp.path(), &["checkout", "-q", "feat"]);
+    std::fs::write(tmp.path().join("f.txt"), "feature\n").unwrap();
+    commit_all(tmp.path(), "feature");
+    git(tmp.path(), &["checkout", "-q", "master"]);
+    run("git", tmp.path(), &["merge", "feat", "--no-edit"]);
+    tmp
+}
+
+/// Only untracked files, which reaches the `nothing added to commit` trailer
+/// where the hint is an inline parenthetical rather than its own line.
+fn repo_untracked_only() -> TempDir {
+    let tmp = TempDir::new().unwrap();
+    init_repo(tmp.path());
+    std::fs::write(tmp.path().join("f.txt"), "a\n").unwrap();
+    commit_all(tmp.path(), "init");
+    std::fs::write(tmp.path().join("u.txt"), "u\n").unwrap();
+    tmp
+}
+
+/// Modified but nothing staged, for the `no changes added to commit` trailer.
+fn repo_unstaged_only() -> TempDir {
+    let tmp = TempDir::new().unwrap();
+    init_repo(tmp.path());
+    std::fs::write(tmp.path().join("f.txt"), "a\n").unwrap();
+    commit_all(tmp.path(), "init");
+    std::fs::write(tmp.path().join("f.txt"), "b\n").unwrap();
+    tmp
+}
+
+#[test]
+fn advice_status_hints() {
+    let fixtures: [fn() -> TempDir; 5] = [
+        repo_with_all_sections,
+        repo_mid_merge,
+        repo_untracked_only,
+        repo_unstaged_only,
+        repo_with_detached_head,
+    ];
+    for build in fixtures {
+        for value in ["true", "false"] {
+            let tmp = build();
+            git(tmp.path(), &["config", "advice.statusHints", value]);
+            assert_all_agree(tmp.path(), &["status"]);
+        }
+    }
+}
+
 #[test]
 fn status_relative_paths() {
     // Only observable from a subdirectory, and never in porcelain v1 (always
