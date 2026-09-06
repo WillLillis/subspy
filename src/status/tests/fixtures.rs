@@ -35,6 +35,43 @@ pub fn setup_clean(root: &Path) {
         .commit("initial");
 }
 
+/// A CRLF rename that lands just under git's threshold. Git excludes a CR
+/// before a LF from the copied byte count while leaving it in the size
+/// denominator, so a rename that pairs with LF endings splits with CRLF.
+pub fn setup_crlf_rename_below_threshold(root: &Path) {
+    crlf_rename(root, b"");
+}
+
+/// The same content with a leading NUL, which makes it binary. Git counts CRs
+/// for binary blobs, so this one pairs where the text version splits.
+pub fn setup_crlf_rename_binary(root: &Path) {
+    crlf_rename(root, b"\0");
+}
+
+/// 20 CRLF lines, 12 kept: 84 copied bytes over 184 with the CRs excluded
+/// (splits), 96 over 184 with them counted (pairs).
+fn crlf_rename(root: &Path, prefix: &[u8]) {
+    let line = |tag: &str, i: usize| format!("{tag}{i:02}\r\n").into_bytes();
+    let mut old = prefix.to_vec();
+    for i in 0..20 {
+        old.extend(line("line", i));
+    }
+    let mut new = prefix.to_vec();
+    for i in 0..12 {
+        new.extend(line("line", i));
+    }
+    for i in 0..8 {
+        new.extend(line("CHANGED", i));
+    }
+    let repo = Repo::init(root);
+    repo.run_git(&["config", "core.autocrlf", "false"]);
+    std::fs::write(root.join("old.txt"), &old).unwrap();
+    repo.add_all().commit("initial");
+    std::fs::remove_file(root.join("old.txt")).unwrap();
+    std::fs::write(root.join("new.txt"), &new).unwrap();
+    repo.add_all();
+}
+
 /// `git add -N`: a normal index entry (mode 100644, empty blob) carrying
 /// `INTENT_TO_ADD`. Git hides it from the HEAD->index diff, so the path reads
 /// as added in the worktree rather than staged.
