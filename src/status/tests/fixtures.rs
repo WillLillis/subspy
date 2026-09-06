@@ -35,6 +35,25 @@ pub fn setup_clean(root: &Path) {
         .commit("initial");
 }
 
+/// `git add -N`: a normal index entry (mode 100644, empty blob) carrying
+/// `INTENT_TO_ADD`. Git hides it from the HEAD->index diff, so the path reads
+/// as added in the worktree rather than staged.
+pub fn setup_intent_to_add(root: &Path) {
+    let repo = Repo::init(root);
+    repo.write("tracked.txt", "base\n")
+        .add_all()
+        .commit("initial");
+    repo.write("n.txt", "new content\n");
+    repo.run_git(&["add", "-N", "n.txt"]);
+}
+
+/// An intent-to-add path removed from the worktree. Git stops hiding the index
+/// entry here and reports a plain worktree deletion against it.
+pub fn setup_intent_to_add_deleted(root: &Path) {
+    setup_intent_to_add(root);
+    std::fs::remove_file(root.join("n.txt")).unwrap();
+}
+
 pub fn setup_path_with_space(root: &Path) {
     setup_clean(root);
     Repo::new(root).write("has space.txt", "x\n");

@@ -409,7 +409,7 @@ fn write_synthetic_ordinary_line(
     style: &LineStyle,
 ) -> io::Result<()> {
     let (x_color, y_color) = ordinary_colors(style);
-    let x = XyChar::new(row.x, x_color);
+    let x = XyChar::new(blank_dot(row.x), x_color);
     let y = XyChar::new(blank_dot(row.y), y_color);
     write_xy_path(out, x, y, &row.path, rel, null_terminate, style)
 }
