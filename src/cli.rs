@@ -405,6 +405,7 @@ impl Status {
                     quote_path: self.quote_path.unwrap_or(defaults.quote_path),
                     show_stash,
                     relative_paths: defaults.relative_paths,
+                    status_hints: defaults.status_hints,
                 },
             },
             out,

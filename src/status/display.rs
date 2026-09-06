@@ -3,7 +3,10 @@
 use git2::{Repository, Statuses};
 use rustc_hash::FxHashSet;
 
-use std::io::{self, Write};
+use std::{
+    borrow::Cow,
+    io::{self, Write},
+};
 
 use crate::{
     StatusSummary,
@@ -20,26 +23,41 @@ use super::{
     tracked::{TrackedOrSubRow, TrackedRow, for_each_tracked_row, normalized_tracked_rows},
 };
 
-const STAGED_HEADER: &str = "Changes to be committed:
+/// Section headers come in hinted and bare forms, selected by
+/// `advice.statusHints`. git drops only the `(use "git ...")` lines; the title
+/// and the blank lines around a section stay either way.
+const STAGED_HEADER: &str = "Changes to be committed:";
+const STAGED_HEADER_HINTED: &str = "Changes to be committed:
   (use \"git restore --staged <file>...\" to unstage)";
 
-/// Staged-section header when HEAD is unborn: there's no commit to restore
-/// from, so git tells you to use `git rm --cached` to unstage.
-const STAGED_HEADER_UNBORN: &str = "Changes to be committed:
+/// Unborn HEAD has no commit to restore from, so git points at `git rm --cached`.
+const STAGED_HEADER_UNBORN_HINTED: &str = "Changes to be committed:
   (use \"git rm --cached <file>...\" to unstage)";
 
-const UNTRACKED_HEADER: &str = "Untracked files:
+const UNTRACKED_HEADER: &str = "Untracked files:";
+const UNTRACKED_HEADER_HINTED: &str = "Untracked files:
   (use \"git add <file>...\" to include in what will be committed)";
 
-const IGNORED_HEADER: &str = "Ignored files:
+const IGNORED_HEADER: &str = "Ignored files:";
+const IGNORED_HEADER_HINTED: &str = "Ignored files:
   (use \"git add -f <file>...\" to include in what will be committed)";
 
 const UNREADABLE_HEADER: &str = "Submodules with unreadable status:
   (use \"git -C <path> status\" to see the underlying error)";
 
-fn unstaged_header(rm_in_workdir: bool, has_submod_changes: bool) -> String {
-    format!(
-        "Changes not staged for commit:
+/// The only header whose hints vary with repository state, so the only one
+/// that cannot be a constant.
+fn unstaged_header(
+    rm_in_workdir: bool,
+    has_submod_changes: bool,
+    status_hints: bool,
+) -> Cow<'static, str> {
+    const TITLE: &str = "Changes not staged for commit:";
+    if !status_hints {
+        return Cow::Borrowed(TITLE);
+    }
+    Cow::Owned(format!(
+        "{TITLE}
   (use \"git add{} <file>...\" to update what will be committed)
   (use \"git restore <file>...\" to discard changes in working directory){}",
         if rm_in_workdir { "/rm" } else { "" },
@@ -48,7 +66,7 @@ fn unstaged_header(rm_in_workdir: bool, has_submod_changes: bool) -> String {
         } else {
             ""
         }
-    )
+    ))
 }
 
 /// Returns `true` if `st` should appear in the "Changes to be committed" section.
@@ -114,15 +132,10 @@ fn print_staged_changes(
     deleted_submodule_paths: &[String],
     renamed_submodules: &[super::SubmoduleRename],
     rel: &Relativizer<'_>,
-    is_unborn: bool,
+    staged_header: &str,
     out: &mut impl Write,
 ) -> Result<bool, io::Error> {
     let mut header = false;
-    let staged_header = if is_unborn {
-        STAGED_HEADER_UNBORN
-    } else {
-        STAGED_HEADER
-    };
 
     // git lists staged files and staged submodule changes (modified/new,
     // deleted, renamed) in one path-sorted stream. The file rows come
@@ -264,13 +277,10 @@ fn print_unstaged_changes(
     corrections: &Corrections,
     path_filter: PathFilter<'_>,
     submodule_statuses: &[(String, StatusSummary)],
-    rm_in_workdir: bool,
+    unstaged_header: &str,
     rel: &Relativizer<'_>,
     out: &mut impl Write,
 ) -> Result<bool, io::Error> {
-    let has_submod_changes = submodule_statuses
-        .iter()
-        .any(|(_, st)| has_workdir_changes(*st));
     let mut header = false;
 
     // git lists unstaged file changes and dirty submodules in one path-sorted
@@ -316,11 +326,7 @@ fn print_unstaged_changes(
                 _ => return Ok(()),
             };
             if !header {
-                writeln!(
-                    out,
-                    "{}",
-                    unstaged_header(rm_in_workdir, has_submod_changes)
-                )?;
+                writeln!(out, "{unstaged_header}")?;
                 header = true;
             }
             let old_path = workdir.old_file().path_bytes();
@@ -346,11 +352,7 @@ fn print_unstaged_changes(
         }
         Row::Sub(SubRow::Modified(submod_path, submod_status)) => {
             if !header {
-                writeln!(
-                    out,
-                    "{}",
-                    unstaged_header(rm_in_workdir, has_submod_changes)
-                )?;
+                writeln!(out, "{unstaged_header}")?;
                 header = true;
             }
             let label = unstaged_label(submod_status);
@@ -381,6 +383,7 @@ fn print_untracked_files(
     conflicted_paths: &FxHashSet<Vec<u8>>,
     path_filter: PathFilter<'_>,
     rel: &Relativizer<'_>,
+    status_hints: bool,
     out: &mut impl Write,
 ) -> Result<bool, io::Error> {
     let mut header = false;
@@ -401,7 +404,12 @@ fn print_untracked_files(
             continue;
         }
         if !header {
-            writeln!(out, "{UNTRACKED_HEADER}")?;
+            let header_text = if status_hints {
+                UNTRACKED_HEADER_HINTED
+            } else {
+                UNTRACKED_HEADER
+            };
+            writeln!(out, "{header_text}")?;
             header = true;
         }
         out.write_all(b"\t")?;
@@ -419,6 +427,7 @@ fn print_ignored_files(
     non_submod: &Statuses<'_>,
     path_filter: PathFilter<'_>,
     rel: &Relativizer<'_>,
+    status_hints: bool,
     out: &mut impl Write,
 ) -> Result<(), io::Error> {
     let mut header = false;
@@ -432,7 +441,12 @@ fn print_ignored_files(
             continue;
         };
         if !header {
-            writeln!(out, "{IGNORED_HEADER}")?;
+            let header_text = if status_hints {
+                IGNORED_HEADER_HINTED
+            } else {
+                IGNORED_HEADER
+            };
+            writeln!(out, "{header_text}")?;
             header = true;
         }
         out.write_all(b"\t")?;
@@ -478,6 +492,10 @@ struct SummaryState {
     has_untracked: bool,
     has_unreadable: bool,
     is_unborn: bool,
+    /// Trailers carry their guidance as a trailing parenthetical rather than on
+    /// its own line, so `advice.statusHints` trims the sentence instead of
+    /// dropping the whole row.
+    status_hints: bool,
 }
 
 /// Prints the footer hint (e.g. "nothing added to commit but untracked files present").
@@ -488,31 +506,44 @@ fn print_summary(state: &SummaryState, out: &mut impl Write) -> Result<(), io::E
         has_untracked,
         has_unreadable,
         is_unborn,
+        status_hints,
     } = state;
     match (changes_in_index, changed_in_workdir, has_untracked) {
         (false, true, _) => {
-            writeln!(
-                out,
-                "no changes added to commit (use \"git add\" and/or \"git commit -a\")"
-            )?;
+            if status_hints {
+                writeln!(
+                    out,
+                    "no changes added to commit (use \"git add\" and/or \"git commit -a\")"
+                )?;
+            } else {
+                writeln!(out, "no changes added to commit")?;
+            }
         }
         // Nothing observed changed. Stay silent when a submodule couldn't be read, we can't claim
         // a clean tree here.
         (false, false, false) if !has_unreadable => {
             if is_unborn {
-                writeln!(
-                    out,
-                    "nothing to commit (create/copy files and use \"git add\" to track)"
-                )?;
+                if status_hints {
+                    writeln!(
+                        out,
+                        "nothing to commit (create/copy files and use \"git add\" to track)"
+                    )?;
+                } else {
+                    writeln!(out, "nothing to commit")?;
+                }
             } else {
                 writeln!(out, "nothing to commit, working tree clean")?;
             }
         }
         (false, false, true) => {
-            writeln!(
-                out,
-                "nothing added to commit but untracked files present (use \"git add\" to track)"
-            )?;
+            if status_hints {
+                writeln!(
+                    out,
+                    "nothing added to commit but untracked files present (use \"git add\" to track)"
+                )?;
+            } else {
+                writeln!(out, "nothing added to commit but untracked files present")?;
+            }
         }
         _ => {}
     }
@@ -528,8 +559,7 @@ pub fn display_status(
     repo: &Repository,
     entries: &StatusEntries<'_>,
     rel: &Relativizer<'_>,
-    ahead_behind: bool,
-    show_stash: bool,
+    opts: super::LongOpts,
 ) -> StatusResult<()> {
     let StatusEntries {
         non_submod,
@@ -550,7 +580,7 @@ pub fn display_status(
         .err()
         .is_some_and(|e| e.code() == git2::ErrorCode::UnbornBranch);
 
-    print_header(repo, out, ahead_behind)?;
+    print_header(repo, out, opts.ahead_behind, opts.status_hints)?;
 
     let rm_in_workdir = non_submod.iter().any(|e| {
         path_filter.keeps(e.path_bytes())
@@ -560,6 +590,14 @@ pub fn display_status(
         .iter()
         .any(|(_, st)| st.contains(StatusSummary::DELETED_WORKDIR));
 
+    let staged_header = match (opts.status_hints, is_unborn) {
+        (true, true) => STAGED_HEADER_UNBORN_HINTED,
+        (true, false) => STAGED_HEADER_HINTED,
+        (false, _) => STAGED_HEADER,
+    };
+    let has_submod_changes = submodules.iter().any(|(_, st)| has_workdir_changes(*st));
+    let unstaged = unstaged_header(rm_in_workdir, has_submod_changes, opts.status_hints);
+
     let tracked_rows = normalized_tracked_rows(repo, entries);
     let changes_in_index = print_staged_changes(
         tracked_rows,
@@ -567,21 +605,28 @@ pub fn display_status(
         deleted_submodules,
         renamed_submodules,
         rel,
-        is_unborn,
+        staged_header,
         out,
     )?;
-    let has_conflicts = print_unmerged_paths(repo, path_filter, rel, out)?;
+    let has_conflicts = print_unmerged_paths(repo, path_filter, rel, opts.status_hints, out)?;
     let changed_in_workdir = print_unstaged_changes(
         non_submod,
         corrections,
         path_filter,
         submodules,
-        rm_in_workdir,
+        &unstaged,
         rel,
         out,
     )?;
-    let has_untracked = print_untracked_files(non_submod, conflicted_paths, path_filter, rel, out)?;
-    print_ignored_files(non_submod, path_filter, rel, out)?;
+    let has_untracked = print_untracked_files(
+        non_submod,
+        conflicted_paths,
+        path_filter,
+        rel,
+        opts.status_hints,
+        out,
+    )?;
+    print_ignored_files(non_submod, path_filter, rel, opts.status_hints, out)?;
     let has_unreadable = print_unreadable_submodules(submodules, out)?;
 
     print_summary(
@@ -591,11 +636,12 @@ pub fn display_status(
             has_untracked,
             has_unreadable,
             is_unborn,
+            status_hints: opts.status_hints,
         },
         out,
     )?;
 
-    if show_stash {
+    if opts.show_stash {
         print_stash_trailer(repo, out)?;
     }
 

@@ -12,6 +12,7 @@ use super::UntrackedFiles;
 
 /// The [`super::OutputOpts`] values git takes from config when no flag sets them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[expect(clippy::struct_excessive_bools, reason = "matches git")]
 pub struct ConfigDefaults {
     /// `status.showUntrackedFiles`
     pub untracked_files: UntrackedFiles,
@@ -21,6 +22,8 @@ pub struct ConfigDefaults {
     pub show_stash: bool,
     /// `status.relativePaths`
     pub relative_paths: bool,
+    /// `advice.statusHints`
+    pub status_hints: bool,
 }
 
 impl ConfigDefaults {
@@ -30,6 +33,7 @@ impl ConfigDefaults {
         quote_path: true,
         show_stash: false,
         relative_paths: true,
+        status_hints: true,
     };
 
     /// Reads the defaults from the effective config for `repo_root`, which
@@ -50,6 +54,9 @@ impl ConfigDefaults {
             relative_paths: config
                 .get_bool("status.relativePaths")
                 .unwrap_or(Self::GIT.relative_paths),
+            status_hints: config
+                .get_bool("advice.statusHints")
+                .unwrap_or(Self::GIT.status_hints),
         }
     }
 }

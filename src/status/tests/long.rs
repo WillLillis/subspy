@@ -13,8 +13,8 @@ use crate::{
     RepoKind,
     cli::ProjectPath,
     status::{
-        IgnoreSubmodules, IgnoredFiles, OutputFormat, OutputOpts, UntrackedFiles, assemble_status,
-        compute_local_statuses, display::display_status,
+        IgnoreSubmodules, IgnoredFiles, LongOpts, OutputFormat, OutputOpts, UntrackedFiles,
+        assemble_status, compute_local_statuses, display::display_status,
     },
 };
 
@@ -279,6 +279,7 @@ const fn default_opts() -> OutputOpts {
         quote_path: true,
         show_stash: false,
         relative_paths: true,
+        status_hints: true,
     }
 }
 
@@ -290,8 +291,11 @@ fn snapshot_path(case_name: &str) -> PathBuf {
 
 fn run_subspy_long(project: &ProjectPath, opts: OutputOpts) -> Vec<u8> {
     crate::paint::force_disable();
-    let ahead_behind = opts.ahead_behind;
-    let show_stash = opts.show_stash;
+    let long_opts = LongOpts {
+        ahead_behind: opts.ahead_behind,
+        show_stash: opts.show_stash,
+        status_hints: opts.status_hints,
+    };
     let has_submodules = project.kind.has_submodules();
     assemble_status(
         project,
@@ -305,7 +309,7 @@ fn run_subspy_long(project: &ProjectPath, opts: OutputOpts) -> Vec<u8> {
         },
         |repo, entries, rel| {
             let mut got: Vec<u8> = Vec::new();
-            display_status(&mut got, repo, entries, rel, ahead_behind, show_stash)?;
+            display_status(&mut got, repo, entries, rel, long_opts)?;
             Ok(got)
         },
     )

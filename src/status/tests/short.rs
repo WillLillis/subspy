@@ -278,6 +278,7 @@ fn opts_for(branch: bool) -> OutputOpts {
         quote_path: true,
         show_stash: false,
         relative_paths: true,
+        status_hints: true,
     }
 }
 

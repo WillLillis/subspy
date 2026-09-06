@@ -201,6 +201,17 @@ pub struct OutputOpts {
     /// repo-root-relative in the formats that would otherwise report them
     /// relative to the cwd. Config only: git has no flag for it.
     pub relative_paths: bool,
+    /// `advice.statusHints` (default `true`). When `false`, long format drops
+    /// its `(use "git ...")` guidance. Config only: git has no flag for it.
+    pub status_hints: bool,
+}
+
+/// Long-format flags (`--ahead-behind`, `--show-stash`, `advice.statusHints`).
+#[derive(Debug, Clone, Copy)]
+pub struct LongOpts {
+    pub ahead_behind: bool,
+    pub show_stash: bool,
+    pub status_hints: bool,
 }
 
 /// Porcelain-specific format flags (`-z`, `--branch`, `--ahead-behind`,
@@ -587,9 +598,12 @@ fn render_status(
         quote_path: opts.quote_path,
         show_stash: opts.show_stash,
     };
+    let long_opts = LongOpts {
+        ahead_behind: opts.ahead_behind,
+        show_stash: opts.show_stash,
+        status_hints: opts.status_hints,
+    };
     let format = opts.format;
-    let ahead_behind = opts.ahead_behind;
-    let show_stash = opts.show_stash;
     let ignore_submodules = opts.ignore_submodules;
     let kind = project.kind;
 
@@ -608,7 +622,7 @@ fn render_status(
         |repo, entries, rel| {
             match format {
                 OutputFormat::Long => {
-                    display::display_status(out, repo, entries, rel, ahead_behind, show_stash)?;
+                    display::display_status(out, repo, entries, rel, long_opts)?;
                 }
                 OutputFormat::Short => {
                     short::display_short(out, repo, entries, rel, porcelain_opts)?;

@@ -119,6 +119,7 @@ impl ShimStatusRequest {
                 quote_path: quote_path.unwrap_or(defaults.quote_path),
                 show_stash: args.show_stash.unwrap_or(defaults.show_stash),
                 relative_paths: defaults.relative_paths,
+                status_hints: defaults.status_hints,
             },
         }
     }
