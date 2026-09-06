@@ -471,6 +471,34 @@ pub fn setup_skip_worktree_absent_with_staged_change(root: &Path) {
     std::fs::remove_file(root.join("a.txt")).unwrap();
 }
 
+/// Staged, unstaged, and untracked changes at once, so every long-format
+/// section header renders in one snapshot.
+pub fn setup_all_sections(root: &Path) {
+    let repo = Repo::init(root);
+    repo.write("tracked.txt", "a\n")
+        .write("gone.txt", "c\n")
+        .add_all()
+        .commit("initial")
+        .write("staged.txt", "n\n")
+        .add("staged.txt")
+        .rm_tracked("gone.txt")
+        .write("tracked.txt", "modified\n")
+        .write("untracked.txt", "u\n");
+}
+
+/// Detached at an OID with `core.abbrev` set, so the header abbreviates to a
+/// configured width rather than the default.
+pub fn setup_detached_abbrev_configured(root: &Path) {
+    let repo = Repo::init(root);
+    repo.write("file.txt", "one\n").add_all().commit("one");
+    repo.run_git(&["update-ref", "refs/tags/first", "HEAD"]);
+    repo.write("file.txt", "two\n").add_all().commit("two");
+    repo.run_git(&["config", "core.abbrev", "12"]);
+    // Detach onto the OID, not the tag: git echoes a ref name back when the
+    // reflog target resolves to one, and only abbreviates otherwise.
+    repo.run_git(&["checkout", "--detach", "refs/tags/first^{commit}"]);
+}
+
 pub fn setup_bisect(root: &Path) {
     let repo = Repo::init(root);
     repo.write("a.txt", "one\n").add_all().commit("one");

@@ -70,6 +70,9 @@ pub struct Status {
     /// Use short format (`XY PATH`, colored)
     #[arg(short, long, conflicts_with = "porcelain")]
     pub short: bool,
+    /// Use the long format (git's default), overriding `status.short`.
+    #[arg(long, conflicts_with_all = ["short", "porcelain", "null_terminate"])]
+    pub long: bool,
     /// Terminate entries with NUL instead of newline
     #[arg(short = 'z')]
     pub null_terminate: bool,
@@ -347,15 +350,28 @@ impl Status {
     /// Translates the mutually-exclusive `--short` / `--porcelain` flags
     /// to the internal `OutputFormat`. Clap rejects the
     /// `short && porcelain.is_some()` combination at parse time.
-    const fn output_format(&self) -> OutputFormat {
-        if self.short {
+    /// The format an explicit flag selects, else the one `status.short` asks
+    /// for, else long.
+    #[expect(clippy::fn_params_excessive_bools, reason = "matches git")]
+    const fn output_format(
+        short: bool,
+        long: bool,
+        porcelain: Option<PorcelainVersion>,
+        null_terminate: bool,
+        config_short: bool,
+    ) -> OutputFormat {
+        if short {
             OutputFormat::Short
-        } else if let Some(v) = self.porcelain {
+        } else if let Some(v) = porcelain {
             OutputFormat::Porcelain(v)
-        } else if self.null_terminate {
+        } else if long {
+            OutputFormat::Long
+        } else if null_terminate {
             // Bare `-z` implies porcelain v1's NUL-delimited machine output, matching
             // `git status -z`. The shim  also routes `git status -z` through this path.
             OutputFormat::Porcelain(PorcelainVersion::V1)
+        } else if config_short {
+            OutputFormat::Short
         } else {
             OutputFormat::Long
         }
@@ -372,10 +388,19 @@ impl Status {
     pub fn run(self, out: &mut impl io::Write) -> RunResult<()> {
         // `effective_cwd` is the canonicalized `--dir` value or process cwd. It
         // is the baseline for status path formatting, matching `git -C <path>`.
-        let format = self.output_format();
         let project = get_project_path(self.dir)?;
         // Config supplies the value for every option the user left unset.
         let defaults = ConfigDefaults::read(&project.repo_root);
+        let format = Self::output_format(
+            self.short,
+            self.long,
+            self.porcelain,
+            self.null_terminate,
+            defaults.short,
+        );
+        // `status.branch` reaches the short format only. Porcelain headers stay
+        // behind an explicit `--branch`, as in git.
+        let branch = self.branch || (defaults.branch && format == OutputFormat::Short);
         let display_progress = std::io::stderr().is_terminal();
         // Ahead/behind detail follows Git’s enabled default. `--ahead-behind` is
         // accepted for CLI compatibility, while `--no-ahead-behind` disables it.
@@ -400,7 +425,7 @@ impl Status {
                     ignore_submodules: self.ignore_submodules,
                     untracked_files: self.untracked_files.unwrap_or(defaults.untracked_files),
                     ignored_files: self.ignored.unwrap_or_default(),
-                    branch: self.branch,
+                    branch,
                     ahead_behind,
                     quote_path: self.quote_path.unwrap_or(defaults.quote_path),
                     show_stash,

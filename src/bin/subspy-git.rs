@@ -103,6 +103,7 @@ impl ShimStatusRequest {
             Some(FormatChoice::Short) => OutputFormat::Short,
             Some(FormatChoice::Porcelain(v)) => OutputFormat::Porcelain(v),
             None if args.null_terminate => OutputFormat::Porcelain(PorcelainVersion::V1),
+            None if defaults.short => OutputFormat::Short,
             Some(FormatChoice::Long) | None => OutputFormat::Long,
         };
         Self {
@@ -113,7 +114,9 @@ impl ShimStatusRequest {
                 ignore_submodules: args.ignore_submodules,
                 untracked_files: args.untracked_files.unwrap_or(defaults.untracked_files),
                 ignored_files: args.ignored_files.unwrap_or_default(),
-                branch: args.branch,
+                // `status.branch` reaches the short format only. Porcelain
+                // headers stay behind an explicit `--branch`, as in git.
+                branch: args.branch || (defaults.branch && format == OutputFormat::Short),
                 ahead_behind: args.ahead_behind.unwrap_or(true),
                 // `-c core.quotepath=<bool>` beats the config file.
                 quote_path: quote_path.unwrap_or(defaults.quote_path),
@@ -337,7 +340,20 @@ where
 /// Records the chosen output format. Repeating the same format is idempotent,
 /// matching `git status --long --long`. Conflicting choices forward to the real
 /// git for its native error.
+/// git rejects `--long` together with `-z`, so the pair forwards and lets git
+/// report it. Checked from both sides, since either flag can come first.
+fn set_null_terminate(out: &mut StatusArgs) -> Result<(), Forward> {
+    if out.format == Some(FormatChoice::Long) {
+        return Err(Forward);
+    }
+    out.null_terminate = true;
+    Ok(())
+}
+
 fn set_format(out: &mut StatusArgs, choice: FormatChoice) -> Result<(), Forward> {
+    if choice == FormatChoice::Long && out.null_terminate {
+        return Err(Forward);
+    }
     if let Some(existing) = out.format {
         if existing == choice {
             Ok(())
@@ -403,8 +419,7 @@ fn classify_status_arg(
     }
 
     if arg == "-z" {
-        out.null_terminate = true;
-        return Ok(());
+        return set_null_terminate(out);
     }
 
     // --ignore-submodules[=WHEN]
@@ -491,7 +506,7 @@ fn parse_short_status_bundle(arg: &str, out: &mut StatusArgs) -> Result<(), Forw
         match flag {
             b's' => set_format(out, FormatChoice::Short)?,
             b'b' => out.branch = true,
-            b'z' => out.null_terminate = true,
+            b'z' => set_null_terminate(out)?,
             b'u' => {
                 out.untracked_files = Some(if rest.is_empty() {
                     UntrackedFiles::All
@@ -1116,6 +1131,16 @@ mod tests {
     fn status_short_then_long_forwards() {
         assert!(dispatch(&os(&["status", "--short", "--long"])).is_none());
         assert!(dispatch(&os(&["status", "-s", "--long"])).is_none());
+    }
+
+    /// git rejects `--long` with `-z`, in either order and however `-z`
+    /// arrives, so forwarding lets it report that itself.
+    #[test]
+    fn long_with_null_terminate_forwards() {
+        assert!(dispatch(&os(&["status", "--long", "-z"])).is_none());
+        assert!(dispatch(&os(&["status", "-z", "--long"])).is_none());
+        assert!(dispatch(&os(&["status", "-uz", "--long"])).is_none());
+        assert!(dispatch(&os(&["status", "-z", "--short"])).is_some());
     }
 
     #[test]
