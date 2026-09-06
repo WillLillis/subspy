@@ -14,7 +14,7 @@
 
 use std::{
     fmt::{self, Display},
-    io::{self, Write},
+    io::{self, IsTerminal as _, Write},
     sync::atomic::{AtomicU8, Ordering},
 };
 
@@ -40,9 +40,8 @@ impl From<u8> for ColorState {
 
 static COLOR_STATE: AtomicU8 = AtomicU8::new(ColorState::Unset as u8);
 
-/// Returns whether color is enabled under the `NO_COLOR` convetion (<https://no-color.org>).
-/// The result is cached after the first call, so subsequent paint emissions use
-/// an atomic read.
+/// Returns whether color is enabled under the `NO_COLOR` convention (<https://no-color.org>)
+/// and git's `color.ui=auto` default, which only colors a terminal.
 ///
 /// Tests can override the cache via [`force_disable`]. The atomic store replaces
 /// the environment-derived value and keeps snapshots deterministic across test
@@ -52,7 +51,8 @@ fn color_enabled() -> bool {
         ColorState::Enabled => true,
         ColorState::Disabled => false,
         ColorState::Unset => {
-            let enabled = std::env::var_os("NO_COLOR").is_none_or(|v| v.is_empty());
+            let enabled = std::env::var_os("NO_COLOR").is_none_or(|v| v.is_empty())
+                && std::io::stdout().is_terminal();
             let state = if enabled {
                 ColorState::Enabled
             } else {
