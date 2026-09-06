@@ -35,6 +35,11 @@ pub fn setup_clean(root: &Path) {
         .commit("initial");
 }
 
+pub fn setup_path_with_space(root: &Path) {
+    setup_clean(root);
+    Repo::new(root).write("has space.txt", "x\n");
+}
+
 pub fn setup_modified_workdir(root: &Path) {
     setup_clean(root);
     Repo::new(root).write("file.txt", "modified\n");
