@@ -6,12 +6,12 @@
 //! git uses, plus the `On branch X` / `HEAD detached at Y` line and
 //! upstream tracking summary for the normal case.
 
-use git2::Repository;
+use git2::{Oid, Repository};
 
 use std::{
     cmp::Ordering,
     fs,
-    io::{self, Write},
+    io::{self, Read as _, Seek as _, Write},
     path::Path,
 };
 
@@ -21,9 +21,114 @@ use super::{
     PathFilter, StatusResult, effective_status::is_skip_worktree, relativize::Relativizer,
 };
 
-/// Length of the short-OID prefix git uses in `status` output (matches
-/// `core.abbrev`'s default of 7 hex chars).
-const SHORT_OID_LEN: usize = 7;
+/// A full SHA-1 in hex, which is what `core.abbrev=no` asks for.
+const HEX_OID_LEN: usize = 40;
+
+/// git rejects a shorter `core.abbrev` than this.
+const MIN_ABBREV: usize = 4;
+
+/// The floor git's automatic length never drops below.
+const FALLBACK_ABBREV: usize = 7;
+
+/// The short-OID length git uses in `status` output, resolved at most once.
+///
+/// Only detached-HEAD and in-progress-operation headers abbreviate anything, so
+/// a repo sitting on a branch never pays for the object count.
+struct Abbrev<'r> {
+    repo: &'r Repository,
+    base: std::cell::OnceCell<usize>,
+}
+
+impl<'r> Abbrev<'r> {
+    const fn new(repo: &'r Repository) -> Self {
+        Self {
+            repo,
+            base: std::cell::OnceCell::new(),
+        }
+    }
+
+    fn base(&self) -> usize {
+        *self.base.get_or_init(|| {
+            self.repo
+                .config()
+                .ok()
+                .and_then(|config| configured_abbrev(&config))
+                .unwrap_or_else(|| scaled_abbrev(self.repo))
+        })
+    }
+
+    /// Abbreviates a full hex OID, lengthening past the default while the
+    /// prefix would be ambiguous, as git does.
+    fn shorten(&self, hex: &str) -> String {
+        let mut len = self.base();
+        if let Ok(odb) = self.repo.odb() {
+            while len < HEX_OID_LEN {
+                // A partial hex string parses into the zero-filled short form
+                // `exists_prefix` expects.
+                let Some(prefix) = hex.get(..len).and_then(|s| Oid::from_str(s).ok()) else {
+                    break;
+                };
+                match odb.exists_prefix(prefix, len) {
+                    Err(e) if e.code() == git2::ErrorCode::Ambiguous => len += 1,
+                    // Unique, or absent with nothing to disambiguate against.
+                    Ok(_) | Err(_) => break,
+                }
+            }
+        }
+        hex.chars().take(len).collect()
+    }
+}
+
+/// `core.abbrev`, or `None` when git would derive the length from the
+/// repository instead. A false-y value means "never abbreviate".
+fn configured_abbrev(config: &git2::Config) -> Option<usize> {
+    let value = config.get_string("core.abbrev").ok()?;
+    if let Ok(len) = value.parse::<usize>() {
+        return Some(len.clamp(MIN_ABBREV, HEX_OID_LEN));
+    }
+    match config.get_bool("core.abbrev") {
+        Ok(false) => Some(HEX_OID_LEN),
+        // `auto` lands here, as does anything git would reject outright.
+        Ok(true) | Err(_) => None,
+    }
+}
+
+/// git's automatic length: enough hex digits to keep collisions unlikely among
+/// the packed objects, never below [`FALLBACK_ABBREV`]. Loose objects are
+/// excluded, matching git's own approximation.
+fn scaled_abbrev(repo: &Repository) -> usize {
+    let bits = (u64::BITS - packed_object_count(repo).leading_zeros()) as usize;
+    FALLBACK_ABBREV.max(bits.div_ceil(2))
+}
+
+fn packed_object_count(repo: &Repository) -> u64 {
+    let Ok(entries) = fs::read_dir(repo.commondir().join("objects/pack")) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "idx"))
+        .filter_map(|path| idx_object_count(&path))
+        .sum()
+}
+
+/// A pack index's last fanout entry, which holds its total object count. v2
+/// indexes put an 8-byte header before the fanout table; v1 starts with it.
+fn idx_object_count(path: &Path) -> Option<u64> {
+    const V2_MAGIC: [u8; 4] = [0xff, b't', b'O', b'c'];
+    const FANOUT_ENTRIES: u64 = 256;
+
+    let mut file = fs::File::open(path).ok()?;
+    let mut header = [0u8; 8];
+    file.read_exact(&mut header).ok()?;
+    let fanout_start = if header[..4] == V2_MAGIC { 8 } else { 0 };
+    file.seek(io::SeekFrom::Start(fanout_start + (FANOUT_ENTRIES - 1) * 4))
+        .ok()?;
+    let mut last = [0u8; 4];
+    file.read_exact(&mut last).ok()?;
+    Some(u64::from(u32::from_be_bytes(last)))
+}
 
 #[derive(Debug, PartialEq, Eq)]
 struct RebaseInfo {
@@ -42,9 +147,9 @@ struct RebaseInfo {
 }
 
 /// Parses lines from a rebase todo/done file, skipping blanks and comments, and shortening
-/// any 40-char hex hash in the second field to [`SHORT_OID_LEN`] chars
+/// any 40-char hex hash in the second field to git's abbreviated length
 /// (matching git's status display format).
-fn parse_rebase_lines(content: &str) -> Vec<String> {
+fn parse_rebase_lines(content: &str, abbrev: &Abbrev<'_>) -> Vec<String> {
     content
         .lines()
         .filter(|l| !l.is_empty() && !l.starts_with('#'))
@@ -56,8 +161,10 @@ fn parse_rebase_lines(content: &str) -> Vec<String> {
             let Some(hash_or_arg) = parts.next() else {
                 return line.to_string();
             };
-            if hash_or_arg.len() >= 40 && hash_or_arg.chars().all(|c| c.is_ascii_hexdigit()) {
-                let short = &hash_or_arg[..SHORT_OID_LEN];
+            if hash_or_arg.len() >= HEX_OID_LEN
+                && hash_or_arg.chars().all(|c| c.is_ascii_hexdigit())
+            {
+                let short = &abbrev.shorten(hash_or_arg);
                 parts.next().map_or_else(
                     || format!("{cmd} {short}"),
                     |rest| format!("{cmd} {short} {rest}"),
@@ -87,7 +194,7 @@ fn rebase_done_display_path(repo: &Repository) -> String {
 
 /// Reads rebase state from `.git/rebase-merge/` if an interactive or merge-backend
 /// rebase is in progress. Returns `None` if no such rebase is active.
-fn get_rebase_info(repo: &Repository) -> StatusResult<Option<RebaseInfo>> {
+fn get_rebase_info(repo: &Repository, abbrev: &Abbrev<'_>) -> StatusResult<Option<RebaseInfo>> {
     // Repository state detects interactive rebases started by the git CLI. `open_rebase()`
     // does not support the full set.
     let state = repo.state();
@@ -97,18 +204,18 @@ fn get_rebase_info(repo: &Repository) -> StatusResult<Option<RebaseInfo>> {
     }
 
     let rebase_merge = repo.path().join("rebase-merge");
-    let Some((onto_short, head_name)) = read_rebase_onto_and_head(&rebase_merge) else {
+    let Some((onto_short, head_name)) = read_rebase_onto_and_head(&rebase_merge, abbrev) else {
         return Ok(None);
     };
 
     let done_raw = fs::read_to_string(rebase_merge.join("done")).unwrap_or_default();
-    let all_done = parse_rebase_lines(&done_raw);
+    let all_done = parse_rebase_lines(&done_raw, abbrev);
     let total_done = all_done.len();
     // Show last 2 done ops to match git's display limit
     let done_ops: Vec<String> = all_done.into_iter().rev().take(2).rev().collect();
 
     let todo_raw = fs::read_to_string(rebase_merge.join("git-rebase-todo")).unwrap_or_default();
-    let all_remaining = parse_rebase_lines(&todo_raw);
+    let all_remaining = parse_rebase_lines(&todo_raw, abbrev);
     let total_remaining = all_remaining.len();
     // Show next 2 remaining ops to match git's display limit
     let remaining_ops: Vec<String> = all_remaining.into_iter().take(2).collect();
@@ -350,9 +457,9 @@ fn is_rebasing(repo: &Repository) -> bool {
 /// (`rebase-merge/` or `rebase-apply/`), returning the short onto-OID and
 /// the branch shorthand. Returns `None` if `onto` is missing or empty,
 /// which indicates a corrupt or incomplete rebase state.
-fn read_rebase_onto_and_head(dir: &Path) -> Option<(String, String)> {
+fn read_rebase_onto_and_head(dir: &Path, abbrev: &Abbrev<'_>) -> Option<(String, String)> {
     let onto_raw = fs::read_to_string(dir.join("onto")).ok()?;
-    let onto_short: String = onto_raw.trim().chars().take(SHORT_OID_LEN).collect();
+    let onto_short = abbrev.shorten(onto_raw.trim());
     if onto_short.is_empty() {
         return None;
     }
@@ -370,32 +477,32 @@ fn read_rebase_onto_and_head(dir: &Path) -> Option<(String, String)> {
 /// from a detached HEAD. Matches `wt-status.c::get_branch` in upstream
 /// git: strip `refs/heads/` if present, abbreviate raw 40-char OIDs.
 /// Falls back to an empty string when the file is missing or empty.
-fn read_bisect_start(repo: &Repository) -> String {
+fn read_bisect_start(repo: &Repository, abbrev: &Abbrev<'_>) -> String {
     let raw = fs::read_to_string(repo.path().join("BISECT_START")).unwrap_or_default();
     let trimmed = raw.trim();
     if let Some(name) = trimmed.strip_prefix("refs/heads/") {
         return name.to_string();
     }
-    if trimmed.len() == 40 && trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
-        return trimmed[..SHORT_OID_LEN].to_string();
+    if trimmed.len() == HEX_OID_LEN && trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
+        return abbrev.shorten(trimmed);
     }
     trimmed.to_string()
 }
 
 /// Reads a `*_HEAD` file (e.g. `CHERRY_PICK_HEAD`, `REVERT_HEAD`) and returns
-/// the first [`SHORT_OID_LEN`] characters of the OID, or the full content if
-/// shorter.
-fn read_short_oid(repo: &Repository, filename: &str) -> String {
+/// the abbreviated OID, or the full content if it is already shorter.
+fn read_short_oid(repo: &Repository, filename: &str, abbrev: &Abbrev<'_>) -> String {
     let path = repo.path().join(filename);
     let oid = fs::read_to_string(path).unwrap_or_default();
     let trimmed = oid.trim();
-    trimmed.get(..SHORT_OID_LEN).unwrap_or(trimmed).to_string()
+    abbrev.shorten(trimmed)
 }
 
 /// Determines the repository's current operation state (rebase, merge, cherry-pick,
 /// etc.) and returns it along with branch/upstream info for display.
 fn get_header_state(repo: &Repository, ahead_behind: bool) -> StatusResult<HeaderState> {
-    if let Some(info) = get_rebase_info(repo)? {
+    let abbrev = Abbrev::new(repo);
+    if let Some(info) = get_rebase_info(repo, &abbrev)? {
         return Ok(HeaderState {
             branch_display: None,
             body: HeaderBody::Rebase(info),
@@ -407,7 +514,7 @@ fn get_header_state(repo: &Repository, ahead_behind: bool) -> StatusResult<Heade
     // states handled by `get_rebase_info`.
     let rebase_apply = repo.path().join("rebase-apply");
     if rebase_apply.join("rebasing").exists()
-        && let Some((onto_short, head_name)) = read_rebase_onto_and_head(&rebase_apply)
+        && let Some((onto_short, head_name)) = read_rebase_onto_and_head(&rebase_apply, &abbrev)
     {
         let has_conflicts = repo.index()?.has_conflicts();
         return Ok(HeaderState {
@@ -437,32 +544,33 @@ fn get_header_state(repo: &Repository, ahead_behind: bool) -> StatusResult<Heade
         }
         Err(e) => return Err(e.into()),
     };
-    let branch_display = current_branch_display(repo, &head_ref);
+    let branch_display = current_branch_display(repo, &head_ref, &abbrev);
     let has_conflicts = repo.index()?.has_conflicts();
 
     let body = match repo.state() {
         git2::RepositoryState::CherryPick | git2::RepositoryState::CherryPickSequence => {
             HeaderBody::CherryPick {
-                short_oid: read_short_oid(repo, "CHERRY_PICK_HEAD"),
+                short_oid: read_short_oid(repo, "CHERRY_PICK_HEAD", &abbrev),
                 has_conflicts,
             }
         }
         git2::RepositoryState::Merge => HeaderBody::Merge { has_conflicts },
         git2::RepositoryState::Revert | git2::RepositoryState::RevertSequence => {
             HeaderBody::Revert {
-                short_oid: read_short_oid(repo, "REVERT_HEAD"),
+                short_oid: read_short_oid(repo, "REVERT_HEAD", &abbrev),
                 has_conflicts,
             }
         }
         git2::RepositoryState::Bisect => HeaderBody::Bisect {
-            started_from: read_bisect_start(repo),
+            started_from: read_bisect_start(repo, &abbrev),
         },
         git2::RepositoryState::ApplyMailbox | git2::RepositoryState::ApplyMailboxOrRebase => {
             // rebase-apply/rebasing exists for `git rebase --apply`,
             // rebase-apply/applying exists for `git am`.
             let rebase_apply = repo.path().join("rebase-apply");
             if rebase_apply.join("rebasing").exists()
-                && let Some((onto_short, head_name)) = read_rebase_onto_and_head(&rebase_apply)
+                && let Some((onto_short, head_name)) =
+                    read_rebase_onto_and_head(&rebase_apply, &abbrev)
             {
                 HeaderBody::RebaseWithApplyBackend {
                     onto_short,
@@ -684,9 +792,15 @@ fn print_header_state(state: &HeaderState, stdout: &mut impl Write) -> Result<()
 /// the most recent `checkout: moving from X to Y` entry gives `Y` (often
 /// a tag), and `at` switches to `from` once HEAD has moved past where
 /// that checkout landed.
-fn current_branch_display(repo: &Repository, head_ref: &git2::Reference<'_>) -> String {
+fn current_branch_display(
+    repo: &Repository,
+    head_ref: &git2::Reference<'_>,
+    abbrev: &Abbrev<'_>,
+) -> String {
     if !head_ref.is_branch() {
-        let (preposition, target) = detached_target(repo, head_ref);
+        let Some((preposition, target)) = detached_target(repo, head_ref, abbrev) else {
+            return Paint::new(RED, "Not currently on any branch.").to_string();
+        };
         return format!(
             "{} {target}",
             Paint::new(RED, format_args!("HEAD detached {preposition}")),
@@ -696,24 +810,41 @@ fn current_branch_display(repo: &Repository, head_ref: &git2::Reference<'_>) -> 
     format!("On branch {branch_name}")
 }
 
+/// The ref `target` names, minus a `refs/tags/` or `refs/remotes/` prefix.
+/// `None` unless it still resolves to `expected`, which is when git shows the
+/// abbreviated OID instead (`HEAD~1`, a raw OID, a ref that has moved).
+fn resolved_ref_name(repo: &Repository, target: &str, expected: Oid) -> Option<String> {
+    let reference = repo.resolve_reference_from_short_name(target).ok()?;
+    // An annotated tag points at the tag object, so peel before comparing.
+    let matches = reference.target() == Some(expected)
+        || reference.peel_to_commit().ok().map(|c| c.id()) == Some(expected);
+    if !matches {
+        return None;
+    }
+    let name = reference.name().ok()?;
+    Some(
+        name.strip_prefix("refs/tags/")
+            .or_else(|| name.strip_prefix("refs/remotes/"))
+            .unwrap_or(name)
+            .to_string(),
+    )
+}
+
 /// Returns `(preposition, display)` for a detached HEAD, matching git's
 /// behavior: scan the HEAD reflog newest-first for the most recent
 /// `checkout: moving from X to Y` entry and report `Y` as the target.
 /// `at` if HEAD still points where that checkout landed, `from` if it
-/// has moved (committed, reset, etc.). Falls back to the short OID when
-/// no usable reflog entry exists (e.g. fresh clone of a detached HEAD).
-fn detached_target(repo: &Repository, head_ref: &git2::Reference<'_>) -> (&'static str, String) {
+/// has moved (committed, reset, etc.). `None` without a usable reflog entry
+/// (a fresh worktree or clone detached at creation), where git has no target
+/// to name and says "Not currently on any branch." instead.
+fn detached_target(
+    repo: &Repository,
+    head_ref: &git2::Reference<'_>,
+    abbrev: &Abbrev<'_>,
+) -> Option<(&'static str, String)> {
     let head_oid = head_ref.target();
-    let short_oid = || {
-        head_oid.map_or_else(
-            || "unknown".to_string(),
-            |oid| format!("{oid:.SHORT_OID_LEN$}"),
-        )
-    };
 
-    let Ok(reflog) = repo.reflog("HEAD") else {
-        return ("at", short_oid());
-    };
+    let reflog = repo.reflog("HEAD").ok()?;
 
     for entry in reflog.iter() {
         let Some(target) = entry
@@ -731,17 +862,12 @@ fn detached_target(repo: &Repository, head_ref: &git2::Reference<'_>) -> (&'stat
         } else {
             "from"
         };
-        // If `target` is a raw 40-char OID, abbreviate to short form to
-        // match git's display.
-        let display = if target.len() == 40 && target.chars().all(|c| c.is_ascii_hexdigit()) {
-            target[..SHORT_OID_LEN].to_string()
-        } else {
-            target.to_string()
-        };
-        return (preposition, display);
+        let display = resolved_ref_name(repo, target, entry.id_new())
+            .unwrap_or_else(|| abbrev.shorten(&entry.id_new().to_string()));
+        return Some((preposition, display));
     }
 
-    ("at", short_oid())
+    None
 }
 
 /// Returns the upstream tracking status (e.g. "ahead 3", "behind 1") and a hint
@@ -914,7 +1040,7 @@ mod tests {
             "expected CherryPick with conflicts, got {state:?}"
         );
         if let HeaderBody::CherryPick { short_oid, .. } = &state.body {
-            assert_eq!(short_oid.len(), SHORT_OID_LEN);
+            assert_eq!(short_oid.len(), FALLBACK_ABBREV);
         }
     }
 
@@ -969,7 +1095,7 @@ mod tests {
             "expected Revert with conflicts, got {state:?}"
         );
         if let HeaderBody::Revert { short_oid, .. } = &state.body {
-            assert_eq!(short_oid.len(), SHORT_OID_LEN);
+            assert_eq!(short_oid.len(), FALLBACK_ABBREV);
         }
     }
 
@@ -1100,31 +1226,38 @@ mod tests {
 
     // -- parse_rebase_lines --
 
+    /// Abbreviation needs a repository. These hashes are invented, so nothing
+    /// resolves and the length stays at the floor a fresh repo yields.
+    fn shorten_rebase_lines(input: &str) -> Vec<String> {
+        let (_tmp, repo) = init_repo();
+        parse_rebase_lines(input, &Abbrev::new(&repo))
+    }
+
     #[test]
     fn rebase_lines_shortens_full_hash() {
         let input = "pick abcdef1234567890abcdef1234567890abcdef12 Fix the bug\n";
-        let result = parse_rebase_lines(input);
+        let result = shorten_rebase_lines(input);
         assert_eq!(result, ["pick abcdef1 Fix the bug"]);
     }
 
     #[test]
     fn rebase_lines_preserves_short_hash() {
         let input = "pick abcdef1 Fix the bug\n";
-        let result = parse_rebase_lines(input);
+        let result = shorten_rebase_lines(input);
         assert_eq!(result, ["pick abcdef1 Fix the bug"]);
     }
 
     #[test]
     fn rebase_lines_skips_comments_and_blanks() {
         let input = "# This is a comment\n\npick abcdef1 Do stuff\n";
-        let result = parse_rebase_lines(input);
+        let result = shorten_rebase_lines(input);
         assert_eq!(result, ["pick abcdef1 Do stuff"]);
     }
 
     #[test]
     fn rebase_lines_full_hash_no_message() {
         let input = "drop abcdef1234567890abcdef1234567890abcdef12\n";
-        let result = parse_rebase_lines(input);
+        let result = shorten_rebase_lines(input);
         assert_eq!(result, ["drop abcdef1"]);
     }
 
@@ -1133,7 +1266,7 @@ mod tests {
         let input = "\
             pick 4e0411814cb5bd9cf38ee803978966a39df7ac54 # feature 1\n\
             pick 66ec2060c6cb15d5ca911f52502d0f009f17233c # feature 2\n";
-        let result = parse_rebase_lines(input);
+        let result = shorten_rebase_lines(input);
         assert_eq!(
             result,
             ["pick 4e04118 # feature 1", "pick 66ec206 # feature 2"]
@@ -1146,7 +1279,7 @@ mod tests {
             pick aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa First commit\n\
             fixup bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb Second commit\n\
             reword cccccccccccccccccccccccccccccccccccccccc Third commit\n";
-        let result = parse_rebase_lines(input);
+        let result = shorten_rebase_lines(input);
         assert_eq!(
             result,
             [
