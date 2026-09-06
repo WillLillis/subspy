@@ -195,6 +195,11 @@ const CASES: &[Case] = &[
     // deletion against the entry once the file is gone.
     plain("intent to add", setup_intent_to_add),
     plain("intent to add, deleted", setup_intent_to_add_deleted),
+    plain(
+        "crlf rename below threshold",
+        setup_crlf_rename_below_threshold,
+    ),
+    plain("crlf rename, binary blob", setup_crlf_rename_binary),
     plain("with stashes", setup_with_stashes),
     plain("renamed (staged)", setup_renamed_staged),
     // Staged rename, then the new file deleted from the worktree: `2 RD` with a

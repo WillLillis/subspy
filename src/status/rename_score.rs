@@ -28,9 +28,7 @@ impl Signature {
     pub(super) fn new(bytes: &[u8]) -> Self {
         let mut spans: FxHashMap<(u64, u32), u32> = FxHashMap::default();
         for span in Spans::new(bytes) {
-            *spans
-                .entry((hash_span(span), span.len() as u32))
-                .or_default() += 1;
+            *spans.entry(span).or_default() += 1;
         }
         Self {
             spans,
@@ -189,35 +187,88 @@ pub(super) fn overlapping_pairs(
     pairs
 }
 
+/// Git's `buffer_is_binary`: a NUL anywhere in the leading `FIRST_FEW_BYTES`.
+/// The `diff` attribute can also force a blob binary, which we don't consult;
+/// see the rename-detection notes in CONTRIBUTING.md.
+fn is_binary(bytes: &[u8]) -> bool {
+    const FIRST_FEW_BYTES: usize = 8000;
+    memchr::memchr(0, &bytes[..bytes.len().min(FIRST_FEW_BYTES)]).is_some()
+}
+
+/// Yields each span as its `(hash, length)` key.
+///
+/// In a text blob a CR directly before a LF contributes nothing: git's
+/// `hash_chars` neither hashes it nor counts it toward the span length, so a
+/// CRLF file's copied bytes exclude its CRs while [`Signature::size`] still
+/// includes them. That is what makes an identical edit score lower with CRLF
+/// endings than with LF.
+///
+/// `strip_cr` is resolved once per blob, so a blob with no CR at all keeps the
+/// original path: split at the newline and hash the span in bulk.
 struct Spans<'a> {
     bytes: &'a [u8],
+    strip_cr: bool,
 }
 
 impl<'a> Spans<'a> {
     const MAX_LEN: usize = 64;
 
-    const fn new(bytes: &'a [u8]) -> Self {
-        Self { bytes }
+    fn new(bytes: &'a [u8]) -> Self {
+        Self {
+            bytes,
+            strip_cr: memchr::memchr(b'\r', bytes).is_some() && !is_binary(bytes),
+        }
+    }
+
+    /// The span boundary for a blob with no CRs to drop: through the newline,
+    /// or `MAX_LEN` bytes, whichever comes first.
+    fn next_verbatim(&mut self) -> (u64, u32) {
+        let newline_len = memchr::memchr(b'\n', self.bytes).map_or(self.bytes.len(), |i| i + 1);
+        let (span, rest) = self.bytes.split_at(newline_len.min(Self::MAX_LEN));
+        self.bytes = rest;
+        (hash_span(span), span.len() as u32)
+    }
+
+    /// The same boundary, but counted over the bytes that survive CR removal,
+    /// which is what git's length cap applies to.
+    ///
+    /// Only a CR immediately before a LF is dropped, so at most one byte leaves
+    /// any span and it is always the second to last. That keeps every case down
+    /// to a bulk copy or none at all.
+    fn next_stripped(&mut self) -> (u64, u32) {
+        let Some(nl) = memchr::memchr(b'\n', self.bytes) else {
+            // No newline left, so no CR is followed by one.
+            return self.next_verbatim();
+        };
+        let has_cr = nl > 0 && self.bytes[nl - 1] == b'\r';
+        if nl + 1 - usize::from(has_cr) > Self::MAX_LEN {
+            // The cut lands ahead of the line ending, so nothing is dropped.
+            return self.next_verbatim();
+        }
+        let (span, rest) = self.bytes.split_at(nl + 1);
+        self.bytes = rest;
+        if !has_cr {
+            return (hash_span(span), span.len() as u32);
+        }
+        let mut stripped = [0u8; Self::MAX_LEN];
+        stripped[..nl - 1].copy_from_slice(&span[..nl - 1]);
+        stripped[nl - 1] = b'\n';
+        (hash_span(&stripped[..nl]), nl as u32)
     }
 }
 
-impl<'a> Iterator for Spans<'a> {
-    type Item = &'a [u8];
+impl Iterator for Spans<'_> {
+    type Item = (u64, u32);
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.bytes.is_empty() {
             return None;
         }
-
-        let newline_len = self
-            .bytes
-            .iter()
-            .position(|&b| b == b'\n')
-            .map_or(self.bytes.len(), |idx| idx + 1);
-        let span_len = newline_len.min(Self::MAX_LEN);
-        let (span, rest) = self.bytes.split_at(span_len);
-        self.bytes = rest;
-        Some(span)
+        Some(if self.strip_cr {
+            self.next_stripped()
+        } else {
+            self.next_verbatim()
+        })
     }
 }
 
