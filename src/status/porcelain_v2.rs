@@ -78,13 +78,13 @@ pub fn display_porcelain_v2(
     };
 
     if branch {
-        write_branch_headers(repo, out, ahead_behind)?;
+        write_branch_headers(repo, out, ahead_behind, null_terminate)?;
         if show_stash {
             // Stashes are tracked via the `refs/stash` reflog: count
             // entries to get the stash count. Missing reflog (no stashes
             // ever made) means 0.
             let count = repo.reflog("refs/stash").map_or(0, |r| r.len());
-            writeln!(out, "# stash {count}")?;
+            write!(out, "# stash {count}{}", line_terminator(null_terminate))?;
         }
     }
 
@@ -206,7 +206,9 @@ fn write_branch_headers(
     repo: &Repository,
     out: &mut impl Write,
     ahead_behind: bool,
+    null_terminate: bool,
 ) -> StatusResult<()> {
+    let term = line_terminator(null_terminate);
     let Ok(head) = repo.head() else {
         // Unborn HEAD (empty repo, no commits yet).
         let head_ref = repo.find_reference("HEAD").ok();
@@ -214,8 +216,8 @@ fn write_branch_headers(
             .as_ref()
             .and_then(unborn_branch_name)
             .unwrap_or("(unknown)");
-        writeln!(out, "# branch.oid (initial)")?;
-        writeln!(out, "# branch.head {branch}")?;
+        write!(out, "# branch.oid (initial){term}")?;
+        write!(out, "# branch.head {branch}{term}")?;
         return Ok(());
     };
 
@@ -223,7 +225,7 @@ fn write_branch_headers(
         .peel_to_commit()
         .ok()
         .map_or(git2::Oid::ZERO_SHA1, |c| c.id());
-    writeln!(out, "# branch.oid {oid}")?;
+    write!(out, "# branch.oid {oid}{term}")?;
 
     // Display via lossy bytes so a non-UTF-8 ref still renders something
     // sensible. `find_branch` below needs the strict `&str` form (git2
@@ -233,18 +235,18 @@ fn write_branch_headers(
     } else {
         Cow::Borrowed("(detached)")
     };
-    writeln!(out, "# branch.head {branch_display}")?;
+    write!(out, "# branch.head {branch_display}{term}")?;
 
     match upstream_status(repo, &head, ahead_behind)? {
         UpstreamStatus::None => {}
-        UpstreamStatus::Gone { name } => writeln!(out, "# branch.upstream {name}")?,
+        UpstreamStatus::Gone { name } => write!(out, "# branch.upstream {name}{term}")?,
         UpstreamStatus::Tracking { name, divergence } => {
-            writeln!(out, "# branch.upstream {name}")?;
+            write!(out, "# branch.upstream {name}{term}")?;
             match divergence {
                 Divergence::Counts(ahead, behind) => {
-                    writeln!(out, "# branch.ab +{ahead} -{behind}")?;
+                    write!(out, "# branch.ab +{ahead} -{behind}{term}")?;
                 }
-                Divergence::Skipped => writeln!(out, "# branch.ab +? -?")?,
+                Divergence::Skipped => write!(out, "# branch.ab +? -?{term}")?,
             }
         }
     }

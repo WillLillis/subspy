@@ -83,7 +83,7 @@ pub(super) fn display_xy_lines(
     } = opts;
 
     if branch {
-        write_branch_header(repo, out, style, ahead_behind)?;
+        write_branch_header(repo, out, style, ahead_behind, null_terminate)?;
     }
 
     let index = repo.index()?;
@@ -504,7 +504,9 @@ fn write_branch_header(
     out: &mut impl Write,
     style: &LineStyle,
     ahead_behind: bool,
+    null_terminate: bool,
 ) -> StatusResult<()> {
+    let term = line_terminator(null_terminate).as_bytes();
     let Ok(head) = repo.head() else {
         let head_ref = repo.find_reference("HEAD").ok();
         let branch = head_ref
@@ -513,14 +515,14 @@ fn write_branch_header(
             .unwrap_or("(unknown)");
         out.write_all(b"## No commits yet on ")?;
         paint_str(out, branch, style.palette.map(|p| p.local_branch))?;
-        out.write_all(b"\n")?;
+        out.write_all(term)?;
         return Ok(());
     };
 
     if !head.is_branch() {
         out.write_all(b"## ")?;
         paint_str(out, "HEAD (no branch)", style.palette.map(|p| p.nobranch))?;
-        out.write_all(b"\n")?;
+        out.write_all(term)?;
         return Ok(());
     }
 
@@ -549,7 +551,7 @@ fn write_branch_header(
             }
         }
     }
-    out.write_all(b"\n")?;
+    out.write_all(term)?;
     Ok(())
 }
 
