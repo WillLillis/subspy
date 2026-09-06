@@ -3,6 +3,7 @@
 //! output against an external reference - either a committed snapshot
 //! (long, short) or a live `git status` invocation (porcelain).
 
+mod config;
 mod fixtures;
 mod long;
 mod porcelain;

@@ -24,6 +24,11 @@ pub struct ConfigDefaults {
     pub relative_paths: bool,
     /// `advice.statusHints`
     pub status_hints: bool,
+    /// `status.short`, the default output format when no format flag is given.
+    pub short: bool,
+    /// `status.branch`. Only reaches the short format; git leaves porcelain
+    /// headers to an explicit `--branch`.
+    pub branch: bool,
 }
 
 impl ConfigDefaults {
@@ -34,6 +39,8 @@ impl ConfigDefaults {
         show_stash: false,
         relative_paths: true,
         status_hints: true,
+        short: false,
+        branch: false,
     };
 
     /// Reads the defaults from the effective config for `repo_root`, which
@@ -57,6 +64,8 @@ impl ConfigDefaults {
             status_hints: config
                 .get_bool("advice.statusHints")
                 .unwrap_or(Self::GIT.status_hints),
+            short: config.get_bool("status.short").unwrap_or(Self::GIT.short),
+            branch: config.get_bool("status.branch").unwrap_or(Self::GIT.branch),
         }
     }
 }

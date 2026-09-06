@@ -1,0 +1,11 @@
+On branch master
+Changes to be committed:
+	deleted:    gone.txt
+	new file:   staged.txt
+
+Changes not staged for commit:
+	modified:   tracked.txt
+
+Untracked files:
+	untracked.txt
+

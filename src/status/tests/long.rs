@@ -54,6 +54,10 @@ const CASES: &[Case] = &[
         setup: Setup::Plain(setup_sparse_checkout),
     },
     Case {
+        name: "detached_abbrev_configured",
+        setup: Setup::Plain(setup_detached_abbrev_configured),
+    },
+    Case {
         name: "skip_worktree_absent_with_staged_change",
         setup: Setup::Plain(setup_skip_worktree_absent_with_staged_change),
     },
@@ -414,6 +418,40 @@ fn long_nested_superproject_snapshot() {
     };
     let got = run_subspy_long(&project, default_opts());
     assert_snapshot("nested_superproject_modified", &got);
+}
+
+/// `advice.statusHints=false` drops the `(use "git ...")` lines from every
+/// section and trims the trailer's parenthetical, leaving titles, file rows,
+/// and the blank lines between sections untouched.
+#[test]
+fn long_no_status_hints_snapshot() {
+    let case = Case {
+        name: "no_status_hints",
+        setup: Setup::Plain(setup_all_sections),
+    };
+    let opts = OutputOpts {
+        status_hints: false,
+        ..default_opts()
+    };
+    run_case(&case, opts);
+}
+
+/// `status.relativePaths=false` keeps paths repo-root-relative even when run
+/// from a subdirectory.
+#[test]
+fn long_relative_paths_off_snapshot() {
+    let case = Case {
+        name: "relative_paths_off",
+        setup: Setup::Subdir {
+            setup: setup_renamed_staged_in_subdir,
+            subdir: "sub",
+        },
+    };
+    let opts = OutputOpts {
+        relative_paths: false,
+        ..default_opts()
+    };
+    run_case(&case, opts);
 }
 
 #[test]
