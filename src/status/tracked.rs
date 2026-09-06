@@ -6,16 +6,55 @@
 //! tracked changes into one path-sorted stream of [`TrackedRow`]s that every
 //! output format (porcelain v1/v2, short, long) renders, so they all match git.
 //!
-//! The add/delete pairing is bounded by `diff.renameLimit` and signature-cached
-//! (each blob hashed once, with a size short-circuit) via [`super::rename_score`].
+//! The add/delete pairing is switched by `status.renames` (falling back to
+//! `diff.renames`), bounded by `status.renameLimit` (falling back to
+//! `diff.renameLimit`), and signature-cached (each blob hashed once, with a
+//! size short-circuit) via [`super::rename_score`].
 
 use git2::Repository;
 use rustc_hash::FxHashMap;
 
 use super::{StatusEntries, interleave::SubRow, rename_score};
 
-/// git's default when `diff.renameLimit` is unset or non-positive.
+/// git's limit when neither renameLimit key is set.
 const DEFAULT_RENAME_LIMIT: usize = 1000;
+
+/// git's `too_many_rename_candidates` substitute for a non-positive limit, so
+/// `0` reads as "no limit".
+const UNLIMITED_RENAME_LIMIT: usize = 32767;
+
+/// The key a rename setting came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RenameKey {
+    Status,
+    Diff,
+}
+
+impl RenameKey {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Status => "status.renames",
+            Self::Diff => "diff.renames",
+        }
+    }
+}
+
+impl std::fmt::Display for RenameKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+/// Whether git pairs renames for this status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RenameDetection {
+    /// Every move renders as a delete plus an add, gitlinks included.
+    Off,
+    On,
+    /// `copies`/`copy`. Copy detection changes which pairs git picks, not just
+    /// which rows it adds, so [`Self::On`] is not an approximation of it.
+    Copies(RenameKey),
+}
 
 /// One tracked (non-submodule) change, after rename reconciliation: either a
 /// raw libgit2 entry, or a synthetic row subspy built to match git's
@@ -147,7 +186,9 @@ pub(super) fn for_each_tracked_row<'a, E>(
 ///   1. Collect raw additions, deletions, and other entries.
 ///   2. Pair exact same-blob renames with no limit.
 ///   3. Pair remaining candidates by similarity when their matrix fits under
-///      `diff.renameLimit`.
+///      the rename limit.
+///
+/// Steps 2 and 3 are skipped entirely when rename detection is off.
 ///
 /// Equal-similarity ties may differ from git. Git resolves them through the
 /// internal `rename_src` array order and an unstable `qsort`. That ordering is
@@ -161,14 +202,17 @@ pub(super) fn normalized_tracked_rows<'a>(
     let mut deletions = Vec::new();
     collect_initial_tracked_rows(entries, &mut rows, &mut additions, &mut deletions);
 
-    // git's exact rename pass runs with no rename limit, so run it first. This
-    // also shrinks the inexact matrix governed by the limit.
-    pair_exact_renames(&mut rows, &mut additions, &mut deletions);
+    // `renames=false` switches off both passes, not just the inexact one.
+    if rename_detection(repo) != RenameDetection::Off {
+        // git's exact rename pass runs with no rename limit, so run it first. This
+        // also shrinks the inexact matrix governed by the limit.
+        pair_exact_renames(&mut rows, &mut additions, &mut deletions);
 
-    // Similarity-pair the remaining candidates, unless git would skip inexact
-    // detection for this status (matrix over `diff.renameLimit`).
-    if !over_rename_limit(deletions.len(), additions.len(), rename_limit(repo)) {
-        pair_inexact_renames(repo, &mut rows, &mut additions, &mut deletions);
+        // Similarity-pair the remaining candidates, unless git would skip inexact
+        // detection for this status (matrix over the rename limit).
+        if !over_rename_limit(deletions.len(), additions.len(), rename_limit(repo)) {
+            pair_inexact_renames(repo, &mut rows, &mut additions, &mut deletions);
+        }
     }
     for old in deletions {
         push_synthetic_delete(&mut rows, old);
@@ -398,12 +442,47 @@ fn retain_unpaired(sides: &mut Vec<RenameSide>, paired: &[bool]) {
 }
 
 fn rename_limit(repo: &Repository) -> usize {
-    repo.config()
-        .and_then(|c| c.get_i32("diff.renameLimit"))
+    let Ok(config) = repo.config() else {
+        return DEFAULT_RENAME_LIMIT;
+    };
+    let Ok(limit) = config
+        .get_i32("status.renameLimit")
+        .or_else(|_| config.get_i32("diff.renameLimit"))
+    else {
+        return DEFAULT_RENAME_LIMIT;
+    };
+    usize::try_from(limit)
         .ok()
-        .and_then(|v| usize::try_from(v).ok())
         .filter(|&v| v > 0)
-        .unwrap_or(DEFAULT_RENAME_LIMIT)
+        .unwrap_or(UNLIMITED_RENAME_LIMIT)
+}
+
+/// `status.renames` when it parses, else `diff.renames`, else on.
+pub(super) fn rename_detection(repo: &Repository) -> RenameDetection {
+    let Ok(config) = repo.config() else {
+        return RenameDetection::On;
+    };
+    configured_rename_detection(&config, RenameKey::Status)
+        .or_else(|| configured_rename_detection(&config, RenameKey::Diff))
+        .unwrap_or(RenameDetection::On)
+}
+
+/// git's `git_config_rename`: `copies`/`copy` select copy detection, anything
+/// else parses as a boolean.
+fn configured_rename_detection(config: &git2::Config, key: RenameKey) -> Option<RenameDetection> {
+    let copies = config
+        // `get_string` rather than `get_str`: libgit2 rejects the borrowing read
+        // on a live config.
+        .get_string(key.name())
+        .is_ok_and(|v| v.eq_ignore_ascii_case("copies") || v.eq_ignore_ascii_case("copy"));
+    if copies {
+        return Some(RenameDetection::Copies(key));
+    }
+    match config.get_bool(key.name()) {
+        Ok(true) => Some(RenameDetection::On),
+        Ok(false) => Some(RenameDetection::Off),
+        Err(_) => None,
+    }
 }
 
 fn blob_signature(repo: &Repository, oid: git2::Oid) -> Option<rename_score::Signature> {

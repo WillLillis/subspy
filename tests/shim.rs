@@ -367,6 +367,24 @@ fn collapsed_untracked_ancestor_declines_and_forwards() {
 }
 
 #[test]
+fn copy_detection_declines_and_forwards() {
+    let tmp = TempDir::new().unwrap();
+    init_repo(tmp.path());
+    // git pairs this as `C`: the source is modified rather than deleted, so it
+    // survives into the postimage and stays available as a copy source.
+    std::fs::copy(tmp.path().join("seed.txt"), tmp.path().join("copy.txt")).unwrap();
+    std::fs::write(tmp.path().join("seed.txt"), "modified\n").unwrap();
+    run("git", tmp.path(), &["add", "-A"]);
+    run("git", tmp.path(), &["config", "status.renames", "copies"]);
+
+    assert_outputs_match(tmp.path(), &["status", "--porcelain"]);
+
+    let shim = run_without_git(tmp.path(), &["status", "--porcelain"]);
+    assert!(!shim.status.success(), "request should have been forwarded");
+    assert!(shim.stdout.is_empty(), "decline leaked partial output");
+}
+
+#[test]
 fn collapsed_ignored_ancestor_is_rendered_locally() {
     let tmp = TempDir::new().unwrap();
     init_repo(tmp.path());
