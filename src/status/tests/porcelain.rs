@@ -599,6 +599,22 @@ fn v1_branch() {
     }
 }
 
+/// Headers only exist under `--branch` and their terminator only matters
+/// under `-z`, so the two flags have to be crossed to cover them.
+#[test]
+fn v1_branch_z() {
+    let opts = opts_with(
+        PorcelainVersion::V1,
+        true,
+        true,
+        UntrackedFiles::Normal,
+        IgnoredFiles::No,
+    );
+    for c in CASES {
+        run_case(c, opts);
+    }
+}
+
 #[test]
 fn v2_default() {
     let opts = opts_with(
@@ -719,6 +735,20 @@ fn v2_branch() {
     let opts = opts_with(
         PorcelainVersion::V2,
         false,
+        true,
+        UntrackedFiles::Normal,
+        IgnoredFiles::No,
+    );
+    for c in CASES {
+        run_case(c, opts);
+    }
+}
+
+#[test]
+fn v2_branch_z() {
+    let opts = opts_with(
+        PorcelainVersion::V2,
+        true,
         true,
         UntrackedFiles::Normal,
         IgnoredFiles::No,
