@@ -110,6 +110,59 @@ fn setup_multiple_renames(root: &Path) {
         .mv("beta.txt", "beta_renamed.txt");
 }
 
+/// Three moves whose content also changed, so only the inexact pass can pair
+/// them. Their 3x3 matrix exceeds a rename limit of 2; the exact pass runs
+/// unlimited and would otherwise hide the limit's effect.
+fn setup_inexact_renames(root: &Path) {
+    fn body(i: u32) -> String {
+        format!("file{i} padding content line\n").repeat(12)
+    }
+    let r = Repo::init(root);
+    for i in 1..=3 {
+        r.write(&format!("a{i}.txt"), &body(i));
+    }
+    r.add_all().commit("init");
+    for i in 1..=3 {
+        r.rm_tracked(&format!("a{i}.txt"))
+            .write(&format!("b{i}.txt"), &format!("{}changed tail\n", body(i)));
+    }
+    r.add_all();
+}
+
+/// `status.renames=false` disables the exact pass as well, so even these
+/// same-blob moves split into a delete plus an add.
+fn setup_renames_disabled(root: &Path) {
+    setup_multiple_renames(root);
+    Repo::new(root).run_git(&["config", "status.renames", "false"]);
+}
+
+/// With `status.renames` unset, git falls back to `diff.renames`.
+fn setup_renames_disabled_via_diff(root: &Path) {
+    setup_multiple_renames(root);
+    Repo::new(root).run_git(&["config", "diff.renames", "false"]);
+}
+
+/// `status.renames` wins over a conflicting `diff.renames`.
+fn setup_renames_status_overrides_diff(root: &Path) {
+    setup_multiple_renames(root);
+    let r = Repo::new(root);
+    r.run_git(&["config", "diff.renames", "false"]);
+    r.run_git(&["config", "status.renames", "true"]);
+}
+
+fn setup_over_status_rename_limit(root: &Path) {
+    setup_inexact_renames(root);
+    Repo::new(root).run_git(&["config", "status.renameLimit", "2"]);
+}
+
+/// `status.renameLimit` wins over a stricter `diff.renameLimit`.
+fn setup_status_rename_limit_overrides_diff(root: &Path) {
+    setup_inexact_renames(root);
+    let r = Repo::new(root);
+    r.run_git(&["config", "diff.renameLimit", "2"]);
+    r.run_git(&["config", "status.renameLimit", "1000"]);
+}
+
 fn setup_dotfile(root: &Path) {
     // Untracked dotfile - git doesn't treat them specially in porcelain.
     setup_clean(root);
@@ -230,6 +283,22 @@ const CASES: &[Case] = &[
         setup_renames_basename_preserving,
     ),
     plain("identical files renamed", setup_identical_files_renamed),
+    // Rename detection driven by config rather than flags. `status.*` overrides
+    // `diff.*` in both families, and falls back to it when unset.
+    plain("renames disabled", setup_renames_disabled),
+    plain(
+        "renames disabled via diff.renames",
+        setup_renames_disabled_via_diff,
+    ),
+    plain(
+        "status.renames overrides diff.renames",
+        setup_renames_status_overrides_diff,
+    ),
+    plain("over status.renameLimit", setup_over_status_rename_limit),
+    plain(
+        "status.renameLimit overrides diff.renameLimit",
+        setup_status_rename_limit_overrides_diff,
+    ),
     plain("dotfile (untracked)", setup_dotfile),
     submodule_case("submodule clean", &["sub_a"], setup_submod_clean),
     submodule_case(
@@ -268,6 +337,11 @@ const CASES: &[Case] = &[
         "submodule interleaved (renamed)",
         &["mmm"],
         setup_submod_interleaved_renamed,
+    ),
+    submodule_case(
+        "submodule renamed, renames disabled",
+        &["mmm"],
+        setup_submod_renamed_renames_disabled,
     ),
     // An unmerged submodule: reported once as a `u` line, never as a separate
     // dirty row. The clean case exercises `S...`; the dirty case folds the
@@ -390,6 +464,14 @@ fn setup_submod_interleaved_renamed(h: &TestHarness) {
     // `git mv` the submodule to another bracketed path -> staged rename keyed
     // on the new path (`nnn`, still between aaa.txt and zzz.txt).
     h.root().run_git(&["mv", "mmm", "nnn"]);
+}
+
+/// Gitlink renames come from subspy's own submodule pass rather than
+/// `normalized_tracked_rows`, so `status.renames=false` has to reach that
+/// path too: git splits the moved gitlink into a delete plus an add.
+fn setup_submod_renamed_renames_disabled(h: &TestHarness) {
+    h.root().run_git(&["mv", "mmm", "nnn"]);
+    h.root().run_git(&["config", "status.renames", "false"]);
 }
 
 /// Translates `OutputOpts` to the equivalent `git status` argv. Mirrors

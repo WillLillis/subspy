@@ -41,6 +41,7 @@ mod tests;
 
 use clap::ValueEnum;
 use git2::Repository;
+use log::warn;
 use rustc_hash::{FxHashMap, FxHashSet};
 use thiserror::Error;
 
@@ -89,6 +90,9 @@ pub enum StatusScope {
 pub enum DeclineReason {
     /// libgit2 collapsed an untracked directory above the selected cwd.
     CwdInsideCollapsedUntrackedDirectory,
+    /// `status.renames`/`diff.renames` asked for copy detection, which subspy
+    /// does not implement.
+    CopyDetectionConfigured,
 }
 
 /// Result of a successfully evaluated shim status request.
@@ -309,7 +313,14 @@ pub fn assemble_status<R>(
     submodule_statuses: impl FnOnce() -> StatusResult<Vec<(String, StatusSummary)>>,
     render: impl FnOnce(&Repository, &StatusEntries<'_>, &Relativizer<'_>) -> StatusResult<R>,
 ) -> StatusResult<R> {
-    match assemble_status_scoped(project, opts, StatusScope::All, submodule_statuses, render)? {
+    match assemble_status_scoped(
+        project,
+        opts,
+        StatusScope::All,
+        false,
+        submodule_statuses,
+        render,
+    )? {
         AssembleOutcome::Rendered(rendered) => Ok(rendered),
         AssembleOutcome::Declined(_) => {
             unreachable!("whole-repository status requests cannot decline")
@@ -321,10 +332,24 @@ fn assemble_status_scoped<R>(
     project: &ProjectPath,
     opts: OutputOpts,
     scope: StatusScope,
+    can_decline: bool,
     submodule_statuses: impl FnOnce() -> StatusResult<Vec<(String, StatusSummary)>>,
     render: impl FnOnce(&Repository, &StatusEntries<'_>, &Relativizer<'_>) -> StatusResult<R>,
 ) -> StatusResult<AssembleOutcome<R>> {
     let repo = Repository::open(&project.repo_root)?;
+
+    // The shim declines so git renders the `C` rows itself. `subspy status` has
+    // nothing to forward to, so it warns and reports renames only.
+    let rename_detection = tracked::rename_detection(&repo);
+    if let tracked::RenameDetection::Copies(key) = rename_detection {
+        if can_decline {
+            return Ok(AssembleOutcome::Declined(
+                DeclineReason::CopyDetectionConfigured,
+            ));
+        }
+        warn!("subspy has no copy detection. Only renames will be reported ({key} enables it)");
+    }
+
     let mut so = build_status_options(opts, project.kind);
     let non_submod = repo.statuses(Some(&mut so))?;
 
@@ -386,6 +411,12 @@ fn assemble_status_scoped<R>(
     } else {
         submodule_changes(&repo)?
     };
+    // Gitlink renames are paired by `submodule_changes`, not by
+    // `normalized_tracked_rows`, so detection has to be switched off here too.
+    if rename_detection == tracked::RenameDetection::Off {
+        let unpaired = submod_changes.renamed.drain(..).map(|r| r.old);
+        submod_changes.deleted.extend(unpaired);
+    }
 
     let raw_submods = submodule_statuses()?;
     // Per-submodule `submodule.<name>.ignore` only matters when the global
@@ -492,7 +523,7 @@ fn apply_path_filter_to_submodules(
 ///
 /// Returns `Err` if statuses cannot be retrieved from the repository or watch server.
 pub fn status(request: ResolvedStatusRequest<'_>, out: &mut impl io::Write) -> StatusResult<()> {
-    match render_status(request, StatusScope::All, out)? {
+    match render_status(request, StatusScope::All, false, out)? {
         ShimStatusOutcome::Rendered => Ok(()),
         ShimStatusOutcome::Declined(_) => {
             unreachable!("whole-repository status requests cannot decline")
@@ -512,12 +543,13 @@ pub fn status_for_shim(
     scope: StatusScope,
     out: &mut impl io::Write,
 ) -> StatusResult<ShimStatusOutcome> {
-    render_status(request, scope, out)
+    render_status(request, scope, true, out)
 }
 
 fn render_status(
     request: ResolvedStatusRequest<'_>,
     scope: StatusScope,
+    can_decline: bool,
     out: &mut impl io::Write,
 ) -> StatusResult<ShimStatusOutcome> {
     let ResolvedStatusRequest {
@@ -554,6 +586,7 @@ fn render_status(
         project,
         opts,
         scope,
+        can_decline,
         || match conn {
             Some(ref mut c) => Ok(recv_status_response(c, display_progress)?.0),
             None if kind.has_submodules() && ignore_submodules != IgnoreSubmodules::All => {
