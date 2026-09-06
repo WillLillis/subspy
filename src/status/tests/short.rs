@@ -40,6 +40,11 @@ const CASES: &[Case] = &[
         branch: false,
     },
     Case {
+        name: "path_with_space",
+        setup: Setup::Plain(setup_path_with_space),
+        branch: false,
+    },
+    Case {
         name: "skip_worktree_absent",
         setup: Setup::Plain(setup_skip_worktree_absent),
         branch: false,

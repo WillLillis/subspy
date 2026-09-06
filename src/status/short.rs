@@ -1,9 +1,11 @@
 //! Short output format (`git status -s` / `--short`).
 //!
-//! Same `XY PATH` line shape as porcelain v1, but with cwd-relative
-//! paths, `Standard` quoting (matching `core.quotePath=true`), and
-//! colors matching git's `WT_STATUS_*` palette. The actual line
-//! writing is shared with porcelain v1 via [`super::xy_line`].
+//! Same `XY PATH` line shape as porcelain v1, and the same quoting: git
+//! passes `QUOTE_PATH_QUOTE_SP` for both, so a space in a path triggers
+//! quoting here exactly as it does in porcelain v1. Short differs only in
+//! emitting cwd-relative paths and colors matching git's `WT_STATUS_*`
+//! palette. The actual line writing is shared with porcelain v1 via
+//! [`super::xy_line`].
 
 use git2::Repository;
 use std::io::Write;
@@ -41,7 +43,7 @@ pub fn display_short(
     let style = LineStyle {
         quote_mode: QuoteMode {
             quote_path: opts.quote_path,
-            ..QuoteMode::STANDARD
+            ..QuoteMode::QUOTE_SPACE
         },
         palette: Some(&SHORT_PALETTE),
         submodule: SubmoduleFormat::Short,
