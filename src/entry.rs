@@ -70,6 +70,7 @@ where
     // here pays that cost before the first `Repository::open`.
     configure_git2();
     let cli = Command::new("subspy")
+        .version(env!("SUBSPY_VERSION"))
         .subcommand_required(true)
         .arg_required_else_help(true)
         .disable_help_subcommand(true)
