@@ -95,6 +95,8 @@ pub enum DeclineReason {
     /// `status.renames`/`diff.renames` asked for copy detection, which subspy
     /// does not implement.
     CopyDetectionConfigured,
+    /// A config setting subspy cannot honor for this request.
+    UnmodeledConfig(config::UnmodeledConfig),
 }
 
 /// Result of a successfully evaluated shim status request.
@@ -345,6 +347,33 @@ pub fn assemble_status<R>(
     }
 }
 
+/// Why this request cannot be served exactly, if at all.
+///
+/// The shim keeps its bytes identical to git by forwarding, so it declines.
+/// `subspy status` has nothing to forward to and warns instead, then renders
+/// what it can.
+fn unsupported_config(
+    repo: &Repository,
+    format: OutputFormat,
+    rename_detection: tracked::RenameDetection,
+    can_decline: bool,
+) -> Option<DeclineReason> {
+    if let tracked::RenameDetection::Copies(key) = rename_detection {
+        if can_decline {
+            return Some(DeclineReason::CopyDetectionConfigured);
+        }
+        warn!("subspy has no copy detection. Only renames will be reported ({key} enables it)");
+    }
+
+    let config = repo.config().ok()?;
+    let unmodeled = config::unmodeled(&config, format == OutputFormat::Long)?;
+    if can_decline {
+        return Some(DeclineReason::UnmodeledConfig(unmodeled));
+    }
+    warn!("{unmodeled}. Output may differ from git");
+    None
+}
+
 fn assemble_status_scoped<R>(
     project: &ProjectPath,
     opts: OutputOpts,
@@ -358,13 +387,8 @@ fn assemble_status_scoped<R>(
     // The shim declines so git renders the `C` rows itself. `subspy status` has
     // nothing to forward to, so it warns and reports renames only.
     let rename_detection = tracked::rename_detection(&repo);
-    if let tracked::RenameDetection::Copies(key) = rename_detection {
-        if can_decline {
-            return Ok(AssembleOutcome::Declined(
-                DeclineReason::CopyDetectionConfigured,
-            ));
-        }
-        warn!("subspy has no copy detection. Only renames will be reported ({key} enables it)");
+    if let Some(reason) = unsupported_config(&repo, opts.format, rename_detection, can_decline) {
+        return Ok(AssembleOutcome::Declined(reason));
     }
 
     let mut so = build_status_options(opts, project.kind);
