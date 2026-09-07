@@ -155,11 +155,10 @@ pub(super) fn display_xy_lines(
         }
     })?;
 
-    for entry in entries
-        .non_submod
-        .iter()
-        .filter(|e| e.status() == git2::Status::WT_NEW && entries.path_filter.keeps(e.path_bytes()))
-    {
+    for entry in entries.non_submod.iter().filter(|e| {
+        entries.effective(e).is_some_and(super::is_untracked)
+            && entries.path_filter.keeps(e.path_bytes())
+    }) {
         if path_within_any(entry.path_bytes(), entries.conflicted_paths) {
             continue; // libgit2's phantom untracked row for a conflicted submodule
         }
@@ -176,7 +175,9 @@ pub(super) fn display_xy_lines(
     }
 
     for entry in entries.non_submod.iter().filter(|e| {
-        e.status().contains(git2::Status::IGNORED)
+        entries
+            .effective(e)
+            .is_some_and(|st| st.contains(git2::Status::IGNORED))
             && entries.path_filter.keeps_ignored(e.path_bytes())
     }) {
         let ignored = XyChar::new('!', None);

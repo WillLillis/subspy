@@ -398,6 +398,33 @@ pub fn setup_ignored_with_untracked(root: &Path) {
     Repo::new(root).write("untracked.txt", "x\n");
 }
 
+/// `git rm --cached` leaves the file on disk, so one path is both an index
+/// deletion and untracked. libgit2 reports the pair as a single
+/// `INDEX_DELETED | WT_NEW` entry. git renders two rows, and the deletion's
+/// worktree side is empty because the index no longer has an entry to compare.
+pub fn setup_index_deleted_with_ondisk_file(root: &Path) {
+    let repo = Repo::init(root);
+    repo.write("f.txt", "content\n").add_all().commit("initial");
+    repo.run_git(&["rm", "-q", "--cached", "f.txt"]);
+}
+
+/// A tracked file replaced by a directory of the same name. git checks the
+/// index for the directory name without its trailing slash, finds the file, and
+/// suppresses the untracked row.
+pub fn setup_file_replaced_by_directory(root: &Path) {
+    let repo = Repo::init(root);
+    repo.write("f", "content\n").add_all().commit("initial");
+    repo.rm_file("f").mkdir("f").write("f/inner.txt", "inner\n");
+}
+
+/// An empty directory matching no ignore rule. git tracks no directories, so it
+/// reports nothing at all for one.
+pub fn setup_empty_untracked_dir(root: &Path) {
+    let repo = Repo::init(root);
+    repo.write("f.txt", "content\n").add_all().commit("initial");
+    repo.mkdir("empty_dir");
+}
+
 pub fn setup_with_stashes(root: &Path) {
     let repo = Repo::init(root);
     repo.write("file.txt", "initial\n")

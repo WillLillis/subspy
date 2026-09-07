@@ -1,7 +1,7 @@
 //! Config resolution, for the keys whose accepted values or precedence are not
 //! evident from the key alone.
 //!
-//! Rendering lives in the format submodules; these call the resolvers directly.
+//! Rendering lives in the format submodules. These call the resolvers directly.
 
 use tempfile::TempDir;
 use testutil::Repo;

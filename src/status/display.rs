@@ -24,7 +24,7 @@ use super::{
 };
 
 /// Section headers come in hinted and bare forms, selected by
-/// `advice.statusHints`. git drops only the `(use "git ...")` lines; the title
+/// `advice.statusHints`. git drops only the `(use "git ...")` lines. The title
 /// and the blank lines around a section stay either way.
 const STAGED_HEADER: &str = "Changes to be committed:";
 const STAGED_HEADER_HINTED: &str = "Changes to be committed:
@@ -381,16 +381,17 @@ fn print_unstaged_changes(
 fn print_untracked_files(
     non_submod: &Statuses<'_>,
     conflicted_paths: &FxHashSet<Vec<u8>>,
+    corrections: &Corrections,
     path_filter: PathFilter<'_>,
     rel: &Relativizer<'_>,
     status_hints: bool,
     out: &mut impl Write,
 ) -> Result<bool, io::Error> {
     let mut header = false;
-    for entry in non_submod
-        .iter()
-        .filter(|e| e.status() == git2::Status::WT_NEW && path_filter.keeps(e.path_bytes()))
-    {
+    for entry in non_submod.iter().filter(|e| {
+        effective_status(e.status(), e.path_bytes(), corrections).is_some_and(super::is_untracked)
+            && path_filter.keeps(e.path_bytes())
+    }) {
         let Some(file) = entry
             .index_to_workdir()
             .and_then(|idx| idx.old_file().path_bytes())
@@ -425,6 +426,7 @@ fn print_untracked_files(
 /// Prints the "Ignored files:" section.
 fn print_ignored_files(
     non_submod: &Statuses<'_>,
+    corrections: &Corrections,
     path_filter: PathFilter<'_>,
     rel: &Relativizer<'_>,
     status_hints: bool,
@@ -432,7 +434,9 @@ fn print_ignored_files(
 ) -> Result<(), io::Error> {
     let mut header = false;
     for entry in non_submod.iter().filter(|e| {
-        e.status() == git2::Status::IGNORED && path_filter.keeps_ignored(e.path_bytes())
+        effective_status(e.status(), e.path_bytes(), corrections)
+            .is_some_and(|st| st.contains(git2::Status::IGNORED))
+            && path_filter.keeps_ignored(e.path_bytes())
     }) {
         let Some(file) = entry
             .index_to_workdir()
@@ -621,12 +625,20 @@ pub fn display_status(
     let has_untracked = print_untracked_files(
         non_submod,
         conflicted_paths,
+        corrections,
         path_filter,
         rel,
         opts.status_hints,
         out,
     )?;
-    print_ignored_files(non_submod, path_filter, rel, opts.status_hints, out)?;
+    print_ignored_files(
+        non_submod,
+        corrections,
+        path_filter,
+        rel,
+        opts.status_hints,
+        out,
+    )?;
     let has_unreadable = print_unreadable_submodules(submodules, out)?;
 
     print_summary(

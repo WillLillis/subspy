@@ -126,7 +126,7 @@ fn packed_object_count(repo: &Repository) -> u64 {
 }
 
 /// A pack index's last fanout entry, which holds its total object count. v2
-/// indexes put an 8-byte header before the fanout table; v1 starts with it.
+/// indexes put an 8-byte header before the fanout table. v1 starts with it.
 fn idx_object_count(path: &Path) -> Option<u64> {
     const V2_MAGIC: [u8; 4] = [0xff, b't', b'O', b'c'];
     const FANOUT_ENTRIES: u64 = 256;

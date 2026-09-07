@@ -11,6 +11,7 @@
 
 mod case_collision;
 mod intent_to_add;
+mod phantom_directory;
 mod skip_worktree;
 
 use rustc_hash::FxHashSet;
@@ -25,6 +26,7 @@ pub struct Corrections {
     /// Rebuilt as synthetic rows rather than corrected in place, so
     /// [`effective_status`] leaves these alone.
     pub intent_to_add: FxHashSet<Vec<u8>>,
+    pub phantom_directories: FxHashSet<Vec<u8>>,
 }
 
 impl Corrections {
@@ -59,6 +61,7 @@ impl Corrections {
             } else {
                 FxHashSet::default()
             },
+            phantom_directories: phantom_directory::phantom_directories(repo, non_submod),
         }
     }
 
@@ -67,6 +70,7 @@ impl Corrections {
         self.phantom_deletes.is_empty()
             && self.skip_worktree.is_empty()
             && self.intent_to_add.is_empty()
+            && self.phantom_directories.is_empty()
     }
 }
 
@@ -80,7 +84,8 @@ pub(super) fn effective_status(
     if corrections.is_empty() {
         return Some(st);
     }
-    if corrections.phantom_deletes.contains(path) {
+    if corrections.phantom_deletes.contains(path) || corrections.phantom_directories.contains(path)
+    {
         return None;
     }
     let st = skip_worktree::mask(st, path, &corrections.skip_worktree);
