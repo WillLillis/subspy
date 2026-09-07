@@ -65,7 +65,9 @@ struct StatusArgs {
     scope: StatusScope,
     format: Option<FormatChoice>,
     null_terminate: bool,
-    ignore_submodules: IgnoreSubmodules,
+    /// `None` when the flag is absent, which hands the decision to
+    /// `diff.ignoreSubmodules`.
+    ignore_submodules: Option<IgnoreSubmodules>,
     untracked_files: Option<UntrackedFiles>,
     /// `None` when the flag is absent (git's default: don't show ignored),
     /// `Some(mode)` when the user passed `--ignored[=<mode>]`.
@@ -111,7 +113,7 @@ impl ShimStatusRequest {
             output: OutputOpts {
                 format,
                 null_terminate: args.null_terminate,
-                ignore_submodules: args.ignore_submodules,
+                ignore_submodules: args.ignore_submodules.unwrap_or(defaults.ignore_submodules),
                 untracked_files: args.untracked_files.unwrap_or(defaults.untracked_files),
                 ignored_files: args.ignored_files.unwrap_or_default(),
                 // `status.branch` reaches the short format only. Porcelain
@@ -428,11 +430,11 @@ fn classify_status_arg(
 
     // --ignore-submodules[=WHEN]
     if arg == "--ignore-submodules" {
-        out.ignore_submodules = IgnoreSubmodules::All;
+        out.ignore_submodules = Some(IgnoreSubmodules::All);
         return Ok(());
     }
     if let Some(v) = arg.strip_prefix("--ignore-submodules=") {
-        out.ignore_submodules = parse_ignore_submodules(v).ok_or(Forward)?;
+        out.ignore_submodules = Some(parse_ignore_submodules(v).ok_or(Forward)?);
         return Ok(());
     }
 
@@ -749,13 +751,13 @@ mod tests {
     #[test]
     fn status_ignore_submodules_dirty() {
         let got = dispatch(&os(&["status", "--ignore-submodules=dirty"])).unwrap();
-        assert_eq!(got.args.ignore_submodules, IgnoreSubmodules::Dirty);
+        assert_eq!(got.args.ignore_submodules, Some(IgnoreSubmodules::Dirty));
     }
 
     #[test]
     fn status_ignore_submodules_no_value_means_all() {
         let got = dispatch(&os(&["status", "--ignore-submodules"])).unwrap();
-        assert_eq!(got.args.ignore_submodules, IgnoreSubmodules::All);
+        assert_eq!(got.args.ignore_submodules, Some(IgnoreSubmodules::All));
     }
 
     #[test]
@@ -986,7 +988,7 @@ mod tests {
             got.args.format,
             Some(FormatChoice::Porcelain(PorcelainVersion::V1))
         );
-        assert_eq!(got.args.ignore_submodules, IgnoreSubmodules::Dirty);
+        assert_eq!(got.args.ignore_submodules, Some(IgnoreSubmodules::Dirty));
         assert_eq!(got.args.untracked_files, Some(UntrackedFiles::All));
         assert_eq!(got.args.ahead_behind, Some(false));
         assert_eq!(got.quote_path, Some(false));
@@ -1009,7 +1011,7 @@ mod tests {
         );
         assert!(got.args.null_terminate);
         assert_eq!(got.args.untracked_files, Some(UntrackedFiles::All));
-        assert_eq!(got.args.ignore_submodules, IgnoreSubmodules::All);
+        assert_eq!(got.args.ignore_submodules, Some(IgnoreSubmodules::All));
     }
 
     #[test]
@@ -1018,8 +1020,9 @@ mod tests {
         // GitExtensions v6.0.5 source (`Commands.Arguments.cs:250`,
         // `GitStatusMonitor.cs:499`). Bare `--untracked-files` is
         // git-equivalent to `--untracked-files=all` per git-status(1);
-        // no `--ignore-submodules` is passed, so the daemon serves
-        // submodule statuses from cache.
+        // no `--ignore-submodules` is passed, leaving the mode to
+        // `diff.ignoreSubmodules` and the daemon serving submodule
+        // statuses from cache.
         let got = dispatch(&os(&["status", "--porcelain=2", "-z", "--untracked-files"])).unwrap();
         assert_eq!(
             got.args.format,
@@ -1027,7 +1030,7 @@ mod tests {
         );
         assert!(got.args.null_terminate);
         assert_eq!(got.args.untracked_files, Some(UntrackedFiles::All));
-        assert_eq!(got.args.ignore_submodules, IgnoreSubmodules::None);
+        assert_eq!(got.args.ignore_submodules, None);
     }
 
     #[test]
@@ -1293,7 +1296,7 @@ mod tests {
         );
         assert!(got.args.null_terminate);
         assert_eq!(got.args.untracked_files, Some(UntrackedFiles::All));
-        assert_eq!(got.args.ignore_submodules, IgnoreSubmodules::All);
+        assert_eq!(got.args.ignore_submodules, Some(IgnoreSubmodules::All));
     }
 
     /// The sentinel is routed by `main()` before `dispatch()` ever sees it.
@@ -1356,6 +1359,6 @@ mod tests {
         ]))
         .unwrap();
         assert_eq!(got.args.untracked_files, Some(UntrackedFiles::All));
-        assert_eq!(got.args.ignore_submodules, IgnoreSubmodules::All);
+        assert_eq!(got.args.ignore_submodules, Some(IgnoreSubmodules::All));
     }
 }

@@ -77,8 +77,13 @@ pub struct Status {
     #[arg(short = 'z')]
     pub null_terminate: bool,
     /// How to handle submodule changes in the output
-    #[arg(long, value_name = "WHEN", default_value = "none")]
-    pub ignore_submodules: IgnoreSubmodules,
+    #[arg(
+        long,
+        value_name = "WHEN",
+        default_missing_value = "all",
+        num_args = 0..=1
+    )]
+    pub ignore_submodules: Option<IgnoreSubmodules>,
     /// Show untracked files. Bare `-u` is `-u=all`, matching git (absent is `normal`).
     #[arg(
         long,
@@ -428,7 +433,7 @@ impl Status {
                 output: OutputOpts {
                     format,
                     null_terminate: self.null_terminate,
-                    ignore_submodules: self.ignore_submodules,
+                    ignore_submodules: self.ignore_submodules.unwrap_or(defaults.ignore_submodules),
                     untracked_files: self.untracked_files.unwrap_or(defaults.untracked_files),
                     ignored_files: self.ignored.unwrap_or_default(),
                     branch,

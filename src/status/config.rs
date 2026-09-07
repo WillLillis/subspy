@@ -9,7 +9,7 @@ use std::path::Path;
 use git2::Repository;
 
 use super::{
-    UntrackedFiles,
+    IgnoreSubmodules, UntrackedFiles,
     header::abbrev_is_valid,
     tracked::{RenameKey, configured_rename_detection},
 };
@@ -18,12 +18,18 @@ use super::{
 /// cannot drift apart.
 const UNTRACKED_KEY: &str = "status.showUntrackedFiles";
 
+/// `diff.ignoreSubmodules`, same.
+const IGNORE_SUBMODULES_KEY: &str = "diff.ignoreSubmodules";
+
 /// The [`super::OutputOpts`] values git takes from config when no flag sets them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[expect(clippy::struct_excessive_bools, reason = "matches git")]
 pub struct ConfigDefaults {
     /// `status.showUntrackedFiles`
     pub untracked_files: UntrackedFiles,
+    /// `diff.ignoreSubmodules`. Per-submodule `submodule.<name>.ignore` is
+    /// libgit2's to apply and stays out of here.
+    pub ignore_submodules: IgnoreSubmodules,
     /// `core.quotepath`
     pub quote_path: bool,
     /// `status.showStash`
@@ -46,6 +52,7 @@ impl ConfigDefaults {
     /// git's built-ins, used when the repository or its config is unreadable.
     pub const GIT: Self = Self {
         untracked_files: UntrackedFiles::Normal,
+        ignore_submodules: IgnoreSubmodules::None,
         quote_path: true,
         show_stash: false,
         relative_paths: true,
@@ -64,6 +71,7 @@ impl ConfigDefaults {
         };
         Self {
             untracked_files: untracked_files(&config).unwrap_or(Self::GIT.untracked_files),
+            ignore_submodules: ignore_submodules(&config).unwrap_or(Self::GIT.ignore_submodules),
             quote_path: config
                 .get_bool("core.quotepath")
                 .unwrap_or(Self::GIT.quote_path),
@@ -173,10 +181,25 @@ fn invalid_value(config: &git2::Config) -> Option<&'static str> {
     if is_set(config, UNTRACKED_KEY) && untracked_files(config).is_none() {
         return Some(UNTRACKED_KEY);
     }
+    if is_set(config, IGNORE_SUBMODULES_KEY) && ignore_submodules(config).is_none() {
+        return Some(IGNORE_SUBMODULES_KEY);
+    }
     if is_set(config, "core.abbrev") && !abbrev_is_valid(config) {
         return Some("core.abbrev");
     }
     None
+}
+
+/// `diff.ignoreSubmodules` takes the four mode names, lowercase only. git has no
+/// boolean fallback here and dies on anything else.
+fn ignore_submodules(config: &git2::Config) -> Option<IgnoreSubmodules> {
+    match config.get_string(IGNORE_SUBMODULES_KEY).ok()?.as_str() {
+        "none" => Some(IgnoreSubmodules::None),
+        "untracked" => Some(IgnoreSubmodules::Untracked),
+        "dirty" => Some(IgnoreSubmodules::Dirty),
+        "all" => Some(IgnoreSubmodules::All),
+        _ => None,
+    }
 }
 
 /// `status.showUntrackedFiles` takes the three mode names, lowercase only, and
