@@ -299,6 +299,18 @@ const CASES: &[Case] = &[
         "status.renameLimit overrides diff.renameLimit",
         setup_status_rename_limit_overrides_diff,
     ),
+    // One path that is both an index deletion and untracked, a tracked file
+    // replaced by a directory of the same name, and a directory git reports
+    // nothing at all for.
+    plain(
+        "index deleted, file still on disk",
+        setup_index_deleted_with_ondisk_file,
+    ),
+    plain(
+        "file replaced by directory",
+        setup_file_replaced_by_directory,
+    ),
+    plain("empty untracked dir", setup_empty_untracked_dir),
     plain("dotfile (untracked)", setup_dotfile),
     submodule_case("submodule clean", &["sub_a"], setup_submod_clean),
     submodule_case(
@@ -910,6 +922,50 @@ fn v2_untracked_all() {
         false,
         UntrackedFiles::All,
         IgnoredFiles::No,
+    );
+    for c in CASES {
+        run_case(c, opts);
+    }
+}
+
+/// The untracked mode changes what `--ignored` reports. git expands ignored
+/// directories under `-uall` and drops the ignored list entirely under `-uno`.
+#[test]
+fn v1_ignored_untracked_all() {
+    let opts = opts_with(
+        PorcelainVersion::V1,
+        false,
+        false,
+        UntrackedFiles::All,
+        IgnoredFiles::Traditional,
+    );
+    for c in CASES {
+        run_case(c, opts);
+    }
+}
+
+#[test]
+fn v1_ignored_untracked_none() {
+    let opts = opts_with(
+        PorcelainVersion::V1,
+        false,
+        false,
+        UntrackedFiles::No,
+        IgnoredFiles::Traditional,
+    );
+    for c in CASES {
+        run_case(c, opts);
+    }
+}
+
+#[test]
+fn v2_ignored_untracked_all() {
+    let opts = opts_with(
+        PorcelainVersion::V2,
+        false,
+        false,
+        UntrackedFiles::All,
+        IgnoredFiles::Traditional,
     );
     for c in CASES {
         run_case(c, opts);

@@ -593,9 +593,15 @@ pub(super) fn extract_modes_and_oids(
     let m_head = entry
         .head_to_index()
         .map_or(m_idx, |d| u32::from(d.old_file().mode()));
-    let m_work = entry
-        .index_to_workdir()
-        .map_or(m_idx, |d| u32::from(d.new_file().mode()));
+    // A path that is also untracked owns its worktree file through the separate
+    // untracked row, so this row has no workdir side of its own.
+    let m_work = if st.contains(git2::Status::WT_NEW) {
+        0
+    } else {
+        entry
+            .index_to_workdir()
+            .map_or(m_idx, |d| u32::from(d.new_file().mode()))
+    };
     // Mode 0 means libgit2 saw no worktree file. If the correction layer
     // cleared the deletion anyway the file is sparse-excluded, not deleted,
     // and git reports the index mode.

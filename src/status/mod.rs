@@ -259,6 +259,11 @@ impl StatusEntries<'_> {
     }
 }
 
+/// Whether git renders an untracked row for `st`.
+pub(super) const fn is_untracked(st: git2::Status) -> bool {
+    st.contains(git2::Status::WT_NEW) && !st.contains(git2::Status::IGNORED)
+}
+
 enum AssembleOutcome<T> {
     Rendered(T),
     Declined(DeclineReason),
@@ -286,8 +291,13 @@ pub fn build_status_options(opts: OutputOpts, repo_kind: RepoKind) -> git2::Stat
         IgnoredFiles::No => {
             st_opts.include_ignored(false);
         }
+        // git ties the ignored listing to the untracked mode. `-uno` drops it
+        // entirely, and `-uall` expands ignored directories the same way it
+        // expands untracked ones.
         IgnoredFiles::Traditional => {
-            st_opts.include_ignored(true).recurse_ignored_dirs(false);
+            st_opts
+                .include_ignored(opts.untracked_files != UntrackedFiles::No)
+                .recurse_ignored_dirs(opts.untracked_files == UntrackedFiles::All);
         }
     }
     // The repo was just opened, so the index is already fresh from disk.
@@ -471,6 +481,7 @@ fn assemble_status_scoped<R>(
     let mut submods = submodule::apply_ignore_submodules(
         raw_submods,
         opts.ignore_submodules,
+        opts.untracked_files,
         &per_submodule_ignore,
     );
 

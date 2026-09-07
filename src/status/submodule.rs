@@ -236,12 +236,20 @@ fn mode_mask(mode: IgnoreSubmodules) -> StatusSummary {
 pub fn apply_ignore_submodules(
     statuses: Vec<(String, StatusSummary)>,
     mode: IgnoreSubmodules,
+    untracked: super::UntrackedFiles,
     per_submodule: &rustc_hash::FxHashMap<String, IgnoreSubmodules>,
 ) -> Vec<(String, StatusSummary)> {
     if mode == IgnoreSubmodules::All {
         return Vec::new();
     }
-    if mode == IgnoreSubmodules::None && per_submodule.is_empty() {
+    // `-uno` hides untracked content inside submodules as well as at the top
+    // level, so a submodule dirtied only that way reports clean.
+    let untracked_mask = if untracked == super::UntrackedFiles::No {
+        !StatusSummary::UNTRACKED_CONTENT
+    } else {
+        StatusSummary::all()
+    };
+    if mode == IgnoreSubmodules::None && per_submodule.is_empty() && untracked_mask.is_all() {
         return statuses;
     }
     statuses
@@ -255,7 +263,7 @@ pub fn apply_ignore_submodules(
             } else {
                 mode
             };
-            let masked = st & mode_mask(effective);
+            let masked = st & mode_mask(effective) & untracked_mask;
             (!masked.is_empty()).then_some((path, masked))
         })
         .collect()

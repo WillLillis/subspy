@@ -34,10 +34,10 @@ pub struct ConfigDefaults {
     pub status_hints: bool,
     /// `status.short`, the default output format when no format flag is given.
     pub short: bool,
-    /// `status.branch`. Only reaches the short format; git leaves porcelain
+    /// `status.branch`. Only reaches the short format. git leaves porcelain
     /// headers to an explicit `--branch`.
     pub branch: bool,
-    /// `status.aheadBehind`. Only reaches the long format; porcelain v2 keeps
+    /// `status.aheadBehind`. Only reaches the long format. Porcelain v2 keeps
     /// real counts unless `--no-ahead-behind` is passed.
     pub ahead_behind: bool,
 }
