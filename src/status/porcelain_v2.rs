@@ -127,17 +127,16 @@ pub fn display_porcelain_v2(
             .map_or(git2::Oid::ZERO_SHA1, |e| e.id)
     };
 
+    // git makes two passes here, emitting every `1`/`2` line before any `u`
+    // line, so conflicts are held back rather than interleaved. Each pass stays
+    // in path order.
+    let mut conflicted = Vec::new();
     for_each_tracked_row(tracked, submods, |row| match row {
         TrackedOrSubRow::File(row) => match row {
             TrackedRow::Entry(entry, st) => {
                 if st.contains(git2::Status::CONFLICTED) {
-                    write_conflict(
-                        &entry,
-                        &conflicts,
-                        entries.conflicted_submodules,
-                        out,
-                        &render_opts,
-                    )
+                    conflicted.push(entry);
+                    Ok(())
                 } else if st.intersects(git2::Status::INDEX_RENAMED | git2::Status::WT_RENAMED) {
                     write_renamed(repo, &entry, st, out, &render_opts)
                 } else {
@@ -161,6 +160,16 @@ pub fn display_porcelain_v2(
             &render_opts,
         ),
     })?;
+
+    for entry in conflicted {
+        write_conflict(
+            &entry,
+            &conflicts,
+            entries.conflicted_submodules,
+            out,
+            &render_opts,
+        )?;
+    }
 
     for entry in entries.non_submod.iter().filter(|e| {
         entries.effective(e).is_some_and(super::is_untracked)
@@ -519,13 +528,7 @@ fn write_conflict(
             git2::Oid::ZERO_SHA1,
         ),
         |c| {
-            let xy = match (c.ancestor.is_some(), c.ours.is_some(), c.theirs.is_some()) {
-                (false, true, true) => "AA",
-                (true, false, false) => "DD",
-                (true, false, true) => "DU",
-                (true, true, false) => "UD",
-                _ => "UU",
-            };
+            let xy = c.kind().xy();
             let m1 = c.ancestor.map_or(0u32, |(m, _)| m);
             let m2 = c.ours.map_or(0u32, |(m, _)| m);
             let m3 = c.theirs.map_or(0u32, |(m, _)| m);

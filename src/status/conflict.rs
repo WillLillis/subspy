@@ -15,6 +15,72 @@ pub(super) struct ConflictEntry {
     pub theirs: Option<(u32, git2::Oid)>,
 }
 
+/// Which of the three index stages a conflicted path holds. git derives both
+/// the porcelain `XY` code and the long-format label from this, so the two stay
+/// in agreement by sharing one decode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ConflictKind {
+    BothModified,
+    BothAdded,
+    DeletedByUs,
+    DeletedByThem,
+    BothDeleted,
+    AddedByUs,
+    AddedByThem,
+}
+
+impl ConflictKind {
+    /// Each argument is whether that stage is present.
+    pub(super) const fn from_stages(ancestor: bool, ours: bool, theirs: bool) -> Self {
+        match (ancestor, ours, theirs) {
+            (false, true, true) => Self::BothAdded,
+            (true, false, true) => Self::DeletedByUs,
+            (true, true, false) => Self::DeletedByThem,
+            (true, false, false) => Self::BothDeleted,
+            (false, true, false) => Self::AddedByUs,
+            (false, false, true) => Self::AddedByThem,
+            // All three stages present, plus the empty case a conflict cannot
+            // reach.
+            (true, true, true) | (false, false, false) => Self::BothModified,
+        }
+    }
+
+    pub(super) const fn xy(self) -> &'static str {
+        match self {
+            Self::BothModified => "UU",
+            Self::BothAdded => "AA",
+            Self::DeletedByUs => "DU",
+            Self::DeletedByThem => "UD",
+            Self::BothDeleted => "DD",
+            Self::AddedByUs => "AU",
+            Self::AddedByThem => "UA",
+        }
+    }
+
+    /// Padded to git's long-format column alignment.
+    pub(super) const fn label(self) -> &'static str {
+        match self {
+            Self::BothModified => "both modified:   ",
+            Self::BothAdded => "both added:      ",
+            Self::DeletedByUs => "deleted by us:   ",
+            Self::DeletedByThem => "deleted by them: ",
+            Self::BothDeleted => "both deleted:    ",
+            Self::AddedByUs => "added by us:     ",
+            Self::AddedByThem => "added by them:   ",
+        }
+    }
+}
+
+impl ConflictEntry {
+    pub(super) const fn kind(&self) -> ConflictKind {
+        ConflictKind::from_stages(
+            self.ancestor.is_some(),
+            self.ours.is_some(),
+            self.theirs.is_some(),
+        )
+    }
+}
+
 /// The raw byte paths of every unresolved-conflict entry in the index (stages
 /// 1-3). Such a path has no stage-0 entry but is *unmerged*, not deleted, and
 /// git reports it only under "Unmerged paths". Callers use it to keep a

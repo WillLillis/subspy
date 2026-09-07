@@ -272,6 +272,13 @@ const CASES: &[Case] = &[
     plain("detached HEAD", setup_detached_head),
     plain("ignored files", setup_ignored_files),
     plain("merge conflict (UU/AA/UD/DU)", setup_merge_conflict),
+    // `AU`/`UA`/`DD`, which a both-modified conflict never produces, and the
+    // two-pass ordering that keeps `u` lines after every ordinary line.
+    plain("rename/rename conflict", setup_rename_rename_conflict),
+    plain(
+        "conflict between staged paths",
+        setup_conflict_between_staged_paths,
+    ),
     plain("path with non-ASCII", setup_path_with_non_ascii),
     plain("path with backslash", setup_path_with_backslash),
     plain("multiple renames", setup_multiple_renames),

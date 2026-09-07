@@ -457,15 +457,7 @@ fn write_conflict(
     style: &LineStyle,
 ) -> io::Result<()> {
     let path = entry.path().unwrap_or("");
-    let xy = conflicts.get(path).map_or("UU", |c| {
-        match (c.ancestor.is_some(), c.ours.is_some(), c.theirs.is_some()) {
-            (false, true, true) => "AA",
-            (true, false, false) => "DD",
-            (true, false, true) => "DU",
-            (true, true, false) => "UD",
-            _ => "UU",
-        }
-    });
+    let xy = conflicts.get(path).map_or("UU", |c| c.kind().xy());
     let mut chars = xy.chars();
     let color = style.palette.map(|p| p.unmerged);
     let x = XyChar::new(chars.next().unwrap(), color);
