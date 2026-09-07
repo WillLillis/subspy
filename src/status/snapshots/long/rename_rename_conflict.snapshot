@@ -1,0 +1,12 @@
+On branch master
+You have unmerged paths.
+  (fix conflicts and run "git commit")
+  (use "git merge --abort" to abort the merge)
+
+Unmerged paths:
+  (use "git add/rm <file>..." as appropriate to mark resolution)
+	both deleted:    f.txt
+	added by us:     ours.txt
+	added by them:   theirs.txt
+
+no changes added to commit (use "git add" and/or "git commit -a")

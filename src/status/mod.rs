@@ -208,12 +208,15 @@ pub struct OutputOpts {
     pub status_hints: bool,
 }
 
-/// Long-format flags (`--ahead-behind`, `--show-stash`, `advice.statusHints`).
+/// Long-format flags (`--ahead-behind`, `--show-stash`, `--untracked-files`,
+/// `advice.statusHints`).
 #[derive(Debug, Clone, Copy)]
+#[expect(clippy::struct_excessive_bools, reason = "matches git")]
 pub struct LongOpts {
     pub ahead_behind: bool,
     pub show_stash: bool,
     pub status_hints: bool,
+    pub show_untracked: bool,
 }
 
 /// Porcelain-specific format flags (`-z`, `--branch`, `--ahead-behind`,
@@ -637,6 +640,7 @@ fn render_status(
         ahead_behind: opts.ahead_behind,
         show_stash: opts.show_stash,
         status_hints: opts.status_hints,
+        show_untracked: opts.untracked_files != UntrackedFiles::No,
     };
     let format = opts.format;
     let ignore_submodules = opts.ignore_submodules;

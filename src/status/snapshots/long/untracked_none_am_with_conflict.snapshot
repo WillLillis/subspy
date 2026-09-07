@@ -1,0 +1,7 @@
+On branch master
+You are in the middle of an am session.
+  (fix conflicts and then run "git am --continue")
+  (use "git am --skip" to skip this patch)
+  (use "git am --abort" to restore the original branch)
+
+nothing to commit (use -u to show untracked files)

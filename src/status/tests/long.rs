@@ -168,6 +168,40 @@ const CASES: &[Case] = &[
         setup: Setup::Plain(setup_cherry_pick_with_conflict),
     },
     Case {
+        name: "delete_modify_conflict",
+        setup: Setup::Plain(setup_delete_modify_conflict),
+    },
+    // Both-deleted alongside conflicts that are not deletions, which is the
+    // third resolution hint git picks between.
+    Case {
+        name: "rename_rename_conflict",
+        setup: Setup::Plain(setup_rename_rename_conflict),
+    },
+    Case {
+        name: "both_deleted_conflict",
+        setup: Setup::Plain(setup_both_deleted_conflict),
+    },
+    Case {
+        name: "revert_with_conflict",
+        setup: Setup::Plain(setup_revert_with_conflict),
+    },
+    Case {
+        name: "am_with_conflict",
+        setup: Setup::Plain(setup_am_with_conflict),
+    },
+    Case {
+        name: "am_with_conflict_three_way",
+        setup: Setup::Plain(setup_am_with_conflict_three_way),
+    },
+    Case {
+        name: "am_empty_patch",
+        setup: Setup::Plain(setup_am_empty_patch),
+    },
+    Case {
+        name: "unborn_with_conflict",
+        setup: Setup::Plain(setup_unborn_with_conflict),
+    },
+    Case {
         name: "rebase_interactive_with_conflict",
         setup: Setup::Plain(setup_rebase_interactive_with_conflict),
     },
@@ -299,6 +333,7 @@ fn run_subspy_long(project: &ProjectPath, opts: OutputOpts) -> Vec<u8> {
         ahead_behind: opts.ahead_behind,
         show_stash: opts.show_stash,
         status_hints: opts.status_hints,
+        show_untracked: opts.untracked_files != UntrackedFiles::No,
     };
     let has_submodules = project.kind.has_submodules();
     assemble_status(
@@ -495,6 +530,48 @@ fn long_untracked_all_snapshot() {
         ..default_opts()
     };
     run_case(&case, opts);
+}
+
+/// `--untracked-files=no` swaps two lines in: `Untracked files not listed` where
+/// the untracked section would go when the index has something to commit, and a
+/// `nothing to commit` trailer that points at `-u` when it does not.
+#[test]
+fn long_untracked_none_snapshots() {
+    const CASES: &[Case] = &[
+        // Staged change, so the "not listed" line and no trailer.
+        Case {
+            name: "untracked_none_staged",
+            setup: Setup::Plain(setup_staged_with_untracked),
+        },
+        // Nothing staged and a clean worktree, so the trailer instead.
+        Case {
+            name: "untracked_none_am_with_conflict",
+            setup: Setup::Plain(setup_am_with_conflict),
+        },
+        // Unmerged entries count as committable under an unborn HEAD, so this
+        // takes the "not listed" branch despite nothing being staged.
+        Case {
+            name: "untracked_none_unborn_with_conflict",
+            setup: Setup::Plain(setup_unborn_with_conflict),
+        },
+        Case {
+            name: "untracked_none_both_deleted_conflict",
+            setup: Setup::Plain(setup_both_deleted_conflict),
+        },
+        // Unmerged entries stop counting as committable once HEAD exists, so
+        // neither line appears and the dirty-worktree trailer stands.
+        Case {
+            name: "untracked_none_revert_with_conflict",
+            setup: Setup::Plain(setup_revert_with_conflict),
+        },
+    ];
+    let opts = OutputOpts {
+        untracked_files: UntrackedFiles::No,
+        ..default_opts()
+    };
+    for case in CASES {
+        run_case(case, opts);
+    }
 }
 
 #[test]

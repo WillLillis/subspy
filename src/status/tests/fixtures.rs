@@ -716,6 +716,155 @@ pub fn setup_cherry_pick_with_conflict(root: &Path) {
     repo.try_git(&["cherry-pick", "feature"]);
 }
 
+/// A merge that conflicts on one path deleted by the other side and on one
+/// added by both, plus a staged file. Two hints turn on this shape: the mixed
+/// delete/modify picks git's "add/rm as appropriate" resolution wording, and the
+/// in-progress merge suppresses the unstage hint under "Changes to be
+/// committed".
+pub fn setup_delete_modify_conflict(root: &Path) {
+    let repo = Repo::init(root);
+    repo.write("main.txt", "init\n")
+        .add_all()
+        .commit("init")
+        .branch("second")
+        .rm_tracked("main.txt")
+        .commit("delete main.txt")
+        .write("conflict.txt", "second\n")
+        .add_all()
+        .commit("second")
+        .checkout("master")
+        .write("main.txt", "on second\n")
+        .add_all()
+        .commit("on second")
+        .write("conflict.txt", "master\n")
+        .add_all()
+        .commit("master");
+    let output = repo.try_git(&["merge", "second", "--no-edit"]);
+    assert!(!output.status.success(), "expected the merge to conflict");
+    repo.write("staged.txt", "staged\n").add("staged.txt");
+}
+
+/// [`setup_rename_rename_conflict`] with both new names resolved, leaving the
+/// base path at stage 1 alone. That is the only shape git points at `git rm` to
+/// resolve.
+pub fn setup_both_deleted_conflict(root: &Path) {
+    setup_rename_rename_conflict(root);
+    Repo::new(root).add("ours.txt").add("theirs.txt");
+}
+
+/// A revert that conflicts. git keys the unstage hint on there being no merge or
+/// cherry-pick in progress, so revert gets it and the two of them do not.
+pub fn setup_revert_with_conflict(root: &Path) {
+    let repo = Repo::init(root);
+    repo.write("file.txt", "base\n")
+        .add_all()
+        .commit("base")
+        .write("file.txt", "second\n")
+        .add_all()
+        .commit("second")
+        .write("file.txt", "third\n")
+        .add_all()
+        .commit("third");
+    let output = repo.try_git(&["revert", "--no-edit", "HEAD~1"]);
+    assert!(!output.status.success(), "expected the revert to conflict");
+}
+
+/// Builds a repo whose `master` and `feature` edit the same line, and formats
+/// `feature`'s commit as a patch under `.git/` (outside the working tree, so it
+/// does not show up as untracked). Returns with `master` checked out.
+fn setup_am_patch(root: &Path) -> Repo {
+    let repo = Repo::init(root);
+    repo.write("file.txt", "base\n")
+        .add_all()
+        .commit("base")
+        .branch("feature")
+        .write("file.txt", "from feature\n")
+        .add_all()
+        .commit("feature commit");
+    repo.run_git(&["format-patch", "-q", "-1", "-o", ".git/am-patches"]);
+    repo.checkout("master")
+        .write("file.txt", "from master\n")
+        .add_all()
+        .commit("master commit");
+    repo
+}
+
+/// A `git am` that fails to apply. Without `--3way` nothing lands in the index,
+/// so the session has no conflicted entries even though git still tells you to
+/// fix conflicts.
+pub fn setup_am_with_conflict(root: &Path) {
+    let repo = setup_am_patch(root);
+    let output = repo.try_git(&["am", ".git/am-patches/0001-feature-commit.patch"]);
+    assert!(!output.status.success(), "expected the am to fail to apply");
+}
+
+/// The same patch applied with `--3way`, which does leave conflicted index
+/// entries.
+pub fn setup_am_with_conflict_three_way(root: &Path) {
+    let repo = setup_am_patch(root);
+    let output = repo.try_git(&["am", "--3way", ".git/am-patches/0001-feature-commit.patch"]);
+    assert!(!output.status.success(), "expected the am to conflict");
+}
+
+/// A `git am` stopped on a patch with no diff, which git describes with its own
+/// header line and hint set rather than the conflict wording.
+pub fn setup_am_empty_patch(root: &Path) {
+    let repo = Repo::init(root);
+    repo.write("file.txt", "base\n").add_all().commit("base");
+    repo.run_git(&["commit", "-q", "--allow-empty", "-m", "empty commit"]);
+    repo.run_git(&[
+        "format-patch",
+        "-q",
+        "--always",
+        "-1",
+        "-o",
+        ".git/am-patches",
+    ]);
+    repo.run_git(&["reset", "-q", "--hard", "HEAD~1"]);
+    let output = repo.try_git(&["am", ".git/am-patches/0001-empty-commit.patch"]);
+    assert!(!output.status.success(), "expected the am to stop");
+}
+
+/// Conflicted index entries under an unborn HEAD. `git read-tree -m` merges
+/// three trees into the index without needing a commit to be checked out, which
+/// is the only way to reach this state. git counts the unmerged entries as
+/// committable here, so it prints no trailer at all.
+pub fn setup_unborn_with_conflict(root: &Path) {
+    let repo = Repo::init(root);
+    repo.write("f.txt", "base\n")
+        .add_all()
+        .commit("base")
+        .branch("ours")
+        .write("f.txt", "ours\n")
+        .add_all()
+        .commit("ours")
+        .checkout("master")
+        .branch("theirs")
+        .write("f.txt", "theirs\n")
+        .add_all()
+        .commit("theirs");
+    repo.run_git(&["checkout", "-q", "--orphan", "fresh"]);
+    repo.run_git(&["rm", "-q", "-rf", "--cached", "."]);
+    repo.rm_file("f.txt");
+    repo.run_git(&[
+        "read-tree",
+        "-m",
+        "master^{tree}",
+        "ours^{tree}",
+        "theirs^{tree}",
+    ]);
+    repo.write("extra.txt", "extra\n");
+}
+
+/// A staged change with nothing else, for the `-uno` "Untracked files not
+/// listed" line, which git prints only when the index has something to commit.
+pub fn setup_staged_with_untracked(root: &Path) {
+    let repo = Repo::init(root);
+    repo.write("file.txt", "base\n").add_all().commit("base");
+    repo.write("file.txt", "modified\n").add("file.txt");
+    repo.write("new.txt", "untracked\n");
+}
+
 // -- Submodule setups --
 
 pub fn setup_submodule_modified(h: &TestHarness) {
