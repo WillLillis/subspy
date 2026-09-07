@@ -62,19 +62,13 @@ impl WatchServer {
             })
         });
 
-        let progress_queues = try_lock_for(&self.progress_queue, DEBUG_LOCK_TIMEOUT).map(|guard| {
-            guard
-                .iter()
-                .map(|(pid, queue)| {
-                    let updates: Vec<(u32, u32)> =
-                        queue.iter().map(|p| (p.curr, p.total)).collect();
-                    (*pid, updates)
-                })
-                .collect()
-        });
-
         let progress_subscribers = try_lock_for(&self.progress_subscribers, DEBUG_LOCK_TIMEOUT)
-            .map(|guard| guard.iter().copied().collect());
+            .map(|guard| {
+                guard
+                    .iter()
+                    .map(|(pid, pending)| (*pid, pending.map(|p| (p.curr, p.total))))
+                    .collect()
+            });
 
         DebugState {
             server_pid: std::process::id(),
@@ -88,7 +82,6 @@ impl WatchServer {
                 .unwrap_or_else(|name| name.to_string_lossy().into_owned()),
             submodule_statuses,
             in_flight: in_flight_tasks,
-            progress_queues,
             last_watcher_error: self.last_watcher_error.clone(),
             tripwires,
         }

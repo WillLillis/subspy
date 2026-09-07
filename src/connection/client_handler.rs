@@ -21,7 +21,7 @@ use crate::{
 };
 
 use super::{
-    progress::{ProgressMap, ProgressSubscribers, ProgressUpdate},
+    progress::{ProgressSubscribers, ProgressUpdate},
     try_lock,
     watch_server::{ControlMessage, StatusMap},
 };
@@ -39,10 +39,9 @@ pub(super) fn handle_client_connection(
     conn: IpcStream,
     control_tx: crossbeam_channel::Sender<ControlMessage>,
     statuses: Arc<StatusMap>,
-    progress: Arc<ProgressMap>,
     subscribers: Arc<ProgressSubscribers>,
 ) {
-    if let Err(e) = dispatch_client_message(conn, &control_tx, &statuses, &progress, &subscribers) {
+    if let Err(e) = dispatch_client_message(conn, &control_tx, &statuses, &subscribers) {
         error!("Failed to handle client connection: {e}");
     }
 }
@@ -51,7 +50,6 @@ fn dispatch_client_message(
     conn: IpcStream,
     control_tx: &crossbeam_channel::Sender<ControlMessage>,
     statuses: &StatusMap,
-    progress: &ProgressMap,
     subscribers: &ProgressSubscribers,
 ) -> WatchResult<()> {
     let mut conn = BufReader::new(conn);
@@ -85,14 +83,14 @@ fn dispatch_client_message(
             subscribers
                 .lock()
                 .expect("Subscribers mutex poisoned")
-                .insert(pid);
+                .insert(pid, None);
             control_tx
                 .send(ControlMessage::Reindex { replace_watchers })
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::BrokenPipe, e.to_string()))?;
-            handle_reindex_request(conn, pid, progress, subscribers)?;
+            handle_reindex_request(conn, pid, subscribers)?;
         }
         ClientMessage::Status(client_pid) => {
-            handle_status_request(conn, client_pid, statuses, progress, subscribers)?;
+            handle_status_request(conn, client_pid, statuses, subscribers)?;
         }
         ClientMessage::Shutdown => {
             control_tx
@@ -114,10 +112,9 @@ fn handle_status_request(
     mut conn: BufReader<IpcStream>,
     client_pid: u32,
     statuses: &StatusMap,
-    progress: &ProgressMap,
     subscribers: &ProgressSubscribers,
 ) -> WatchResult<()> {
-    // An immediately available status map avoids 3 progress subscriber mutex locks/unlocks
+    // An immediately available status map avoids 2 progress subscriber mutex locks/unlocks
     if let Some(guard) = try_lock(statuses) {
         return ENCODE_BUF.with_borrow_mut(|buf| -> WatchResult<()> {
             encode_status_response(&mut conn, guard, buf)?;
@@ -129,13 +126,9 @@ fn handle_status_request(
     subscribers
         .lock()
         .expect("Subscribers mutex poisoned")
-        .insert(client_pid);
-    let result = get_status_guard_with_progress(&mut conn, client_pid, statuses, progress);
-    _ = subscribers
-        .lock()
-        .expect("Subscribers mutex poisoned")
-        .remove(&client_pid);
-    _ = progress.lock().expect("Mutex poisoned").remove(&client_pid);
+        .insert(client_pid, None);
+    let result = get_status_guard_with_progress(&mut conn, client_pid, statuses, subscribers);
+    remove_progress_client(client_pid, subscribers);
     let guard = result?;
 
     ENCODE_BUF.with_borrow_mut(|buf| -> WatchResult<()> {
@@ -212,11 +205,10 @@ fn encode_status_into(map: &BTreeMap<String, StatusSummary>, buf: &mut Vec<u8>) 
 fn handle_reindex_request(
     mut conn: BufReader<IpcStream>,
     client_pid: u32,
-    progress: &ProgressMap,
     subscribers: &ProgressSubscribers,
 ) -> WatchResult<()> {
     let result = loop {
-        match try_send_reindex_progress_update(&mut conn, client_pid, progress, subscribers) {
+        match try_send_reindex_progress_update(&mut conn, client_pid, subscribers) {
             Ok(true) => break Ok(()),
             Ok(false) => std::thread::yield_now(),
             Err(e) => break Err(e),
@@ -224,48 +216,38 @@ fn handle_reindex_request(
     };
 
     if result.is_err() {
-        remove_progress_client(client_pid, progress, subscribers);
+        remove_progress_client(client_pid, subscribers);
     }
 
     result
 }
 
-/// Sends one queued reindex progress update. Terminal updates remove the
-/// client's progress state before they are written, so a sequential request
-/// from the same process cannot be mistaken for stale state from this one.
+/// Sends the pending reindex progress update. Terminal updates unsubscribe the
+/// client before they are written, so a sequential request from the same process
+/// cannot be mistaken for stale state from this one.
 fn try_send_reindex_progress_update(
     conn: &mut BufReader<IpcStream>,
     client_pid: u32,
-    progress: &ProgressMap,
     subscribers: &ProgressSubscribers,
 ) -> WatchResult<bool> {
-    let Some(ProgressUpdate { curr, total }) = try_take_progress_update(client_pid, progress)
+    let Some(ProgressUpdate { curr, total }) = try_take_progress_update(client_pid, subscribers)
     else {
         return Ok(false);
     };
     let complete = curr == total;
     if complete {
-        // Once this write completes, the client can immediately register its
-        // next request under the same PID. Finish this request's cleanup first
-        // so it cannot delete the new subscriber and queue afterward.
-        remove_progress_client(client_pid, progress, subscribers);
+        remove_progress_client(client_pid, subscribers);
     }
     send_progress_update(conn, curr, total)?;
     Ok(complete)
 }
 
-/// Removes a client's progress state using the same lock order as
-/// [`crate::connection::progress::broadcast_progress`].
-fn remove_progress_client(
-    client_pid: u32,
-    progress: &ProgressMap,
-    subscribers: &ProgressSubscribers,
-) {
+/// Unsubscribes a client, discarding any update it had not read.
+fn remove_progress_client(client_pid: u32, subscribers: &ProgressSubscribers) {
     _ = subscribers
         .lock()
         .expect("Subscribers mutex poisoned")
         .remove(&client_pid);
-    _ = progress.lock().expect("Mutex poisoned").remove(&client_pid);
 }
 
 /// Attempts to send an indexing progress message to `conn` for `client_pid`. Returns
@@ -277,9 +259,9 @@ fn remove_progress_client(
 fn try_send_progress_update(
     conn: &mut BufReader<IpcStream>,
     client_pid: u32,
-    progress: &ProgressMap,
+    subscribers: &ProgressSubscribers,
 ) -> WatchResult<bool> {
-    let Some(ProgressUpdate { curr, total }) = try_take_progress_update(client_pid, progress)
+    let Some(ProgressUpdate { curr, total }) = try_take_progress_update(client_pid, subscribers)
     else {
         return Ok(false);
     };
@@ -289,10 +271,12 @@ fn try_send_progress_update(
     Ok(curr == total)
 }
 
-/// Takes the next queued update without blocking behind an active broadcast.
-fn try_take_progress_update(client_pid: u32, progress: &ProgressMap) -> Option<ProgressUpdate> {
-    let mut progress_queue = try_lock(progress)?;
-    progress_queue.get_mut(&client_pid)?.pop_front()
+/// Takes the pending update without blocking behind an active broadcast.
+fn try_take_progress_update(
+    client_pid: u32,
+    subscribers: &ProgressSubscribers,
+) -> Option<ProgressUpdate> {
+    try_lock(subscribers)?.get_mut(&client_pid)?.take()
 }
 
 fn send_progress_update(conn: &mut BufReader<IpcStream>, curr: u32, total: u32) -> WatchResult<()> {
@@ -304,19 +288,19 @@ fn send_progress_update(conn: &mut BufReader<IpcStream>, curr: u32, total: u32) 
     Ok(())
 }
 
-/// Acquires the `statuses` guard, sending queued progress updates while the main
+/// Acquires the `statuses` guard, sending progress updates while the main
 /// indexing loop holds the lock.
 fn get_status_guard_with_progress<'a>(
     conn: &mut BufReader<IpcStream>,
     client_pid: u32,
     statuses: &'a StatusMap,
-    progress: &ProgressMap,
+    subscribers: &ProgressSubscribers,
 ) -> WatchResult<MutexGuard<'a, BTreeMap<String, StatusSummary>>> {
     loop {
         if let Some(g) = try_lock(statuses) {
             return Ok(g);
         }
-        if !try_send_progress_update(conn, client_pid, progress)? {
+        if !try_send_progress_update(conn, client_pid, subscribers)? {
             std::thread::yield_now();
         }
     }

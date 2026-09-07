@@ -34,13 +34,17 @@ impl fmt::Display for DebugState {
         writeln!(f, "Root path: {}", self.root_path)?;
         writeln!(f, "Socket: {}", self.socket_name)?;
         writeln!(f, "Watcher count: {}", self.watcher_count)?;
-        write!(f, "Progress subscribers: ")?;
+        writeln!(f, "\nProgress subscribers:")?;
         match &self.progress_subscribers {
-            None => writeln!(f, "WARNING: mutex locked, could not read")?,
-            Some(subs) if subs.is_empty() => writeln!(f, "(none)")?,
+            None => writeln!(f, "  WARNING: mutex locked, could not read")?,
+            Some(subs) if subs.is_empty() => writeln!(f, "  (none)")?,
             Some(subs) => {
-                let pids: Vec<String> = subs.iter().map(ToString::to_string).collect();
-                writeln!(f, "{}", pids.join(", "))?;
+                for (pid, pending) in subs {
+                    match pending {
+                        Some((curr, total)) => writeln!(f, "  PID {pid}: {curr}/{total} pending")?,
+                        None => writeln!(f, "  PID {pid}: nothing pending")?,
+                    }
+                }
             }
         }
 
@@ -77,20 +81,6 @@ impl fmt::Display for DebugState {
             Some(tasks) => {
                 for (path, task_state) in tasks {
                     writeln!(f, "  {path}: {task_state}")?;
-                }
-            }
-        }
-
-        writeln!(f, "\nProgress queues:")?;
-        match &self.progress_queues {
-            None => writeln!(f, "  WARNING: mutex locked, could not read")?,
-            Some(queues) if queues.is_empty() => writeln!(f, "  (none)")?,
-            Some(queues) => {
-                for (pid, updates) in queues {
-                    writeln!(f, "  PID {pid}: {} pending update(s)", updates.len())?;
-                    for (curr, total) in updates {
-                        writeln!(f, "    {curr}/{total}")?;
-                    }
                 }
             }
         }
