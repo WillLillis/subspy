@@ -394,22 +394,12 @@ pub fn print_unmerged_paths(
             header = true;
         }
 
-        // Padded to 17 chars to match git's column alignment
-        #[allow(clippy::match_same_arms)]
-        let type_str = match (
+        let type_str = super::conflict::ConflictKind::from_stages(
             conflict.ancestor.is_some(),
             conflict.our.is_some(),
             conflict.their.is_some(),
-        ) {
-            (true, true, true) => "both modified:   ",
-            (false, true, true) => "both added:      ",
-            (true, false, true) => "deleted by us:   ",
-            (true, true, false) => "deleted by them: ",
-            (true, false, false) => "both deleted:    ",
-            (false, true, false) => "added by us:     ",
-            (false, false, true) => "added by them:   ",
-            (false, false, false) => "both modified:   ",
-        };
+        )
+        .label();
         paint_into(stdout, RED, |out| {
             write!(out, "\t{type_str}")?;
             rel.write_to(out, path)

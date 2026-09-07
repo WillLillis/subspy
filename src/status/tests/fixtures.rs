@@ -417,6 +417,39 @@ pub fn setup_file_replaced_by_directory(root: &Path) {
     repo.rm_file("f").mkdir("f").write("f/inner.txt", "inner\n");
 }
 
+/// Renaming one file to two different names on two branches. The base path ends
+/// up at stage 1 only (`DD`) while each new name has a single side, giving the
+/// `AU` and `UA` codes a both-modified conflict never produces.
+pub fn setup_rename_rename_conflict(root: &Path) {
+    let repo = Repo::init(root);
+    repo.write("f.txt", "base\n")
+        .add_all()
+        .commit("base")
+        .branch("feature")
+        .mv("f.txt", "theirs.txt")
+        .commit("rename on feature")
+        .checkout("master")
+        .mv("f.txt", "ours.txt")
+        .commit("rename on master");
+    let output = repo.try_git(&["merge", "feature", "--no-edit"]);
+    assert!(
+        !output.status.success(),
+        "expected the rename/rename merge to conflict"
+    );
+}
+
+/// Conflicts alongside staged paths that sort both before and after them. git
+/// emits every ordinary line before any unmerged one, so a single path-sorted
+/// stream would interleave them.
+pub fn setup_conflict_between_staged_paths(root: &Path) {
+    setup_merge_with_conflict(root);
+    Repo::new(root)
+        .write("aaa.txt", "a\n")
+        .add("aaa.txt")
+        .write("zzz.txt", "z\n")
+        .add("zzz.txt");
+}
+
 /// An empty directory matching no ignore rule. git tracks no directories, so it
 /// reports nothing at all for one.
 pub fn setup_empty_untracked_dir(root: &Path) {

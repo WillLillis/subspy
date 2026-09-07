@@ -192,6 +192,13 @@ pub fn conflicted_submodule_statuses(
             },
         );
 
+        // libgit2 reports no `WD_DELETED` for a gitlink with no stage-0 entry,
+        // so the scan above cannot see a missing workdir here. git stats the
+        // path for the same answer, as the `c` read below already does.
+        if !root_path.join(&path).exists() {
+            st |= StatusSummary::DELETED_WORKDIR;
+        }
+
         // c: the submodule advanced past the "ours" gitlink.
         if let Some(ours) = &conflict.our {
             let (head, _) = read_submodule_head(&root_path.join(&path));
