@@ -105,7 +105,7 @@ enum Segment<'t> {
 
 /// A format template parsed once into literal/placeholder segments.
 ///
-/// [`parse`](Template::parse) validates and vuilds the segments once for repeated
+/// [`parse`](Template::parse) validates and builds the segments once for repeated
 /// [`expand`](Template::expand) calls.
 #[derive(Debug)]
 pub struct Template<'t, const N: usize> {

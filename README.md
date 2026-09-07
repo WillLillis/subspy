@@ -214,6 +214,7 @@ changes on disk again. SubSpy never modifies your repository, so the remedy is a
 - Not every git configuration option is modeled. When `subspy status` encounters one it cannot honor, it prints a warning
 and reports what it can. The `subspy-git` shim forwards to the git on your path when it can't fully service a request.
 - On Linux, each watch server consumes inotify watches. For very large repositories or many concurrent servers, you may
-need to increase the system limit (e.g. `sudo sysctl fs.inotify.max_user_watches=<value>`).
+need to increase the system limit (e.g. `sudo sysctl fs.inotify.max_user_watches=<value>` or
+`sudo sysctl fs.inotify.max_user_instances=<value>`).
 - On Windows, AF_UNIX sockets are used for IPC, which requires Windows 10 version 1809 (October 2018 Update) or Windows
 Server 2019 or later.

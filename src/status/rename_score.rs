@@ -152,8 +152,8 @@ pub(super) fn overlapping_pairs(
     }
 
     let mut pairs = Vec::new();
-    // `copied[add_idx]` accumulates shared bytes for the current deletion. Reset
-    // only the touched entries are between deletions so sparse cases stay cheap.
+    // `copied[add_idx]` accumulates shared bytes for the current deletion. Only
+    // the touched entries are reset between deletions, so sparse cases stay cheap.
     let mut copied = vec![0u64; additions.len()];
     let mut touched: Vec<usize> = Vec::new();
     for (del_idx, sig) in deletions.iter().enumerate() {
