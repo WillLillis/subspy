@@ -14,7 +14,11 @@
 use git2::Repository;
 use rustc_hash::FxHashMap;
 
-use super::{StatusEntries, interleave::SubRow, rename_score};
+use super::{
+    StatusEntries,
+    interleave::{SubRow, entry_sort_key},
+    rename_score,
+};
 
 /// git's limit when neither renameLimit key is set.
 const DEFAULT_RENAME_LIMIT: usize = 1000;
@@ -576,14 +580,6 @@ fn push_synthetic_add(rows: &mut Vec<TrackedRow<'_>>, new: RenameSide) {
         h_idx: new.oid,
         path: new.path,
     }));
-}
-
-fn entry_sort_key<'e>(entry: &'e git2::StatusEntry<'_>) -> &'e [u8] {
-    entry
-        .head_to_index()
-        .or_else(|| entry.index_to_workdir())
-        .and_then(|delta| delta.new_file().path_bytes())
-        .unwrap_or_else(|| entry.path_bytes())
 }
 
 fn added_side(entry: &git2::StatusEntry<'_>) -> Option<RenameSide> {

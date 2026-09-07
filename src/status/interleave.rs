@@ -47,7 +47,7 @@ pub(super) enum Row<'a> {
 /// by the destination path, but `StatusEntry::path_bytes` returns the *old*
 /// path for a rename, so read the delta's new-file path directly to stay
 /// consistent with the file stream's order (and git's).
-fn entry_sort_key<'e>(entry: &'e StatusEntry<'_>) -> &'e [u8] {
+pub(super) fn entry_sort_key<'e>(entry: &'e StatusEntry<'_>) -> &'e [u8] {
     entry
         .head_to_index()
         .or_else(|| entry.index_to_workdir())
