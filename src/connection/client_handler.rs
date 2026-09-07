@@ -179,24 +179,25 @@ fn encode_status_into(map: &BTreeMap<String, StatusSummary>, buf: &mut Vec<u8>) 
 
     // variant discriminant: Status = 0
     buf.extend_from_slice(&0u32.to_le_bytes());
-    // vec length placeholder (backfilled after the loop)
+    // vec length placeholder (backfilled after the loop). bincode's fixint
+    // encoding writes every `usize` as a `u64`.
     let vec_len_offset = buf.len();
-    buf.extend_from_slice(&[0u8; size_of::<usize>()]);
+    buf.extend_from_slice(&[0u8; size_of::<u64>()]);
 
     // entries (single pass: count + encode)
-    let mut dirty_count: usize = 0;
+    let mut dirty_count: u64 = 0;
     for (path, status) in map {
         if *status == StatusSummary::clean() {
             continue;
         }
         dirty_count += 1;
-        buf.extend_from_slice(&path.len().to_le_bytes());
+        buf.extend_from_slice(&(path.len() as u64).to_le_bytes());
         buf.extend_from_slice(path.as_bytes());
         buf.push(status.bits());
     }
 
     // Backfill vec length
-    buf[vec_len_offset..vec_len_offset + size_of::<usize>()]
+    buf[vec_len_offset..vec_len_offset + size_of::<u64>()]
         .copy_from_slice(&dirty_count.to_le_bytes());
     // total submodule count
     buf.extend_from_slice(&total.to_le_bytes());
