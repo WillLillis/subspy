@@ -23,11 +23,11 @@ fn run(program: &str, cwd: &std::path::Path, args: &[&str]) -> Output {
         .expect("spawn failed")
 }
 
-/// Runs the real-Git oracle with status advice pinned to the behavior Subspy
-/// currently implements.
+/// Runs the real-Git oracle. Advice is deliberately left unpinned: subspy reads
+/// `advice.statusHints` itself, so forcing a value here would compare the two
+/// under different config.
 fn run_git_oracle(cwd: &std::path::Path, args: &[&str]) -> Output {
     Command::new("git")
-        .args(["-c", "advice.statusHints=true"])
         .args(args)
         .current_dir(cwd)
         .env("NO_COLOR", "1")
