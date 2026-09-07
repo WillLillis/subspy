@@ -8,8 +8,8 @@
 //!
 //! The add/delete pairing is switched by `status.renames` (falling back to
 //! `diff.renames`), bounded by `status.renameLimit` (falling back to
-//! `diff.renameLimit`), and signature-cached (each blob hashed once, with a
-//! size short-circuit) via [`super::rename_score`].
+//! `diff.renameLimit`), and scored against per-blob signatures built once by
+//! [`super::rename_score`].
 
 use git2::Repository;
 use rustc_hash::FxHashMap;
@@ -323,9 +323,37 @@ fn collect_initial_tracked_rows<'a>(
     }
 }
 
+/// A regular file, executable or not. Symlinks and gitlinks are not, and git
+/// treats those two kinds far more strictly when pairing renames.
+fn is_regular(mode: u32) -> bool {
+    mode == u32::from(git2::FileMode::Blob) || mode == u32::from(git2::FileMode::BlobExecutable)
+}
+
+/// Whether git's exact pass will consider this pair. Two regular files may
+/// differ in mode (a rename that also flips the executable bit still pairs), but
+/// once either side is non-regular the modes have to agree exactly.
+fn modes_can_pair(old: &RenameSide, new: &RenameSide) -> bool {
+    is_regular(old.mode) && is_regular(new.mode) || old.mode == new.mode
+}
+
+/// Indices into `sides`, ordered by path. git registers its rename sources in
+/// reverse and reads them back last-in-first-out, so both dimensions of the
+/// exact pass end up walking paths in ascending order.
+fn indices_by_path(sides: &[RenameSide]) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..sides.len()).collect();
+    order.sort_by(|&a, &b| sides[a].path.cmp(&sides[b].path));
+    order
+}
+
 /// git's exact rename pass (no rename limit): pair standalone deletions with
 /// standalone additions carrying the identical blob. libgit2 omits these
 /// whenever it is over its own rename limit, but git always finds them.
+///
+/// git takes the destinations in turn and gives each the best source still
+/// free, preferring one that shares its basename and settling for the first
+/// otherwise. Ranking every candidate pair at once instead would let a
+/// basename match outweigh destination order, and git resolves that the other
+/// way: a destination it reaches first keeps the source it took.
 fn pair_exact_renames(
     rows: &mut Vec<TrackedRow<'_>>,
     additions: &mut Vec<RenameSide>,
@@ -334,19 +362,44 @@ fn pair_exact_renames(
     if additions.is_empty() || deletions.is_empty() {
         return;
     }
-    let mut adds_by_oid: FxHashMap<git2::Oid, Vec<usize>> = FxHashMap::default();
-    for (add_idx, add) in additions.iter().enumerate() {
-        adds_by_oid.entry(add.oid).or_default().push(add_idx);
+    let mut sources_by_oid: FxHashMap<git2::Oid, Vec<usize>> = FxHashMap::default();
+    for delete_idx in indices_by_path(deletions) {
+        sources_by_oid
+            .entry(deletions[delete_idx].oid)
+            .or_default()
+            .push(delete_idx);
     }
-    let mut pairs = Vec::new();
-    for (delete_idx, del) in deletions.iter().enumerate() {
-        if let Some(add_indices) = adds_by_oid.get(&del.oid) {
-            for &add_idx in add_indices {
-                pairs.push((rename_score::Similarity::EXACT, delete_idx, add_idx));
+
+    let mut paired_add = vec![false; additions.len()];
+    let mut paired_del = vec![false; deletions.len()];
+    for add_idx in indices_by_path(additions) {
+        let new = &additions[add_idx];
+        let Some(candidates) = sources_by_oid.get(&new.oid) else {
+            continue;
+        };
+        let mut best = None;
+        for &delete_idx in candidates {
+            let old = &deletions[delete_idx];
+            if paired_del[delete_idx] || !modes_can_pair(old, new) {
+                continue;
+            }
+            best.get_or_insert(delete_idx);
+            if basename(&old.path) == basename(&new.path) {
+                best = Some(delete_idx);
+                break;
             }
         }
+        let Some(delete_idx) = best else { continue };
+        paired_del[delete_idx] = true;
+        paired_add[add_idx] = true;
+        rows.push(TrackedRow::SyntheticRename(SyntheticRename {
+            old: deletions[delete_idx].clone(),
+            new: new.clone(),
+            score: rename_score::Similarity::EXACT.percent(),
+        }));
     }
-    assign_renames(rows, additions, deletions, pairs);
+    retain_unpaired(additions, &paired_add);
+    retain_unpaired(deletions, &paired_del);
 }
 
 /// git's inexact rename pass: similarity-pair the remaining standalone
@@ -366,11 +419,11 @@ fn pair_inexact_renames(
 
     let del_sigs: Vec<Option<rename_score::Signature>> = deletions
         .iter()
-        .map(|old| blob_signature(repo, old.oid))
+        .map(|old| regular_signature(repo, old))
         .collect();
     let add_sigs: Vec<Option<rename_score::Signature>> = additions
         .iter()
-        .map(|new| blob_signature(repo, new.oid))
+        .map(|new| regular_signature(repo, new))
         .collect();
 
     let pairs: Vec<(rename_score::Similarity, usize, usize)> =
@@ -382,12 +435,12 @@ fn pair_inexact_renames(
     assign_renames(rows, additions, deletions, pairs);
 }
 
-/// Greedily turns rename `pairs` (`(score, delete_idx, add_idx)`) into
+/// Greedily turns inexact rename `pairs` (`(score, delete_idx, add_idx)`) into
 /// `SyntheticRename` rows, then drops the matched sides from the pools. Mirrors
 /// git's matrix sort + greedy walk: a candidate wins by higher score, then by
 /// matching basename (git's name-score tie-break), then by lowest source path,
-/// then lowest destination path. This ordering also yields git's parallel-sorted
-/// pairing for exact (same-blob) renames.
+/// then lowest destination path. The exact pass works the other way round and
+/// has its own walk in [`pair_exact_renames`].
 fn assign_renames(
     rows: &mut Vec<TrackedRow<'_>>,
     additions: &mut Vec<RenameSide>,
@@ -488,8 +541,14 @@ pub(super) fn configured_rename_detection(
     }
 }
 
-fn blob_signature(repo: &Repository, oid: git2::Oid) -> Option<rename_score::Signature> {
-    let blob = repo.find_blob(oid).ok()?;
+/// git scores similarity for regular files only, noting that symlink renames
+/// are recognized only as exact matches. A side with no signature pairs with
+/// nothing.
+fn regular_signature(repo: &Repository, side: &RenameSide) -> Option<rename_score::Signature> {
+    if !is_regular(side.mode) {
+        return None;
+    }
+    let blob = repo.find_blob(side.oid).ok()?;
     Some(rename_score::Signature::new(blob.content()))
 }
 

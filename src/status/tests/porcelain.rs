@@ -290,6 +290,19 @@ const CASES: &[Case] = &[
         setup_renames_basename_preserving,
     ),
     plain("identical files renamed", setup_identical_files_renamed),
+    // git's exact pass walks destinations in path order and lets each take the
+    // best source still free, so a destination can claim one that a later,
+    // basename-sharing destination would have scored higher on.
+    plain(
+        "exact rename, one source two destinations",
+        setup_exact_rename_one_source_two_destinations,
+    ),
+    plain(
+        "exact rename, ambiguous set",
+        setup_exact_rename_ambiguous_set,
+    ),
+    // Both sides stay regular files, so the mode change must not block the pair.
+    plain("rename with mode change", setup_rename_with_mode_change),
     // Rename detection driven by config rather than flags. `status.*` overrides
     // `diff.*` in both families, and falls back to it when unset.
     plain("renames disabled", setup_renames_disabled),
@@ -962,6 +975,41 @@ fn v1_ignored_untracked_none() {
     );
     for c in CASES {
         run_case(c, opts);
+    }
+}
+
+/// Rename pairing across file modes, which needs real symlinks in the working
+/// tree. Windows stores them as regular files unless the checkout is configured
+/// for them, which is exactly the distinction under test.
+#[cfg(unix)]
+#[test]
+fn symlink_rename_pairing() {
+    const SYMLINK_CASES: &[Case] = &[
+        plain(
+            "symlink paired with regular",
+            setup_symlink_paired_with_regular,
+        ),
+        plain(
+            "regular paired with symlink",
+            setup_regular_paired_with_symlink,
+        ),
+        plain("symlink renamed", setup_symlink_renamed),
+        plain(
+            "symlink with similar targets",
+            setup_symlink_similar_targets,
+        ),
+    ];
+    for version in [PorcelainVersion::V1, PorcelainVersion::V2] {
+        let opts = opts_with(
+            version,
+            false,
+            false,
+            UntrackedFiles::Normal,
+            IgnoredFiles::No,
+        );
+        for c in SYMLINK_CASES {
+            run_case(c, opts);
+        }
     }
 }
 

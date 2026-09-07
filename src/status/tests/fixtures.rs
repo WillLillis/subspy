@@ -295,6 +295,105 @@ pub fn setup_identical_files_renamed(root: &Path) {
         .mv("c.txt", "z.txt");
 }
 
+/// One byte-identical source and two candidate destinations. git gives the
+/// source to whichever destination it reaches first, so `bar.c` wins and the
+/// basename-sharing `sub/foo.c` is left an addition.
+pub fn setup_exact_rename_one_source_two_destinations(root: &Path) {
+    let repo = Repo::init(root);
+    repo.write("d/e/foo.c", IDENTICAL_BODY)
+        .add_all()
+        .commit("initial")
+        .rm_tracked("d/e/foo.c")
+        .write("bar.c", IDENTICAL_BODY)
+        .write("sub/foo.c", IDENTICAL_BODY)
+        .add_all();
+}
+
+/// Byte-identical files whose paths make destination order and basename
+/// matching disagree. Ranking every candidate pair at once picks a different
+/// assignment than walking the destinations in order does.
+pub fn setup_exact_rename_ambiguous_set(root: &Path) {
+    let repo = Repo::init(root);
+    repo.write("sub/bar.c", IDENTICAL_BODY)
+        .write("zzz.c", IDENTICAL_BODY)
+        .write("foo.c", IDENTICAL_BODY)
+        .add_all()
+        .commit("initial")
+        .rm_tracked("sub/bar.c")
+        .rm_tracked("zzz.c")
+        .rm_tracked("foo.c")
+        .write("afoo.c", IDENTICAL_BODY)
+        .write("sub/foo.c", IDENTICAL_BODY)
+        .write("bar.c", IDENTICAL_BODY)
+        .add_all();
+}
+
+/// Enough lines for the inexact scorer to have something to work with, so a
+/// fixture that means to exercise the exact pass is not accidentally decided by
+/// a similarity score.
+const IDENTICAL_BODY: &str = "line one\nline two\nline three\nline four\nline five\n";
+
+/// A staged rename that also flips the executable bit. Both sides stay regular
+/// files, so the differing modes must not stop them pairing.
+pub fn setup_rename_with_mode_change(root: &Path) {
+    let repo = Repo::init(root);
+    repo.write("a.txt", IDENTICAL_BODY)
+        .add_all()
+        .commit("initial")
+        .mv("a.txt", "b.txt");
+    repo.run_git(&["update-index", "--chmod=+x", "b.txt"]);
+}
+
+/// A symlink's blob holds its target path, so a regular file containing that
+/// same text is byte-identical to it. git still refuses to pair the two,
+/// because a non-regular side has to match modes exactly.
+#[cfg(unix)]
+pub fn setup_symlink_paired_with_regular(root: &Path) {
+    let repo = Repo::init(root);
+    std::os::unix::fs::symlink(SYMLINK_TARGET, root.join("link")).unwrap();
+    repo.add_all().commit("initial").rm_tracked("link");
+    repo.write("plain.txt", SYMLINK_TARGET).add_all();
+}
+
+/// The same pair the other way round, which git scores no differently.
+#[cfg(unix)]
+pub fn setup_regular_paired_with_symlink(root: &Path) {
+    let repo = Repo::init(root);
+    repo.write("plain.txt", SYMLINK_TARGET)
+        .add_all()
+        .commit("initial")
+        .rm_tracked("plain.txt");
+    std::os::unix::fs::symlink(SYMLINK_TARGET, root.join("link")).unwrap();
+    repo.add_all();
+}
+
+/// Two symlinks sharing a target. Modes agree, so this one does pair.
+#[cfg(unix)]
+pub fn setup_symlink_renamed(root: &Path) {
+    let repo = Repo::init(root);
+    std::os::unix::fs::symlink(SYMLINK_TARGET, root.join("link")).unwrap();
+    repo.add_all().commit("initial").rm_tracked("link");
+    std::os::unix::fs::symlink(SYMLINK_TARGET, root.join("renamed")).unwrap();
+    repo.add_all();
+}
+
+/// Two symlinks whose targets differ by one character. git scores similarity
+/// for regular files only, so a near-identical pair still splits.
+#[cfg(unix)]
+pub fn setup_symlink_similar_targets(root: &Path) {
+    let repo = Repo::init(root);
+    std::os::unix::fs::symlink(format!("{SYMLINK_TARGET}/aaa"), root.join("link")).unwrap();
+    repo.add_all().commit("initial").rm_tracked("link");
+    std::os::unix::fs::symlink(format!("{SYMLINK_TARGET}/bbb"), root.join("moved")).unwrap();
+    repo.add_all();
+}
+
+/// Long enough that two targets differing in their last component still score
+/// far above the similarity threshold, so a fixture that means to test the
+/// non-regular rule is not passing for want of shared content.
+#[cfg(unix)]
+const SYMLINK_TARGET: &str = "some/deeply/nested/directory/chain/that/goes/on/for/a/while/target";
+
 pub fn setup_renamed_staged_in_subdir(root: &Path) {
     Repo::init(root)
         .write(
