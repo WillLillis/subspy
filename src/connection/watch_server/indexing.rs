@@ -63,14 +63,12 @@ impl WatchServer {
 
         broadcast_progress(
             &self.progress_subscribers,
-            &self.progress_queue,
             ProgressUpdate::new(0, n_submodules),
         );
 
         let completed = AtomicU32::new(0);
         let root_path = &self.root_path;
         let progress_subscribers = &self.progress_subscribers;
-        let progress_queue = &self.progress_queue;
         let tl_repo = thread_local::ThreadLocal::new();
 
         let results: Vec<_> = gitmodule_entries
@@ -132,7 +130,6 @@ impl WatchServer {
                 let count = completed.fetch_add(1, Ordering::Relaxed) + 1;
                 broadcast_progress(
                     progress_subscribers,
-                    progress_queue,
                     ProgressUpdate::new(count, n_submodules),
                 );
                 if let Some(pb) = &progress_bar {

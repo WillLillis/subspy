@@ -1,11 +1,11 @@
 //! Progress-update vocabulary shared between the watch server (which
-//! broadcasts indexing progress) and the client handler (which drains queued
-//! updates to subscribed clients).
+//! broadcasts indexing progress) and the client handler (which forwards the
+//! pending update to subscribed clients).
 
-use std::{collections::VecDeque, sync::Mutex};
+use std::sync::Mutex;
 
 use bincode::{BorrowDecode, Encode};
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 
 #[derive(Debug, Clone, Copy, Encode, BorrowDecode)]
 pub(super) struct ProgressUpdate {
@@ -20,35 +20,23 @@ impl ProgressUpdate {
     }
 }
 
-/// Progress update queues keyed by client PID.
-pub(super) type ProgressMap = Mutex<FxHashMap<u32, VecDeque<ProgressUpdate>>>;
+/// Client PIDs subscribed to indexing progress, each holding the update it has
+/// not read yet.
+pub(super) type ProgressSubscribers = Mutex<FxHashMap<u32, Option<ProgressUpdate>>>;
 
-/// Client PIDs subscribed to indexing progress updates.
-pub(super) type ProgressSubscribers = Mutex<FxHashSet<u32>>;
-
-/// Pushes `progress_val` to the progress queue for every registered subscriber.
+/// Makes `progress_val` the pending update for every subscriber, replacing
+/// whatever each had not yet read.
 ///
 /// # Panics
 ///
-/// Panics if either mutex has been poisoned.
+/// Panics if the mutex has been poisoned.
 #[inline]
-#[expect(clippy::significant_drop_tightening)]
-pub(super) fn broadcast_progress(
-    subscribers: &ProgressSubscribers,
-    progress: &ProgressMap,
-    progress_val: ProgressUpdate,
-) {
-    let subs = subscribers.lock().expect("Subscribers mutex poisoned");
-    // Lock the progress queues only when active subscribers exist.
-    if subs.is_empty() {
-        return;
-    }
-    let mut progress_guard = progress.lock().expect("Progress mutex poisoned");
-    for &pid in subs.iter() {
-        let queue = progress_guard.entry(pid).or_insert_with(|| {
-            let ProgressUpdate { total: cap, .. } = progress_val;
-            VecDeque::with_capacity(cap as usize + 1)
-        });
-        queue.push_back(progress_val);
+pub(super) fn broadcast_progress(subscribers: &ProgressSubscribers, progress_val: ProgressUpdate) {
+    for pending in subscribers
+        .lock()
+        .expect("Subscribers mutex poisoned")
+        .values_mut()
+    {
+        *pending = Some(progress_val);
     }
 }

@@ -37,7 +37,10 @@ pub enum ClientMessage {
 pub struct DebugState {
     pub server_pid: u32,
     pub rayon_threads: u32,
-    pub progress_subscribers: Option<Vec<u32>>,
+    /// Progress subscribers and the update each has not read yet:
+    /// `(pid, Some((curr, total)))`.
+    #[expect(clippy::type_complexity)]
+    pub progress_subscribers: Option<Vec<(u32, Option<(u32, u32)>)>>,
     pub watcher_count: u32,
     pub watched_paths: Vec<(String, String, u32)>,
     pub root_path: String,
@@ -46,9 +49,6 @@ pub struct DebugState {
     /// In-flight rayon tasks: `(relative_path, state)`, where state is
     /// "active", "active (cancelling)", "dirty", or "dirty (cancelling)".
     pub in_flight: Option<Vec<(String, String)>>,
-    /// Progress queues keyed by client PID: `(pid, [(curr, total)])`.
-    #[expect(clippy::type_complexity)]
-    pub progress_queues: Option<Vec<(u32, Vec<(u32, u32)>)>>,
     /// The last watcher error that triggered a reindex, if any.
     pub last_watcher_error: Option<String>,
     /// Non-recursive tripwire watches on submodule ancestor directories:
@@ -386,7 +386,6 @@ mod tests {
                         socket_name: String::new(),
                         submodule_statuses: None,
                         in_flight: None,
-                        progress_queues: None,
                         last_watcher_error: None,
                         tripwires: vec![],
                     })),
@@ -401,13 +400,12 @@ mod tests {
                 // | root_path:""(0,0,0,0,0,0,0,0)
                 // | socket_name:""(0,0,0,0,0,0,0,0)
                 // | submodule_statuses:None(0)
-                // | in_flight:None(0) | progress_queues:None(0)
+                // | in_flight:None(0)
                 // | last_watcher_error:None(0)
                 // | tripwires:empty(0,0,0,0,0,0,0,0)
                 &[
                     3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
                     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-                    0,
                 ],
             ),
             (

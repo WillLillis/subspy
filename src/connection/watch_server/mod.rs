@@ -28,7 +28,7 @@ use std::{
     time::Duration,
 };
 
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 
 #[cfg(not(target_os = "windows"))]
 use interprocess::local_socket::traits::ListenerExt as _;
@@ -50,7 +50,7 @@ use layout::GitLayout;
 use update::InFlightTracker;
 
 use super::client_handler::handle_client_connection;
-use super::progress::{ProgressMap, ProgressSubscribers};
+use super::progress::ProgressSubscribers;
 
 /// `.git/` and `.gitmodules`
 const ROOT_WATCHER_COUNT: usize = 2;
@@ -146,9 +146,8 @@ struct WatchServer {
     control_rx: crossbeam_channel::Receiver<ControlMessage>,
     /// Maps root-relative submodule paths from `.gitmodules` to cached statuses.
     submod_statuses: Arc<StatusMap>,
-    /// Associates a given client pid with a queue of indexing progress updates.
-    progress_queue: Arc<ProgressMap>,
-    /// Client PIDs that should receive progress updates during indexing.
+    /// Client PIDs that should receive progress updates during indexing, each
+    /// holding the update it has not read yet.
     progress_subscribers: Arc<ProgressSubscribers>,
     /// The last watcher error that triggered a reindex, if any.
     last_watcher_error: Option<String>,
@@ -198,8 +197,7 @@ impl WatchServer {
             root_refs_heads_path,
             control_rx,
             submod_statuses: Arc::new(Mutex::new(BTreeMap::new())),
-            progress_queue: Arc::new(Mutex::new(FxHashMap::default())),
-            progress_subscribers: Arc::new(Mutex::new(FxHashSet::default())),
+            progress_subscribers: Arc::new(Mutex::new(FxHashMap::default())),
             last_watcher_error: None,
             modules_path_to_index: FxHashMap::default(),
         }
@@ -221,7 +219,6 @@ impl WatchServer {
     ) -> std::io::Result<(Arc<AtomicBool>, JoinHandle<()>)> {
         let listener = create_listener(&self.root_path)?;
         let statuses = Arc::clone(&self.submod_statuses);
-        let progress = Arc::clone(&self.progress_queue);
         let subscribers = Arc::clone(&self.progress_subscribers);
         let shutdown = Arc::new(AtomicBool::new(false));
         let listener_shutdown = Arc::clone(&shutdown);
@@ -242,7 +239,6 @@ impl WatchServer {
                     }
                     let control_tx = control_tx.clone();
                     let statuses = Arc::clone(&statuses);
-                    let progress = Arc::clone(&progress);
                     let subscribers = Arc::clone(&subscribers);
                     // Client handlers must NOT run on rayon's global thread pool. The
                     // main thread enters rayon's work-stealing loop during
@@ -250,7 +246,7 @@ impl WatchServer {
                     // the status map lock. If the main thread picks up a spawned
                     // handler that spins waiting for that same lock, we deadlock.
                     std::thread::spawn(move || {
-                        handle_client_connection(conn, control_tx, statuses, progress, subscribers);
+                        handle_client_connection(conn, control_tx, statuses, subscribers);
                     });
                 }
             })?;
