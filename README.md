@@ -52,7 +52,7 @@ The project can also be built and installed from source:
 > cargo install --path . --locked
 ```
 
-The project's current Minimum Supported Rust Version (MSRV) is 1.87.0.
+The project's current Minimum Supported Rust Version (MSRV) is 1.88.0.
 
 ### Usage
 
