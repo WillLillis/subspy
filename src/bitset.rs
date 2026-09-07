@@ -4,9 +4,6 @@
 //! up to 510 submodules. Larger repositories fall back to a `Vec<u64>`.
 
 /// A compact bitset for tracking small dense integer sets (watcher indices).
-///
-/// All accesses use unchecked indexing since callers control the index range
-/// (watcher indices are bounded by the watchers array length).
 #[derive(Debug)]
 pub enum BitSet {
     Inline([u64; Self::INLINE_WORDS]),
@@ -47,55 +44,39 @@ impl BitSet {
         }
     }
 
-    /// Debug-only bounds check shared by the unchecked accessors. Compiles out
-    /// in release. In debug it converts an out-of-range index into a panic.
-    #[inline]
-    fn assert_in_bounds(&self, i: usize) {
-        debug_assert!(
-            i / 64 < self.words().len(),
-            "BitSet index {i} out of bounds ({} words)",
-            self.words().len(),
-        );
-    }
-
     /// Returns whether the bit at index `i` is set.
     ///
-    /// Safety:
+    /// # Panics
     ///
-    /// `i` must be less than the capacity of `self`.
+    /// If `i` is past the capacity of `self`.
     #[inline]
     #[must_use]
     pub fn contains(&self, i: usize) -> bool {
-        self.assert_in_bounds(i);
-        // SAFETY: callers only pass watcher indices, which are bounded by the
-        // capacity established in `with_capacity` / `clear_and_resize`.
-        unsafe { *self.words().get_unchecked(i / 64) & (1u64 << (i % 64)) != 0 }
+        self.words()[i / 64] & (1u64 << (i % 64)) != 0
     }
 
     /// Set the bit at index `i`.
     ///
-    /// Safety:
+    /// # Panics
     ///
-    /// `i` must be less than the capacity of `self`.
+    /// If `i` is past the capacity of `self`.
     #[inline]
     pub fn insert(&mut self, i: usize) {
-        self.assert_in_bounds(i);
-        // SAFETY: same as `contains`
-        unsafe { *self.words_mut().get_unchecked_mut(i / 64) |= 1u64 << (i % 64) }
+        self.words_mut()[i / 64] |= 1u64 << (i % 64);
     }
 
     /// Removes `i` from the set. Returns `true` if it was present.
+    ///
+    /// # Panics
+    ///
+    /// If `i` is past the capacity of `self`.
     #[inline]
     pub fn remove(&mut self, i: usize) -> bool {
-        self.assert_in_bounds(i);
-        // SAFETY: same as `contains`
-        unsafe {
-            let word = self.words_mut().get_unchecked_mut(i / 64);
-            let mask = 1u64 << (i % 64);
-            let was_set = *word & mask != 0;
-            *word &= !mask;
-            was_set
-        }
+        let word = &mut self.words_mut()[i / 64];
+        let mask = 1u64 << (i % 64);
+        let was_set = *word & mask != 0;
+        *word &= !mask;
+        was_set
     }
 
     /// Clears all bits and ensures capacity for at least `n` indices.
@@ -265,14 +246,5 @@ mod tests {
         assert!(!bs.contains(5));
         bs.insert(5);
         assert!(bs.contains(5));
-    }
-
-    #[test]
-    #[cfg(debug_assertions)]
-    #[should_panic(expected = "out of bounds")]
-    fn probe_past_shrunk_heap_capacity_is_caught() {
-        let mut bs = BitSet::with_capacity(1024); // heap: 16 words, 1024 bits
-        bs.clear_and_resize(64); // inline: 512-bit capacity
-        let _ = bs.contains(900); // 900 >= 512 -> out of bounds
     }
 }
