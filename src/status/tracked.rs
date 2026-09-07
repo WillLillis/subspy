@@ -31,7 +31,7 @@ pub(super) enum RenameKey {
 }
 
 impl RenameKey {
-    const fn name(self) -> &'static str {
+    pub(super) const fn name(self) -> &'static str {
         match self {
             Self::Status => "status.renames",
             Self::Diff => "diff.renames",
@@ -469,7 +469,10 @@ pub(super) fn rename_detection(repo: &Repository) -> RenameDetection {
 
 /// git's `git_config_rename`: `copies`/`copy` select copy detection, anything
 /// else parses as a boolean.
-fn configured_rename_detection(config: &git2::Config, key: RenameKey) -> Option<RenameDetection> {
+pub(super) fn configured_rename_detection(
+    config: &git2::Config,
+    key: RenameKey,
+) -> Option<RenameDetection> {
     let copies = config
         // `get_string` rather than `get_str`: libgit2 rejects the borrowing read
         // on a live config.

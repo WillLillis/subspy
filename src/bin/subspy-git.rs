@@ -117,7 +117,11 @@ impl ShimStatusRequest {
                 // `status.branch` reaches the short format only. Porcelain
                 // headers stay behind an explicit `--branch`, as in git.
                 branch: args.branch || (defaults.branch && format == OutputFormat::Short),
-                ahead_behind: args.ahead_behind.unwrap_or(true),
+                // `status.aheadBehind` reaches the long format only, so
+                // porcelain keeps real counts unless a flag says otherwise.
+                ahead_behind: args
+                    .ahead_behind
+                    .unwrap_or(format != OutputFormat::Long || defaults.ahead_behind),
                 // `-c core.quotepath=<bool>` beats the config file.
                 quote_path: quote_path.unwrap_or(defaults.quote_path),
                 show_stash: args.show_stash.unwrap_or(defaults.show_stash),

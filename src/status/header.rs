@@ -79,6 +79,18 @@ impl<'r> Abbrev<'r> {
     }
 }
 
+/// Whether `core.abbrev` holds something git accepts: an integer of at least
+/// [`MIN_ABBREV`] (larger values clamp), `auto`, or a false-y value.
+pub(super) fn abbrev_is_valid(config: &git2::Config) -> bool {
+    let Ok(value) = config.get_string("core.abbrev") else {
+        return true;
+    };
+    if let Ok(len) = value.parse::<usize>() {
+        return len >= MIN_ABBREV;
+    }
+    value.eq_ignore_ascii_case("auto") || matches!(config.get_bool("core.abbrev"), Ok(false))
+}
+
 /// `core.abbrev`, or `None` when git would derive the length from the
 /// repository instead. A false-y value means "never abbreviate".
 fn configured_abbrev(config: &git2::Config) -> Option<usize> {

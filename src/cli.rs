@@ -402,9 +402,15 @@ impl Status {
         // behind an explicit `--branch`, as in git.
         let branch = self.branch || (defaults.branch && format == OutputFormat::Short);
         let display_progress = std::io::stderr().is_terminal();
-        // Ahead/behind detail follows Git’s enabled default. `--ahead-behind` is
-        // accepted for CLI compatibility, while `--no-ahead-behind` disables it.
-        let ahead_behind = !self.no_ahead_behind;
+        // `status.aheadBehind` reaches the long format only. Porcelain keeps
+        // real counts unless `--no-ahead-behind` asks otherwise, as in git.
+        let ahead_behind = if self.ahead_behind {
+            true
+        } else if self.no_ahead_behind {
+            false
+        } else {
+            format != OutputFormat::Long || defaults.ahead_behind
+        };
         // clap keeps the two stash flags mutually exclusive, so neither being
         // present is what hands the decision to `status.showStash`.
         let show_stash = if self.show_stash {
