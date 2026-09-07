@@ -16,10 +16,18 @@ mod windows_flags {
     pub(super) const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 }
 
-/// Configures `cmd` to run as a fully detached background daemon. On non-Windows
-/// platforms this is a no-op.
-#[cfg(not(target_os = "windows"))]
-pub const fn configure_detached_daemon(_cmd: &mut Command) {}
+/// Configures `cmd` to run as a fully detached background daemon.
+#[cfg(unix)]
+pub fn configure_detached_daemon(cmd: &mut Command) {
+    use std::os::unix::process::CommandExt as _;
+    // SAFETY: `setsid` is async-signal-safe.
+    unsafe {
+        cmd.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+}
 
 /// Configures `cmd` to run as a fully detached background daemon.
 ///
