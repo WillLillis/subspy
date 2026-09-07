@@ -123,7 +123,7 @@ fn init_server_thread_pool() {
 ///
 /// Logging is best-effort, and the command continues after setup failures.
 /// This matters most for the detached daemon, whose null stderr would hide
-/// hide a startup error and leave the spawning client without a server.
+/// a startup error and leave the spawning client without a server.
 fn setup_logging(command: &Commands) {
     if let Commands::Start(start) = command {
         if let Ok(base) = etcetera::choose_base_strategy() {

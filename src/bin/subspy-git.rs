@@ -134,8 +134,8 @@ impl ShimStatusRequest {
 
 /// Walk argv looking for an interceptable `status` invocation.
 ///
-/// Returns `Some(intercept)` if every global option and status flag  can be
-/// handled locally.. Returns `None` otherwise. The caller then reloads argv
+/// Returns `Some(intercept)` if every global option and status flag can be
+/// handled locally. Returns `None` otherwise. The caller then reloads argv
 /// from `env::args_os()` and forwards to real git.
 fn dispatch<I>(mut rest: Peekable<I>) -> Option<Intercept>
 where
@@ -665,9 +665,9 @@ const GIT_EXE: &str = "git";
 #[cfg(windows)]
 const GIT_EXE: &str = "git.exe";
 
-/// Searches `path_var` for a `git`or `git.exe` whose canonical path differs
+/// Searches `path_var` for a `git` or `git.exe` whose canonical path differs
 /// from `me`. The search uses the exact [`GIT_EXE`] name. Windows installations
-/// exposing only a `git.cmd` or `git.bat` wapper produce `None` (i.e.  `PATHEXT`
+/// exposing only a `git.cmd` or `git.bat` wrapper produce `None` (i.e. `PATHEXT`
 /// is not considered), and the caller produces a diagnostic.
 fn find_real_git(me: Option<&Path>, path_var: &OsStr) -> Option<PathBuf> {
     let me_canonical = me.and_then(|p| std::fs::canonicalize(p).ok());
