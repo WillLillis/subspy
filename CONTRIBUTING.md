@@ -157,14 +157,20 @@ exact-rename pass, so even a pure `git mv` goes through an O(targets x sources)
 similarity loop) and divergent from git: it ignores git's global `diff.renameLimit`
 skip and breaks ties differently. We mirror git's pipeline:
 
-- Exact (same-blob) renames first, with no rename limit, paired in git's
-  parallel-sorted order (sorted sources zipped with sorted destinations).
+- Exact (same-blob) renames first, with no rename limit. git takes the
+  destinations in path order and gives each the best source still free,
+  preferring one that shares its basename and settling for the first otherwise,
+  so a destination it reaches first keeps the source it took even when a later
+  destination would have scored higher on it. A non-regular side (symlink,
+  gitlink) pairs only with an identical mode, which is why a symlink never
+  pairs with a regular blob holding the same bytes.
 - Then inexact (similarity) renames, only if the post-exact matrix fits under
   `diff.renameLimit`. Over the limit, edited renames collapse to add+delete (git
   skips inexact detection wholesale there but still finds exact renames).
   Candidates are ordered as git's `diffcore-rename` does (`assign_renames`): higher
   similarity, then matching basename (git's name-score tie-break), then lowest
-  source path, then lowest destination path.
+  source path, then lowest destination path. git scores regular files only, so
+  a symlink reaches this pass with no signature and never pairs here.
 
 **The similarity score is clean-room.** `status/rename_score.rs` reproduces git's
 score - `floor(copied_bytes * 100 / max(len))`, with "copied" counted over content
