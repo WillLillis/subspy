@@ -17,7 +17,7 @@ use super::{
     PathFilter, StatusEntries, StatusResult,
     conflict::path_within_any,
     effective_status::{Corrections, effective_status},
-    header::{print_header, print_unmerged_paths},
+    header::{print_header, print_unmerged_paths, shows_unstage_hint},
     interleave::{Row, SubRow, for_each_merged},
     relativize::Relativizer,
     tracked::{TrackedOrSubRow, TrackedRow, for_each_tracked_row, normalized_tracked_rows},
@@ -33,6 +33,12 @@ const STAGED_HEADER_HINTED: &str = "Changes to be committed:
 /// Unborn HEAD has no commit to restore from, so git points at `git rm --cached`.
 const STAGED_HEADER_UNBORN_HINTED: &str = "Changes to be committed:
   (use \"git rm --cached <file>...\" to unstage)";
+
+/// Stands in for the untracked and ignored sections under
+/// `--untracked-files=no`, but only once the index has something to commit.
+const UNTRACKED_NOT_LISTED: &str = "Untracked files not listed";
+const UNTRACKED_NOT_LISTED_HINTED: &str =
+    "Untracked files not listed (use -u option to show untracked files)";
 
 const UNTRACKED_HEADER: &str = "Untracked files:";
 const UNTRACKED_HEADER_HINTED: &str = "Untracked files:
@@ -496,6 +502,9 @@ struct SummaryState {
     has_untracked: bool,
     has_unreadable: bool,
     is_unborn: bool,
+    /// With `--untracked-files=no` nothing was scanned, so git cannot claim the
+    /// tree is clean and points at `-u` instead.
+    show_untracked: bool,
     /// Trailers carry their guidance as a trailing parenthetical rather than on
     /// its own line, so `advice.statusHints` trims the sentence instead of
     /// dropping the whole row.
@@ -510,6 +519,7 @@ fn print_summary(state: &SummaryState, out: &mut impl Write) -> Result<(), io::E
         has_untracked,
         has_unreadable,
         is_unborn,
+        show_untracked,
         status_hints,
     } = state;
     match (changes_in_index, changed_in_workdir, has_untracked) {
@@ -532,6 +542,12 @@ fn print_summary(state: &SummaryState, out: &mut impl Write) -> Result<(), io::E
                         out,
                         "nothing to commit (create/copy files and use \"git add\" to track)"
                     )?;
+                } else {
+                    writeln!(out, "nothing to commit")?;
+                }
+            } else if !show_untracked {
+                if status_hints {
+                    writeln!(out, "nothing to commit (use -u to show untracked files)")?;
                 } else {
                     writeln!(out, "nothing to commit")?;
                 }
@@ -594,16 +610,16 @@ pub fn display_status(
         .iter()
         .any(|(_, st)| st.contains(StatusSummary::DELETED_WORKDIR));
 
-    let staged_header = match (opts.status_hints, is_unborn) {
+    let staged_header = match (opts.status_hints && shows_unstage_hint(repo), is_unborn) {
+        (false, _) => STAGED_HEADER,
         (true, true) => STAGED_HEADER_UNBORN_HINTED,
         (true, false) => STAGED_HEADER_HINTED,
-        (false, _) => STAGED_HEADER,
     };
     let has_submod_changes = submodules.iter().any(|(_, st)| has_workdir_changes(*st));
     let unstaged = unstaged_header(rm_in_workdir, has_submod_changes, opts.status_hints);
 
     let tracked_rows = normalized_tracked_rows(repo, entries);
-    let changes_in_index = print_staged_changes(
+    let staged_rows = print_staged_changes(
         tracked_rows,
         submodules,
         deleted_submodules,
@@ -612,7 +628,12 @@ pub fn display_status(
         staged_header,
         out,
     )?;
-    let has_conflicts = print_unmerged_paths(repo, path_filter, rel, opts.status_hints, out)?;
+    let has_conflicts =
+        print_unmerged_paths(repo, path_filter, rel, opts.status_hints, is_unborn, out)?;
+    // git collects an unborn index straight from its entries, where a conflicted
+    // path counts as something to commit. Once HEAD exists the index is read as
+    // a diff against it, and unmerged paths drop out of that count.
+    let changes_in_index = staged_rows || (is_unborn && has_conflicts);
     let changed_in_workdir = print_unstaged_changes(
         non_submod,
         corrections,
@@ -639,6 +660,17 @@ pub fn display_status(
         opts.status_hints,
         out,
     )?;
+    if !opts.show_untracked && changes_in_index {
+        writeln!(
+            out,
+            "{}",
+            if opts.status_hints {
+                UNTRACKED_NOT_LISTED_HINTED
+            } else {
+                UNTRACKED_NOT_LISTED
+            }
+        )?;
+    }
     let has_unreadable = print_unreadable_submodules(submodules, out)?;
 
     print_summary(
@@ -648,6 +680,7 @@ pub fn display_status(
             has_untracked,
             has_unreadable,
             is_unborn,
+            show_untracked: opts.show_untracked,
             status_hints: opts.status_hints,
         },
         out,

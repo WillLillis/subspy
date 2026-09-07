@@ -1,0 +1,13 @@
+On branch fresh
+
+No commits yet
+
+Unmerged paths:
+  (use "git rm --cached <file>..." to unstage)
+  (use "git add <file>..." to mark resolution)
+	both modified:   f.txt
+
+Untracked files:
+  (use "git add <file>..." to include in what will be committed)
+	extra.txt
+

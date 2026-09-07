@@ -18,7 +18,8 @@ use std::{
 use crate::paint::{Paint, RED, paint_into};
 
 use super::{
-    PathFilter, StatusResult, effective_status::is_skip_worktree, relativize::Relativizer,
+    PathFilter, StatusResult, conflict::ConflictKind, effective_status::is_skip_worktree,
+    relativize::Relativizer,
 };
 
 /// A full SHA-1 in hex, which is what `core.abbrev=no` asks for.
@@ -351,6 +352,41 @@ fn print_rebase_header(
     Ok(())
 }
 
+/// Whether git offers a way to unstage under "Changes to be committed" and
+/// "Unmerged paths".
+///
+/// git keys this on `whence == FROM_COMMIT`, which holds for every state except
+/// an in-progress merge or cherry-pick: resolving one of those by unstaging
+/// would throw away the other side. Revert, rebase, and `git am` all keep the
+/// hint.
+pub fn shows_unstage_hint(repo: &Repository) -> bool {
+    !repo.path().join("MERGE_HEAD").exists() && repo.find_reference("CHERRY_PICK_HEAD").is_err()
+}
+
+/// The `(use "git ..." to mark resolution)` line, chosen by which deletion
+/// shapes appear among the listed conflicts. Deletions on both sides can only be
+/// resolved with `git rm`, and everything else with `git add`, so a mix has to
+/// name both.
+fn resolution_hint(kinds: impl IntoIterator<Item = ConflictKind>) -> &'static str {
+    let (mut both_deleted, mut one_side_deleted, mut not_deleted) = (false, false, false);
+    for kind in kinds {
+        match kind {
+            ConflictKind::BothDeleted => both_deleted = true,
+            ConflictKind::DeletedByUs | ConflictKind::DeletedByThem => one_side_deleted = true,
+            ConflictKind::BothModified
+            | ConflictKind::BothAdded
+            | ConflictKind::AddedByUs
+            | ConflictKind::AddedByThem => not_deleted = true,
+        }
+    }
+
+    match (both_deleted, one_side_deleted, not_deleted) {
+        (false, false, _) => "  (use \"git add <file>...\" to mark resolution)",
+        (true, false, false) => "  (use \"git rm <file>...\" to mark resolution)",
+        _ => "  (use \"git add/rm <file>...\" as appropriate to mark resolution)",
+    }
+}
+
 /// Prints the "Unmerged paths:" section for any conflicts in the index.
 /// Returns `true` if there were conflicts.
 pub fn print_unmerged_paths(
@@ -358,6 +394,7 @@ pub fn print_unmerged_paths(
     path_filter: PathFilter<'_>,
     rel: &Relativizer<'_>,
     status_hints: bool,
+    is_unborn: bool,
     stdout: &mut impl Write,
 ) -> StatusResult<bool> {
     let index = repo.index()?;
@@ -365,51 +402,56 @@ pub fn print_unmerged_paths(
         return Ok(false);
     }
 
-    let mut header = false;
+    // The resolution hint depends on the mix of kinds across the whole section,
+    // so the listed conflicts are gathered before any of them is written.
+    let mut listed = Vec::new();
     for conflict in index.conflicts()? {
         let conflict = conflict?;
-        let path = conflict
+        let entry = conflict
             .our
             .as_ref()
             .or(conflict.their.as_ref())
-            .or(conflict.ancestor.as_ref())
-            .map_or(b"<unknown path>".as_slice(), |e| e.path.as_slice());
-        if !path_filter.keeps(path) {
+            .or(conflict.ancestor.as_ref());
+        let path = entry.map_or_else(|| b"<unknown path>".to_vec(), |e| e.path.clone());
+        if !path_filter.keeps(&path) {
             continue;
         }
-        if !header {
-            writeln!(stdout, "Unmerged paths:")?;
-            if status_hints {
-                // During any rebase, git prepends an unstage hint before the
-                // resolve hint. Merge / cherry-pick / revert conflicts show only
-                // the resolve hint.
-                if is_rebasing(repo) {
-                    writeln!(
-                        stdout,
-                        "  (use \"git restore --staged <file>...\" to unstage)"
-                    )?;
-                }
-                writeln!(stdout, "  (use \"git add <file>...\" to mark resolution)")?;
-            }
-            header = true;
-        }
-
-        let type_str = super::conflict::ConflictKind::from_stages(
+        let kind = ConflictKind::from_stages(
             conflict.ancestor.is_some(),
             conflict.our.is_some(),
             conflict.their.is_some(),
-        )
-        .label();
+        );
+        listed.push((path, kind));
+    }
+    if listed.is_empty() {
+        return Ok(false);
+    }
+
+    writeln!(stdout, "Unmerged paths:")?;
+    if status_hints {
+        if shows_unstage_hint(repo) {
+            if is_unborn {
+                writeln!(stdout, "  (use \"git rm --cached <file>...\" to unstage)")?;
+            } else {
+                writeln!(
+                    stdout,
+                    "  (use \"git restore --staged <file>...\" to unstage)"
+                )?;
+            }
+        }
+        let kinds = listed.iter().map(|(_, kind)| *kind);
+        writeln!(stdout, "{}", resolution_hint(kinds))?;
+    }
+    for (path, kind) in &listed {
+        let type_str = kind.label();
         paint_into(stdout, RED, |out| {
             write!(out, "\t{type_str}")?;
             rel.write_to(out, path)
         })?;
         writeln!(stdout)?;
     }
-    if header {
-        writeln!(stdout)?;
-    }
-    Ok(header)
+    writeln!(stdout)?;
+    Ok(true)
 }
 
 /// Branch / operation state for header rendering. `branch_display` is
@@ -440,7 +482,9 @@ enum HeaderBody {
         started_from: String,
     },
     ApplyMailbox {
-        has_conflicts: bool,
+        /// The stopped-on patch carries no diff, which git describes with its
+        /// own line and hint instead of the fix-conflicts wording.
+        empty_patch: bool,
     },
     /// Rebase using the apply backend (`git rebase --apply`), which uses
     /// the `rebase-apply/` directory instead of `rebase-merge/`.
@@ -454,18 +498,6 @@ enum HeaderBody {
     },
     /// HEAD points at a branch that has no commits yet (fresh `git init`).
     Unborn,
-}
-
-/// Returns `true` if a rebase (any backend) is in progress. `ApplyMailboxOrRebase`
-/// is disambiguated by the presence of `rebase-apply/rebasing` (vs. `applying`
-/// for `git am`).
-fn is_rebasing(repo: &Repository) -> bool {
-    use git2::RepositoryState::{ApplyMailboxOrRebase, Rebase, RebaseInteractive, RebaseMerge};
-    match repo.state() {
-        Rebase | RebaseInteractive | RebaseMerge => true,
-        ApplyMailboxOrRebase => repo.path().join("rebase-apply").join("rebasing").exists(),
-        _ => false,
-    }
 }
 
 /// Reads the `onto` and `head-name` files from a rebase state directory
@@ -593,7 +625,10 @@ fn get_header_state(repo: &Repository, ahead_behind: bool) -> StatusResult<Heade
                     has_conflicts,
                 }
             } else {
-                HeaderBody::ApplyMailbox { has_conflicts }
+                let patch = rebase_apply.join("patch");
+                HeaderBody::ApplyMailbox {
+                    empty_patch: fs::metadata(patch).is_ok_and(|m| m.len() == 0),
+                }
             }
         }
         _ => HeaderBody::Normal {
@@ -753,18 +788,25 @@ fn print_header_state(
             }
             writeln!(stdout)?;
         }
-        HeaderBody::ApplyMailbox { has_conflicts } => {
+        HeaderBody::ApplyMailbox { empty_patch } => {
             writeln!(stdout, "You are in the middle of an am session.")?;
+            if *empty_patch {
+                writeln!(stdout, "The current patch is empty.")?;
+            }
             if status_hints {
-                if *has_conflicts {
+                if !*empty_patch {
                     writeln!(
                         stdout,
                         "  (fix conflicts and then run \"git am --continue\")"
                     )?;
-                } else {
-                    writeln!(stdout, "  (all conflicts fixed: run \"git am --continue\")")?;
                 }
                 writeln!(stdout, "  (use \"git am --skip\" to skip this patch)")?;
+                if *empty_patch {
+                    writeln!(
+                        stdout,
+                        "  (use \"git am --allow-empty\" to record this patch as an empty commit)"
+                    )?;
+                }
                 writeln!(
                     stdout,
                     "  (use \"git am --abort\" to restore the original branch)"
