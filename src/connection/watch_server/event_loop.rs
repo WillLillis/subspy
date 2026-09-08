@@ -9,7 +9,7 @@ use std::{
 use log::error;
 use notify::{EventKind, event::ModifyKind};
 
-use super::classify::event_is_idle_activity;
+use super::classify::{TreeAction, event_is_idle_activity};
 use super::debounce::{DebounceKind, ReindexDebounce};
 use super::trace::wtrace;
 
@@ -18,8 +18,8 @@ use crate::{
     connection::{
         IpcStream,
         watch_server::{
-            ControlMessage, DOT_GITMODULES_WATCHER_IDX, EventType, InFlightTracker,
-            ROOT_WATCHER_COUNT, WatchEntry, WatchServer, update::wait_for_in_flight,
+            ControlMessage, EventType, InFlightTracker, SharedWatch, WatchServer, WatchSource,
+            update::wait_for_in_flight,
         },
     },
     watch::WatchResult,
@@ -39,23 +39,8 @@ pub(super) enum HandleEventsExit {
     ReindexRequest { replace_watchers: bool },
     /// A shutdown was requested by a client.
     Shutdown { conn: BufReader<IpcStream> },
-    /// A filesystem watcher at `index` reported an error.
-    WatcherError { index: usize },
-    /// A tripwire watcher at `index` reported an error.
-    TripwireError { index: usize },
-}
-
-/// The source a [`crossbeam_channel::Select`] operation came from.
-#[derive(Clone, Copy)]
-enum SelectSource {
-    /// Index of the selected filesystem watcher in [`WatchServer::watchers`].
-    Watcher(usize),
-    /// Index of the selected filesystem watcher in [`WatchServer::tripwires`].
-    Tripwire(usize),
-    /// The idle timer fired.
-    Idle,
-    /// A message on [`WatchServer::control_rx`] channel from the listener thread.
-    Control,
+    /// The shared watcher for `source` reported an error.
+    WatcherError { source: WatchSource },
 }
 
 impl WatchServer {
@@ -66,19 +51,18 @@ impl WatchServer {
     ///     - a client message requesting a shutdown is received
     ///     - a watcher error is detected
     ///     - the idle timer expires
-    #[expect(clippy::too_many_lines)]
     pub(super) fn handle_events(&mut self) -> WatchResult<HandleEventsExit> {
         // Shared state for parallel submodule status updates
         let in_flight: Arc<(Mutex<InFlightTracker>, Condvar)> =
             Arc::new((Mutex::new(InFlightTracker::default()), Condvar::new()));
-        // Watcher indices whose latest submodule status read failed. A later lock
+        // Slots whose latest submodule status read failed. A later lock
         // release retries the read unless another watcher event supersedes it.
         let pending_status_retries: Arc<Mutex<BitSet>> =
-            Arc::new(Mutex::new(BitSet::with_capacity(self.watchers.len())));
+            Arc::new(Mutex::new(BitSet::with_capacity(self.submodules.len())));
         // Two debounced reindex deadlines. `gitmodules_debounce` is armed by a
         // `.gitmodules` change and bumped by subsequent root git events.
         // `tripwire_debounce` is armed when a tripwire sees a submodule workdir
-        // (re)appear, and bumped by later tripwire and root-watcher events, so
+        // (re)appear, and bumped by later structural and git-watcher events, so
         // its reindex reads the settled state once the restoring operation's
         // burst dies down.
         let mut gitmodules_debounce = ReindexDebounce::new(DebounceKind::Gitmodules);
@@ -86,14 +70,21 @@ impl WatchServer {
 
         self.drain_pending_rescans(&in_flight, &pending_status_retries);
 
-        let mut sel = crossbeam_channel::Select::new();
-        register_select(
-            &mut sel,
-            &self.watchers,
-            &self.tripwires,
-            None,
-            &self.control_rx,
-        );
+        // Receiver clones keep the select arms free to call methods on `self`.
+        let git_rx = self
+            .git_watch
+            .as_ref()
+            .expect("git watch not placed")
+            .receiver
+            .clone();
+        let tree_rx = self
+            .tree_watch
+            .as_ref()
+            .expect("tree watch not placed")
+            .receiver
+            .clone();
+        let control_rx = self.control_rx.clone();
+
         let mut idle_deadline = Instant::now() + super::IDLE_SERVER_TIMEOUT;
 
         loop {
@@ -102,29 +93,42 @@ impl WatchServer {
                 tripwire_debounce.deadline(),
                 idle_deadline,
             );
-            let Ok(oper) = sel.select_deadline(deadline) else {
-                let exit = deadline_expiry(
-                    gitmodules_debounce.deadline(),
-                    tripwire_debounce.deadline(),
-                    idle_deadline,
-                    Instant::now(),
-                );
-                if matches!(&exit, HandleEventsExit::Park) {
-                    wtrace!(ReindexExpired);
-                }
-                wait_for_in_flight(&in_flight);
-                return Ok(exit);
-            };
-            // Decode which receiver fired. The `Control` and `Tripwire` arms fully
-            // handle their event, while the Watcher arm yields the watcher index for
-            // the match below.
-            let index = match select_source(
-                oper.index(),
-                self.watchers.len(),
-                self.tripwires.len(),
-                false,
-            ) {
-                SelectSource::Control => match oper.recv(&self.control_rx)? {
+            let timeout = deadline.saturating_duration_since(Instant::now());
+
+            crossbeam_channel::select! {
+                recv(git_rx) -> res => match res? {
+                    Ok(event) => {
+                        idle_deadline = Instant::now() + super::IDLE_SERVER_TIMEOUT;
+                        self.handle_git_event(
+                            &event,
+                            &in_flight,
+                            &pending_status_retries,
+                            &mut gitmodules_debounce,
+                            &mut tripwire_debounce,
+                        );
+                    }
+                    Err(e) => {
+                        wait_for_in_flight(&in_flight);
+                        return Ok(self.handle_watcher_error(WatchSource::Git, &e));
+                    }
+                },
+                recv(tree_rx) -> res => match res? {
+                    Ok(event) => {
+                        idle_deadline = Instant::now() + super::IDLE_SERVER_TIMEOUT;
+                        self.handle_tree_event(
+                            &event,
+                            &in_flight,
+                            &pending_status_retries,
+                            &mut gitmodules_debounce,
+                            &mut tripwire_debounce,
+                        );
+                    }
+                    Err(e) => {
+                        wait_for_in_flight(&in_flight);
+                        return Ok(self.handle_watcher_error(WatchSource::Tree, &e));
+                    }
+                },
+                recv(control_rx) -> msg => match msg? {
                     ControlMessage::Reindex { replace_watchers } => {
                         wait_for_in_flight(&in_flight);
                         return Ok(HandleEventsExit::ReindexRequest { replace_watchers });
@@ -135,136 +139,33 @@ impl WatchServer {
                     }
                     ControlMessage::Debug { mut conn } => {
                         self.handle_debug_request(&mut conn, Some(&in_flight));
-                        continue;
                     }
                 },
-                SelectSource::Tripwire(tripwire) => {
-                    match oper.recv(&self.tripwires[tripwire].receiver)? {
-                        Ok(event) => {
-                            idle_deadline = Instant::now() + super::IDLE_SERVER_TIMEOUT;
-                            // A structural change (workdir appearing/disappearing) needs
-                            // a reindex to re-arm watches. Any other tripwire event seen
-                            // while one is already pending just pushes the window out.
-                            let needs_reindex = self.handle_tripwire_event(
-                                &event,
-                                &in_flight,
-                                &pending_status_retries,
-                            );
-                            if needs_reindex {
-                                tripwire_debounce.arm();
-                            } else {
-                                tripwire_debounce.bump();
-                            }
-                        }
-                        Err(e) => {
-                            wait_for_in_flight(&in_flight);
-                            error!("Tripwire watcher error: {e}");
-                            return Ok(HandleEventsExit::TripwireError { index: tripwire });
-                        }
+                default(timeout) => {
+                    let exit = deadline_expiry(
+                        gitmodules_debounce.deadline(),
+                        tripwire_debounce.deadline(),
+                        idle_deadline,
+                        Instant::now(),
+                    );
+                    if matches!(&exit, HandleEventsExit::Park) {
+                        wtrace!(ReindexExpired);
                     }
-                    continue;
-                }
-                SelectSource::Watcher(index) => index,
-                SelectSource::Idle => {
-                    unreachable!("idle watcher is not registered in the hot event loop")
-                }
-            };
-
-            match oper.recv(&self.watchers[index].receiver)? {
-                Ok(event) => {
-                    idle_deadline = Instant::now() + super::IDLE_SERVER_TIMEOUT;
-                    // Of the watcher events, only the root `.git/` and `.gitmodules` ones
-                    // extend a pending structural reindex (tripwire events arm and bump
-                    // it too, above). A restoring git op churns `.git/modules/<name>`
-                    // (config.lock, index.lock, the index rename), which the recursive
-                    // `.git` watcher sees. Bumping on that defers the reindex until the op
-                    // releases `index.lock` (rather than contending with it). A submodule's
-                    // own watcher can't witness its workdir reappearing (it's dead until
-                    // the reindex re-arms it), so submodule watchers don't extend the
-                    // window. No-op when unarmed.
-                    if index < ROOT_WATCHER_COUNT {
-                        tripwire_debounce.bump();
-                    }
-                    match self.classify_and_trace_event(&event, index) {
-                        Some(EventType::RootGitOperation) => {
-                            if index == DOT_GITMODULES_WATCHER_IDX {
-                                // .gitmodules changed, defer reindex. Don't
-                                // spawn submodule tasks here: individual
-                                // submodule statuses aren't affected until the
-                                // reindex runs, and the git operation that
-                                // modified .gitmodules will produce its own
-                                // root events (index rename, etc.) that spawn
-                                // tasks independently.
-                                gitmodules_debounce.arm();
-                            } else {
-                                gitmodules_debounce.bump();
-                                for i in ROOT_WATCHER_COUNT..self.watchers.len() {
-                                    self.try_spawn_submod_update(
-                                        i,
-                                        &in_flight,
-                                        &pending_status_retries,
-                                    );
-                                }
-                            }
-                        }
-                        Some(EventType::SubmoduleChange) => {
-                            self.try_spawn_submod_update(
-                                index,
-                                &in_flight,
-                                &pending_status_retries,
-                            );
-                        }
-                        Some(EventType::SubmoduleGitOperation) => {
-                            if let Some(i) = self.submod_for_event(&event) {
-                                self.try_spawn_submod_update(
-                                    i,
-                                    &in_flight,
-                                    &pending_status_retries,
-                                );
-                            } else {
-                                // A relevant event under `.git/modules`, but no current route.
-                                // This probably means the worktree/gitdir topology changed while
-                                // watchers weren't active. Reconcile from disk after the burst.
-                                tripwire_debounce.arm();
-                            }
-                        }
-                        Some(EventType::SubmoduleLockRelease) => {
-                            if let Some(i) = self.submod_for_event(&event) {
-                                if lock_release_needs_reread(i, &pending_status_retries) {
-                                    self.try_spawn_submod_update(
-                                        i,
-                                        &in_flight,
-                                        &pending_status_retries,
-                                    );
-                                }
-                            } else {
-                                // A relevant event under `.git/modules`, but no current route.
-                                // This probably means the worktree/gitdir topology changed while
-                                // watchers weren't active. Reconcile from disk after the burst.
-                                tripwire_debounce.arm();
-                            }
-                        }
-                        None => {}
-                    }
-                }
-                Err(e) => {
                     wait_for_in_flight(&in_flight);
-                    return Ok(self.handle_watcher_error(index, &e));
+                    return Ok(exit);
                 }
             }
         }
     }
 
     /// Waits for activity or control input while the hot watcher set is parked.
-    pub(super) fn handle_parked(&self, idle_watcher: &WatchEntry) -> WatchResult<HandleEventsExit> {
-        let mut sel = crossbeam_channel::Select::new();
-        register_select(&mut sel, &[], &[], Some(idle_watcher), &self.control_rx);
+    pub(super) fn handle_parked(&self, idle_watch: &SharedWatch) -> WatchResult<HandleEventsExit> {
+        let idle_rx = idle_watch.receiver.clone();
+        let control_rx = self.control_rx.clone();
 
         loop {
-            let oper = sel.select();
-            let source = select_source(oper.index(), 0, 0, true);
-            match source {
-                SelectSource::Idle => match oper.recv(&idle_watcher.receiver)? {
+            crossbeam_channel::select! {
+                recv(idle_rx) -> res => match res? {
                     // Arming a recursive watch makes notify walk the tree, and
                     // its own `opendir` calls come back as one `Access(Open)`
                     // per directory (~9k on boost). Waking on those would
@@ -281,7 +182,7 @@ impl WatchServer {
                         return Ok(HandleEventsExit::IdleWatcherError);
                     }
                 },
-                SelectSource::Control => match oper.recv(&self.control_rx)? {
+                recv(control_rx) -> msg => match msg? {
                     ControlMessage::Reindex { .. } => {
                         return Ok(HandleEventsExit::Wake);
                     }
@@ -292,31 +193,148 @@ impl WatchServer {
                         self.handle_debug_request(&mut conn, None);
                     }
                 },
-                SelectSource::Watcher(_) | SelectSource::Tripwire(_) => unreachable!(),
             }
         }
     }
 
-    /// Logs a watcher error and records it in [`Self::last_watcher_error`].
-    fn handle_watcher_error(&mut self, index: usize, error: &notify::Error) -> HandleEventsExit {
-        let msg = format!(
-            "Watcher error for {}: {error}",
-            self.watchers[index].relative_path
-        );
-        error!("{msg}\nReindexing to reset watchers...");
-        self.last_watcher_error = Some(msg);
-        HandleEventsExit::WatcherError { index }
+    /// Handles one event from the git watcher.
+    fn handle_git_event(
+        &self,
+        event: &notify::Event,
+        in_flight: &Arc<(Mutex<InFlightTracker>, Condvar)>,
+        pending_status_retries: &Arc<Mutex<BitSet>>,
+        gitmodules_debounce: &mut ReindexDebounce,
+        tripwire_debounce: &mut ReindexDebounce,
+    ) {
+        // The kernel overflowed this instance's event queue and dropped events.
+        // Which ones is unknowable, so schedule a replacing reindex once the
+        // burst that overflowed the queue settles.
+        if event.need_rescan() {
+            wtrace!(RescanFlagged);
+            tripwire_debounce.arm();
+        }
+        // Git-watcher events extend a pending structural reindex. A restoring
+        // git op churns `.git/modules/<name>` (config.lock, index.lock, the
+        // index rename), which this recursive watch sees. Bumping on that
+        // defers the reindex until the op releases `index.lock` (rather than
+        // contending with it). A submodule workdir can't witness its own
+        // reappearance (its watch root is dead until the reindex re-arms it),
+        // so workdir events don't extend the window. No-op when unarmed.
+        tripwire_debounce.bump();
+        match self.classify_and_trace_git_event(event) {
+            Some(EventType::RootGitOperation) => {
+                gitmodules_debounce.bump();
+                for i in 0..self.submodules.len() {
+                    self.try_spawn_submod_update(i, in_flight, pending_status_retries);
+                }
+            }
+            Some(EventType::SubmoduleGitOperation) => {
+                if let Some(i) = self.submod_for_event(event) {
+                    self.try_spawn_submod_update(i, in_flight, pending_status_retries);
+                } else {
+                    // A relevant event under `.git/modules`, but no current route.
+                    // This probably means the worktree/gitdir topology changed while
+                    // watchers weren't active. Reconcile from disk after the burst.
+                    tripwire_debounce.arm();
+                }
+            }
+            Some(EventType::SubmoduleLockRelease) => {
+                if let Some(i) = self.submod_for_event(event) {
+                    if lock_release_needs_reread(i, pending_status_retries) {
+                        self.try_spawn_submod_update(i, in_flight, pending_status_retries);
+                    }
+                } else {
+                    // A relevant event under `.git/modules`, but no current route.
+                    // This probably means the worktree/gitdir topology changed while
+                    // watchers weren't active. Reconcile from disk after the burst.
+                    tripwire_debounce.arm();
+                }
+            }
+            None => {}
+        }
     }
 
-    /// Routes a tripwire event (a structural change to a submodule ancestor
-    /// directory) to the affected submodules. Returns `true` if a reindex is
-    /// needed to re-arm watches.
+    /// Handles one event from the tree watcher by routing each of its paths:
+    /// `.gitmodules` changes defer a reindex, paths inside a submodule workdir
+    /// spawn that submodule's status re-read, and structural paths go through
+    /// the tripwire logic. A single event can span classes (a rename between
+    /// two submodules pairs both halves into one event on a shared instance),
+    /// so every path routes independently and the debounce outcomes combine
+    /// afterwards.
+    fn handle_tree_event(
+        &self,
+        event: &notify::Event,
+        in_flight: &Arc<(Mutex<InFlightTracker>, Condvar)>,
+        pending_status_retries: &Arc<Mutex<BitSet>>,
+        gitmodules_debounce: &mut ReindexDebounce,
+        tripwire_debounce: &mut ReindexDebounce,
+    ) {
+        // The kernel overflowed this instance's event queue and dropped events.
+        // Which ones is unknowable, so schedule a replacing reindex once the
+        // burst that overflowed the queue settles.
+        if event.need_rescan() {
+            wtrace!(RescanFlagged);
+            tripwire_debounce.arm();
+        }
+        let mut gitmodules_changed = false;
+        let mut structural_seen = false;
+        let mut structural_reindex = false;
+        for path in &event.paths {
+            let action = self.classify_tree_path(path, event);
+            wtrace!(|s| TreeRouted {
+                kind: event.kind,
+                path: s.intern_path(path),
+                action,
+            });
+            match action {
+                TreeAction::Gitmodules => gitmodules_changed = true,
+                TreeAction::Submodule(slot) => {
+                    self.try_spawn_submod_update(slot, in_flight, pending_status_retries);
+                }
+                TreeAction::Structural => {
+                    structural_seen = true;
+                    if let Ok(rel) = path.strip_prefix(&self.root_path)
+                        && self.handle_structural_path(
+                            rel,
+                            event,
+                            in_flight,
+                            pending_status_retries,
+                        )
+                    {
+                        structural_reindex = true;
+                    }
+                }
+                TreeAction::Ignored => {}
+            }
+        }
+
+        if gitmodules_changed {
+            // .gitmodules changed, defer reindex. Don't spawn submodule
+            // tasks here: individual submodule statuses aren't affected
+            // until the reindex runs, and the git operation that modified
+            // .gitmodules will produce its own root events (index rename,
+            // etc.) that spawn tasks independently.
+            gitmodules_debounce.arm();
+        }
+        // A structural change (workdir appearing or moving) needs a reindex to
+        // re-arm watches. Other structural or `.gitmodules` activity seen while
+        // one is already pending just pushes the window out.
+        if structural_reindex {
+            tripwire_debounce.arm();
+        } else if structural_seen || gitmodules_changed {
+            tripwire_debounce.bump();
+        }
+    }
+
+    /// Applies tripwire logic to `rel`, a root-relative structural path outside
+    /// every submodule workdir. Returns `true` if a reindex is needed to re-arm
+    /// watches.
     ///
     /// A `Remove` of a directory at/under which submodules live means those
     /// submodules' workdirs are gone -> re-read them so they flip to
-    /// `DELETED_WORKDIR` (their own recursive watches just died silently). A
+    /// `DELETED_WORKDIR` (their recursive watch roots just died silently). A
     /// `Create` or rename (`Modify(Name)`) means a directory reappeared or moved
-    /// -> a full reindex re-places the now-dead recursive watch.
+    /// -> a full reindex re-places the now-dead watch root.
     ///
     /// On macOS things are less clear. `FSEvents` event flags are advisory hints,
     /// not a reliable log (Apple's guidance is to reconcile against the real
@@ -324,8 +342,9 @@ impl WatchServer {
     /// for the now-gone dir. The reindex it triggers re-reads actual state and tolerates
     /// an absent workdir. Events with no submodule at/under the path are repo-root
     /// churn, ignored.
-    fn handle_tripwire_event(
+    fn handle_structural_path(
         &self,
+        rel: &Path,
         event: &notify::Event,
         in_flight: &Arc<(Mutex<InFlightTracker>, Condvar)>,
         pending_status_retries: &Arc<Mutex<BitSet>>,
@@ -339,45 +358,39 @@ impl WatchServer {
             return false;
         }
 
-        let mut needs_reindex = false;
-        for path in &event.paths {
-            // Tripwire dirs are all under the root, so events on them are too:
-            // strip the root prefix to look up against the relative keys.
-            let Ok(rel) = path.strip_prefix(&self.root_path) else {
-                continue;
-            };
-            // Every submodule at or under `rel` (a prefix range over the sorted
-            // map). An empty range is ordinary repo-root churn and a no-op.
-            for (_, &idx) in self
-                .workdir_to_index
-                .range::<Path, _>((Bound::Included(rel), Bound::Unbounded))
-                .take_while(|(k, _)| k.starts_with(rel))
-            {
-                wtrace!(|s| TripwireFired {
-                    kind: event.kind,
-                    rel: s.intern_path(rel),
-                    idx,
-                    reindex: reindex_kind,
-                });
-                if reindex_kind {
-                    // A single affected submodule is enough to decide a reindex.
-                    needs_reindex = true;
-                    break;
-                }
-                self.try_spawn_submod_update(idx, in_flight, pending_status_retries);
+        // Every submodule at or under `rel` (a prefix range over the sorted
+        // map). An empty range is ordinary repo-root churn and a no-op.
+        for (_, &idx) in self
+            .workdir_to_index
+            .range::<Path, _>((Bound::Included(rel), Bound::Unbounded))
+            .take_while(|(k, _)| k.starts_with(rel))
+        {
+            wtrace!(|s| TripwireFired {
+                kind: event.kind,
+                rel: s.intern_path(rel),
+                idx,
+                reindex: reindex_kind,
+            });
+            if reindex_kind {
+                // A single affected submodule is enough to decide a reindex.
+                return true;
             }
+            self.try_spawn_submod_update(idx, in_flight, pending_status_retries);
         }
-        needs_reindex
+        false
     }
 
-    /// Finds the watcher index of the submodule whose `.git/modules/` path matches the event.
-    #[inline]
-    pub(super) fn submod_for_event(&self, event: &notify::Event) -> Option<usize> {
-        event.paths.iter().find_map(|p| {
-            p.ancestors()
-                .find_map(|ancestor| self.modules_path_to_index.get(ancestor))
-                .copied()
-        })
+    /// Logs a watcher error and records it in [`Self::last_watcher_error`].
+    fn handle_watcher_error(
+        &mut self,
+        source: WatchSource,
+        error: &notify::Error,
+    ) -> HandleEventsExit {
+        let msg = format!("{source:?} watcher error: {error}");
+        error!("{msg}\nReindexing to reset watchers...");
+        wtrace!(WatcherErrored { source });
+        self.last_watcher_error = Some(msg);
+        HandleEventsExit::WatcherError { source }
     }
 }
 
@@ -417,105 +430,5 @@ fn deadline_expiry(
     } else {
         debug_assert!(idle <= now);
         HandleEventsExit::Park
-    }
-}
-
-/// Decodes an index returned by a [`crossbeam_channel::Select`] configured by
-/// [`register_select`].
-///
-/// The watcher band starts with the [`ROOT_WATCHER_COUNT`] root watchers,
-/// followed by the submodule watchers (totalling `n_watchers`). Those indices pass
-/// through unchanged. Tripwire indices are rebased by `n_watchers`, followed by
-/// the control channel.
-const fn select_source(
-    index: usize,
-    n_watchers: usize,
-    n_tripwires: usize,
-    has_idle: bool,
-) -> SelectSource {
-    if index < n_watchers {
-        SelectSource::Watcher(index)
-    } else if index < n_watchers + n_tripwires {
-        SelectSource::Tripwire(index - n_watchers)
-    } else if has_idle && index == n_watchers + n_tripwires {
-        SelectSource::Idle
-    } else {
-        SelectSource::Control
-    }
-}
-
-/// Registers every receiver on `sel` in the canonical order [`select_source`]
-/// decodes. All `watchers`, then all `tripwires`, then the control channel.
-pub(super) fn register_select<'a>(
-    sel: &mut crossbeam_channel::Select<'a>,
-    watchers: &'a [WatchEntry],
-    tripwires: &'a [WatchEntry],
-    idle_watcher: Option<&'a WatchEntry>,
-    control_rx: &'a crossbeam_channel::Receiver<ControlMessage>,
-) {
-    for WatchEntry { receiver, .. } in watchers {
-        sel.recv(receiver);
-    }
-    for WatchEntry { receiver, .. } in tripwires {
-        sel.recv(receiver);
-    }
-    if let Some(WatchEntry { receiver, .. }) = idle_watcher {
-        sel.recv(receiver);
-    }
-    sel.recv(control_rx);
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn select_source_decodes_index_bands() {
-        // `handle_events` registers receivers as: watchers, then tripwires, then
-        // the control channel. For 2 watchers + 1 tripwire that is watchers
-        // [0, 1], tripwire [2], control [3].
-        assert!(matches!(
-            select_source(0, 2, 1, false),
-            SelectSource::Watcher(0)
-        ));
-        assert!(matches!(
-            select_source(1, 2, 1, false),
-            SelectSource::Watcher(1)
-        ));
-        assert!(matches!(
-            select_source(2, 2, 1, false),
-            SelectSource::Tripwire(0)
-        ));
-        assert!(matches!(
-            select_source(3, 2, 1, false),
-            SelectSource::Control
-        ));
-
-        // No tripwires: the control channel sits immediately after the watchers.
-        assert!(matches!(
-            select_source(2, 2, 0, false),
-            SelectSource::Control
-        ));
-
-        // The tripwire band is reported as a 0-based index local to `tripwires`.
-        assert!(matches!(
-            select_source(2, 2, 3, false),
-            SelectSource::Tripwire(0)
-        ));
-        assert!(matches!(
-            select_source(4, 2, 3, false),
-            SelectSource::Tripwire(2)
-        ));
-        assert!(matches!(
-            select_source(5, 2, 3, false),
-            SelectSource::Control
-        ));
-
-        // With an idle watcher, it occupies the slot immediately before control.
-        assert!(matches!(select_source(5, 2, 3, true), SelectSource::Idle));
-        assert!(matches!(
-            select_source(6, 2, 3, true),
-            SelectSource::Control
-        ));
     }
 }

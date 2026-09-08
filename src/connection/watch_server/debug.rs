@@ -19,21 +19,20 @@ impl WatchServer {
         &self,
         in_flight: Option<&(Mutex<InFlightTracker>, Condvar)>,
     ) -> DebugState {
-        let watched_paths: Vec<(String, String, u32)> = self
-            .watchers
+        let submodules: Vec<(String, String)> = self
+            .submodules
             .iter()
-            .map(|w| {
+            .map(|s| {
                 (
-                    w.relative_path.clone(),
-                    w.watch_path.display().to_string(),
-                    w.receiver.len() as u32,
+                    s.relative_path.clone(),
+                    s.workdir_path.display().to_string(),
                 )
             })
             .collect();
-        let tripwires: Vec<(String, u32)> = self
+        let tripwires: Vec<String> = self
             .tripwires
             .iter()
-            .map(|w| (w.watch_path.display().to_string(), w.receiver.len() as u32))
+            .map(|p| p.display().to_string())
             .collect();
 
         let submodule_statuses = try_lock_for(&self.submod_statuses, DEBUG_LOCK_TIMEOUT)
@@ -46,9 +45,9 @@ impl WatchServer {
                     .iter()
                     .map(|(idx, state)| {
                         let rel_path = self
-                            .watchers
+                            .submodules
                             .get(*idx)
-                            .map_or("(unknown)", |w| w.relative_path.as_str());
+                            .map_or("(unknown)", |s| s.relative_path.as_str());
                         let cancelled = state.cancel.load(Ordering::Relaxed);
                         let state_str = match (state.dirty, cancelled) {
                             (false, false) => "active",
@@ -74,8 +73,9 @@ impl WatchServer {
             server_pid: std::process::id(),
             rayon_threads: rayon::current_num_threads() as u32,
             progress_subscribers,
-            watcher_count: self.watchers.len() as u32,
-            watched_paths,
+            git_watch_pending: self.git_watch.as_ref().map(|w| w.receiver.len() as u32),
+            tree_watch_pending: self.tree_watch.as_ref().map(|w| w.receiver.len() as u32),
+            submodules,
             root_path: self.root_path.display().to_string(),
             socket_name: ipc_socket_path(&self.root_path)
                 .into_string()

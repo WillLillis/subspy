@@ -77,8 +77,7 @@ impl WatchServer {
         );
         drop(tracker);
 
-        let watcher = &self.watchers[index];
-        let relative_path = watcher.relative_path.clone();
+        let relative_path = self.submodules[index].relative_path.clone();
 
         let in_flight = Arc::clone(in_flight);
         let statuses = Arc::clone(&self.submod_statuses);
@@ -238,6 +237,6 @@ impl WatchServer {
         for i in self.pending_rescan.iter() {
             self.try_spawn_submod_update(i, in_flight, pending_status_retries);
         }
-        self.pending_rescan.clear_and_resize(self.watchers.len());
+        self.pending_rescan.clear_and_resize(self.submodules.len());
     }
 }
