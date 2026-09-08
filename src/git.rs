@@ -259,15 +259,16 @@ pub fn parse_per_submodule_ignore(
         .collect()
 }
 
+/// One `.gitmodules` entry: `(name, path, branch)`.
+pub type GitmodulesEntry = (String, String, Option<String>);
+
 /// Parses `.gitmodules` directly via [`git2::Config`] to extract submodule names,
-/// paths, and branches.
+/// paths, and branches. A missing file parses as no entries.
 ///
 /// # Errors
 ///
 /// Returns `git2::Error` if `.gitmodules` cannot be parsed.
-pub fn parse_gitmodules(
-    root_path: &Path,
-) -> Result<Vec<(String, String, Option<String>)>, git2::Error> {
+pub fn parse_gitmodules(root_path: &Path) -> Result<Vec<GitmodulesEntry>, git2::Error> {
     let gitmodules_path = root_path.join(".gitmodules");
     let config = git2::Config::open(&gitmodules_path)?;
     let mut entries = Vec::new();

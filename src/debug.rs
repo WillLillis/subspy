@@ -33,7 +33,16 @@ impl fmt::Display for DebugState {
         writeln!(f, "Worker threads: {}", self.rayon_threads)?;
         writeln!(f, "Root path: {}", self.root_path)?;
         writeln!(f, "Socket: {}", self.socket_name)?;
-        writeln!(f, "Watcher count: {}", self.watcher_count)?;
+        writeln!(f, "\nWatcher queues:")?;
+        for (name, pending) in [
+            ("git", self.git_watch_pending),
+            ("tree", self.tree_watch_pending),
+        ] {
+            match pending {
+                Some(pending) => writeln!(f, "  {name}: {pending} pending events")?,
+                None => writeln!(f, "  {name}: (parked)")?,
+            }
+        }
         writeln!(f, "\nProgress subscribers:")?;
         match &self.progress_subscribers {
             None => writeln!(f, "  WARNING: mutex locked, could not read")?,
@@ -48,20 +57,12 @@ impl fmt::Display for DebugState {
             }
         }
 
-        writeln!(f, "\nWatched paths:")?;
-        if self.watched_paths.is_empty() {
+        writeln!(f, "\nWatched submodules:")?;
+        if self.submodules.is_empty() {
             writeln!(f, "  (none)")?;
         } else {
-            for (relative, watch_path, pending) in &self.watched_paths {
-                writeln!(
-                    f,
-                    "  {} -> {watch_path} ({pending} pending events)",
-                    if relative.is_empty() {
-                        "(root)"
-                    } else {
-                        relative
-                    }
-                )?;
+            for (relative, workdir_path) in &self.submodules {
+                writeln!(f, "  {relative} -> {workdir_path}")?;
             }
         }
 
@@ -69,8 +70,8 @@ impl fmt::Display for DebugState {
         if self.tripwires.is_empty() {
             writeln!(f, "  (none)")?;
         } else {
-            for (watch_path, pending) in &self.tripwires {
-                writeln!(f, "  {watch_path} ({pending} pending events)")?;
+            for watch_path in &self.tripwires {
+                writeln!(f, "  {watch_path}")?;
             }
         }
 
