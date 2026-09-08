@@ -3,7 +3,7 @@
 //! Uses an inline `[u64; 8]` of 512 bits (one cache line) for the common case of
 //! up to 510 submodules. Larger repositories fall back to a `Vec<u64>`.
 
-/// A compact bitset for tracking small dense integer sets (watcher indices).
+/// A compact bitset for tracking small dense integer sets (submodule slot indices).
 #[derive(Debug)]
 pub enum BitSet {
     Inline([u64; Self::INLINE_WORDS]),
