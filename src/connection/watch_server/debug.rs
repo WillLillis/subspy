@@ -22,7 +22,12 @@ impl WatchServer {
         let submodules: Vec<(String, String)> = self
             .submodules
             .iter()
-            .map(|s| (s.relative_path.clone(), s.workdir_path.display().to_string()))
+            .map(|s| {
+                (
+                    s.relative_path.clone(),
+                    s.workdir_path.display().to_string(),
+                )
+            })
             .collect();
         let tripwires: Vec<String> = self
             .tripwires

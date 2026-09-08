@@ -372,9 +372,8 @@ mod tests {
     fn gitmodules_rewrite_routes_from_either_rename_half() {
         let server = test_server();
 
-        let source_half =
-            notify::Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::From)))
-                .add_path(PathBuf::from("/repo/.gitmodules.lock"));
+        let source_half = notify::Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::From)))
+            .add_path(PathBuf::from("/repo/.gitmodules.lock"));
         assert!(matches!(
             server.classify_tree_path(Path::new("/repo/.gitmodules.lock"), &source_half),
             TreeAction::Gitmodules

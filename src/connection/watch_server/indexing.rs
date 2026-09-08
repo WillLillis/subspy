@@ -178,7 +178,8 @@ impl WatchServer {
                 // Record the (root-relative) workdir->slot mapping for every
                 // submodule, even ones whose status read failed. Path routing
                 // must still be able to find a submodule by prefix.
-                self.workdir_to_index.insert(PathBuf::from(&relative_path), i);
+                self.workdir_to_index
+                    .insert(PathBuf::from(&relative_path), i);
                 self.submodules.push(SubmoduleSlot {
                     relative_path,
                     workdir_path: full_path,

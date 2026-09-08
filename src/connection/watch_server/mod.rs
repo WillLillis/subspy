@@ -332,9 +332,10 @@ impl WatchServer {
                         .into_iter()
                         .flatten()
                         .any(|watch| {
-                            watch.receiver.try_iter().any(|res| {
-                                res.map_or(true, |event| event_is_idle_activity(&event))
-                            })
+                            watch
+                                .receiver
+                                .try_iter()
+                                .any(|res| res.map_or(true, |event| event_is_idle_activity(&event)))
                         });
 
                     if hot_activity {
