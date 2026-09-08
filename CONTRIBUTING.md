@@ -221,11 +221,11 @@ syntax. The reindex loop parses before touching any watcher (one parse per reind
 shared by the slot-staleness check and `populate_status_map`, so the check can never
 disagree with the data indexed). On parse failure the server keeps the last indexed
 state and its live watches, and the next `.gitmodules` rewrite, reported by the root
-watch, schedules the reindex that reads the fixed file. During the broken window,
-untouched submodules keep their last status, while a submodule that changes flips to
-`UNREADABLE`: libgit2's `submodule_status` parses `.gitmodules` itself, so no fresh
-status is computable until the file is fixed, and the recovering reindex re-reads
-everything. Startup is the exception: with no last good state to serve, a parse
+watch, schedules the reindex that reads the fixed file. Through the broken window every
+fresh read fails, because libgit2's `submodule_status` parses `.gitmodules` itself: a
+submodule the server re-reads (for its own changes, or a read already in flight when
+the file broke) flips to `UNREADABLE`, one it never re-reads keeps its last status,
+and the recovering reindex re-reads everything. Startup is the exception: with no last good state to serve, a parse
 failure is fatal, and clients fall back (the shim forwards to real git) until the file
 is fixed. A *missing* `.gitmodules` is not an error anywhere: it parses as no entries.
 
