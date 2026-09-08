@@ -39,8 +39,9 @@ use crate::{
     bitset::BitSet,
     connection::{
         IpcStream, cleanup_socket, create_listener, ipc_connect, ipc_socket_path,
-        protocol::SHUTDOWN_ACK, write_full_message_fixed,
+        protocol::SHUTDOWN_ACK, watch_server::trace::wtrace, write_full_message_fixed,
     },
+    git::GitmodulesEntry,
     watch::WatchResult,
 };
 
@@ -52,10 +53,6 @@ use update::InFlightTracker;
 use super::client_handler::handle_client_connection;
 use super::progress::ProgressSubscribers;
 
-/// `.git/` and `.gitmodules`
-const ROOT_WATCHER_COUNT: usize = 2;
-const DOT_GITMODULES_WATCHER_IDX: usize = 0;
-const DOT_GIT_WATCHER_IDX: usize = 1;
 const IDLE_SERVER_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// The submodule status map
@@ -67,46 +64,53 @@ type WatchReceiver = crossbeam_channel::Receiver<Result<notify::Event, notify::E
 /// Filesystem watcher type
 pub type ServerWatcher = notify::RecommendedWatcher;
 
-/// A filesystem watcher and the metadata used to route its events.
+/// A shared filesystem watcher instance and the receiver its events arrive on.
+/// One instance hosts many watch roots; events are routed by path.
 #[derive(Debug)]
-struct WatchEntry {
-    watch_path: PathBuf,
-    relative_path: String,
+struct SharedWatch {
     receiver: WatchReceiver,
     watcher: ServerWatcher,
 }
 
-impl WatchEntry {
-    const fn new(
-        relative_path: String,
-        watch_path: PathBuf,
-        receiver: WatchReceiver,
-        watcher: ServerWatcher,
-    ) -> Self {
-        Self {
-            watch_path,
-            relative_path,
-            receiver,
-            watcher,
-        }
-    }
+/// The shared watcher instance an event or error came from.
+#[derive(Clone, Copy, Debug)]
+pub(super) enum WatchSource {
+    /// The git-side instance: the git directory, plus shared refs for linked
+    /// worktrees.
+    Git,
+    /// The tree-side instance: the repository root, submodule workdirs, and
+    /// tripwires.
+    Tree,
 }
 
 /// The state necessary to maintain a status watch for the working tree at `root_path`
 struct WatchServer {
-    /// Filesystem watchers, one per submodule (plus the two root watchers).
-    watchers: Vec<WatchEntry>,
-    /// Non-recursive "tripwire" watches on the ancestor directories of every
-    /// submodule, up to and including the repo root. A submodule's own watcher
-    /// dies silently when its directory is deleted, so these surviving parent
+    /// The git-side watcher instance: a recursive watch on the git directory,
+    /// plus the shared refs directory when a linked worktree keeps it outside.
+    /// `None` while parked.
+    git_watch: Option<SharedWatch>,
+    /// The tree-side watcher instance, hosting the always-on non-recursive
+    /// repository-root watch (which covers `.gitmodules` and doubles as the
+    /// root-level tripwire), one recursive watch root per submodule workdir,
+    /// and the non-recursive ancestor tripwires. `None` while parked.
+    tree_watch: Option<SharedWatch>,
+    /// Root-relative submodule paths by slot index. Slot `i` corresponds to entry
+    /// `i` in every index-keyed structure (`pending_rescan`, in-flight tasks, and
+    /// the values of the `*_to_index` maps).
+    submodules: Vec<String>,
+    /// Root-relative ancestor directories of every submodule, watched
+    /// non-recursively on the tree watcher. A submodule's own watch root dies
+    /// silently when its directory is deleted, so these surviving parent
     /// watches are what detect a submodule workdir being deleted or restored.
-    /// Rebuilt alongside `watchers` whenever submodule watches are (re)placed.
-    tripwires: Vec<WatchEntry>,
+    /// Rebuilt alongside the tree watcher whenever submodule watch roots are
+    /// (re)placed.
+    tripwires: Vec<PathBuf>,
     /// Maps each submodule's **root-relative** working-directory path to its
-    /// watcher index, sorted so a tripwire event on a directory `P` can find
-    /// every submodule at or under `P` via a prefix range. Keys are relative so
-    /// these comparisons start at the distinguishing component instead of re-walking
-    /// the identical repo-root prefix.
+    /// slot index, sorted so a structural event on a directory `P` can find
+    /// every submodule at or under `P` via a prefix range, and an event path
+    /// inside a workdir can find its slot via the greatest key at or before
+    /// it. Keys are relative so these comparisons start at the distinguishing
+    /// component instead of re-walking the identical repo-root prefix.
     workdir_to_index: BTreeMap<PathBuf, usize>,
     /// Submodule watcher indices needing a re-read, drained by the event loop
     /// ([`Self::handle_events`]) on its next turn.
@@ -131,6 +135,9 @@ struct WatchServer {
     root_head_path: PathBuf,
     /// `<root_path>/.gitmodules` (a tracked file in the working tree)
     root_gitmodules_path: PathBuf,
+    /// `<root_path>/.gitmodules.lock`, the staging file git renames over
+    /// `.gitmodules`
+    root_gitmodules_lock_path: PathBuf,
     /// `<git_dir>`, the per-worktree git directory and recursive watch target
     root_git_path: PathBuf,
     /// `<git_dir>/modules`, containing this working tree's submodule gitdirs
@@ -175,13 +182,16 @@ impl WatchServer {
         let root_index_path = layout.index();
         let root_head_path = layout.head();
         let root_gitmodules_path = root_path.join(DOT_GITMODULES);
+        let root_gitmodules_lock_path = root_path.join(".gitmodules.lock");
         let root_modules_path = layout.modules();
         let root_lock_path = layout.index_lock();
         let root_head_lock_path = layout.head_lock();
         let root_refs_heads_path = layout.refs_heads();
 
         Self {
-            watchers: Vec::new(),
+            git_watch: None,
+            tree_watch: None,
+            submodules: Vec::new(),
             tripwires: Vec::new(),
             workdir_to_index: BTreeMap::new(),
             pending_rescan: BitSet::with_capacity(0),
@@ -190,6 +200,7 @@ impl WatchServer {
             root_index_path,
             root_head_path,
             root_gitmodules_path,
+            root_gitmodules_lock_path,
             root_git_path,
             root_modules_path,
             root_lock_path,
@@ -262,31 +273,57 @@ impl WatchServer {
         }
     }
 
+    /// Parse the `.gitmodules` file to extract submodule names, paths, and branches.
+    ///
+    /// # Errors
+    ///
+    /// Returns `git2::Error` if `.gitmodules` cannot be parsed.
+    fn parse_gitmodules(&self) -> Result<Vec<GitmodulesEntry>, git2::Error> {
+        #[cfg_attr(not(trace_events), expect(unused))]
+        crate::git::parse_gitmodules(&self.root_path).inspect_err(|e| {
+            wtrace!(|s| GitmodulesParseFailed {
+                error: s.intern_str(&e.to_string())
+            });
+        })
+    }
+
+    /// Places a fresh tree watcher before parsing `.gitmodules`, ensuring any
+    /// rewrite after the parse is queued on the watcher that survives the reindex.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if watcher placement or `.gitmodules` parsing fails.
+    fn place_tree_watch_and_parse_gitmodules(&mut self) -> WatchResult<Vec<GitmodulesEntry>> {
+        self.place_tree_watch()?;
+        Ok(self.parse_gitmodules()?)
+    }
+
     /// The main watch loop for the server. Will loop until a client shutdown request is received
     /// or an error is encountered.
     ///
     /// `status_guard` is a pre-acquired lock on the status map, ensuring clients
     /// block until initial indexing completes.
-    #[expect(clippy::significant_drop_tightening)]
     fn watch(
         &mut self,
         display_progress: bool,
         status_guard: MutexGuard<'_, BTreeMap<String, StatusSummary>>,
     ) -> WatchResult<()> {
-        // Place watches on `.git/` and `.gitmodules`. These watches will live for the entirety of
-        // the watch server's execution, unless a root watcher error requires replacement.
-        self.place_root_watchers()?;
+        // Place the two shared watcher instances. The git watch lives for the
+        // entirety of the server's hot execution unless a watcher error requires
+        // replacement. The tree watch is rebuilt by every reindex that re-places
+        // submodule watch roots.
+        self.place_git_watch()?;
+        let entries = self.place_tree_watch_and_parse_gitmodules()?;
 
-        // Initial indexing with the pre-acquired guard.
-        self.populate_status_map(display_progress, true, status_guard)?;
+        self.populate_status_map(entries, display_progress, true, status_guard)?;
         let mut exit_reason = self.handle_events()?;
 
         // Subsequent reindex iterations
         let status_lock = Arc::clone(&self.submod_statuses);
         loop {
-            let new_submod_watches = match exit_reason {
+            let (entries, new_submod_watches) = match exit_reason {
                 HandleEventsExit::Park => {
-                    let idle_watcher = self.place_idle_watcher()?;
+                    let idle_watch = self.place_idle_watch()?;
 
                     // Arming the idle watcher above walks the tree, and inotify
                     // delivers each of those `opendir` calls to every watch on
@@ -294,23 +331,24 @@ impl WatchServer {
                     // still armed. Filtering by relevance keeps that self-inflicted
                     // `Access(Open)` burst from reading as real activity. A
                     // watcher error still counts: the hot loop reindexes on those.
-                    let hot_activity =
-                        self.watchers
-                            .iter()
-                            .chain(self.tripwires.iter())
-                            .any(|entry| {
-                                entry.receiver.try_iter().any(|res| {
-                                    res.map_or(true, |event| event_is_idle_activity(&event))
-                                })
-                            });
+                    let hot_activity = [&self.git_watch, &self.tree_watch]
+                        .into_iter()
+                        .flatten()
+                        .any(|watch| {
+                            watch
+                                .receiver
+                                .try_iter()
+                                .any(|res| res.map_or(true, |event| event_is_idle_activity(&event)))
+                        });
 
                     if hot_activity {
-                        // The timeout raced with filesystem activity. Preserve the hot
-                        // state and use the existing reindex path.
-                        self.watchers.truncate(ROOT_WATCHER_COUNT);
-                        true
+                        // The timeout raced with filesystem activity. Keep the
+                        // git watch and arm the new tree watch before parsing.
+                        (self.place_tree_watch_and_parse_gitmodules()?, true)
                     } else {
-                        self.watchers.clear();
+                        self.git_watch = None;
+                        self.tree_watch = None;
+                        self.submodules.clear();
                         self.tripwires.clear();
                         self.pending_rescan.clear_and_resize(0);
                         self.workdir_to_index.clear();
@@ -326,58 +364,59 @@ impl WatchServer {
                         unsafe {
                             libc::malloc_trim(0);
                         }
-                        exit_reason = self.handle_parked(&idle_watcher)?;
+                        exit_reason = self.handle_parked(&idle_watch)?;
                         continue;
                     }
                 }
                 HandleEventsExit::Wake => {
-                    self.watchers.clear();
-                    self.tripwires.clear();
-                    self.place_root_watchers()?;
-                    true
+                    // A parked server holds no watches. Rebuild both instances
+                    // before parsing so later `.gitmodules` rewrites are queued.
+                    self.place_git_watch()?;
+                    (self.place_tree_watch_and_parse_gitmodules()?, true)
                 }
                 HandleEventsExit::IdleWatcherError => {
-                    let idle_watcher = self.place_idle_watcher()?;
-                    exit_reason = self.handle_parked(&idle_watcher)?;
+                    let idle_watch = self.place_idle_watch()?;
+                    exit_reason = self.handle_parked(&idle_watch)?;
                     continue;
                 }
                 HandleEventsExit::ReindexEvent => {
-                    self.watchers.truncate(ROOT_WATCHER_COUNT);
-                    true
+                    (self.place_tree_watch_and_parse_gitmodules()?, true)
                 }
                 HandleEventsExit::Shutdown { .. } => break,
                 HandleEventsExit::ReindexRequest { replace_watchers } => {
                     if replace_watchers {
-                        self.watchers.clear();
-                        self.tripwires.clear();
-                        self.place_root_watchers()?;
-                    }
-                    replace_watchers
-                }
-                HandleEventsExit::WatcherError { index } => {
-                    if index < ROOT_WATCHER_COUNT {
-                        // Root watcher errors require a full reindex since the
-                        // submodule set may have changed.
-                        self.watchers.clear();
-                        self.place_root_watchers()?;
-                        true
+                        self.place_git_watch()?;
+                        (self.place_tree_watch_and_parse_gitmodules()?, true)
                     } else {
-                        let (new_rx, new_watcher) =
-                            Self::place_submodule_watch(&self.watchers[index].watch_path)?;
-                        self.watchers[index].watcher = new_watcher;
-                        self.watchers[index].receiver = new_rx;
-                        false
+                        let entries = self.parse_gitmodules()?;
+                        if self.slots_match(&entries) {
+                            (entries, false)
+                        } else {
+                            // The topology changed, upgrading this to a replacing pass.
+                            // Re-parse after the replacement root watch is active so
+                            // the indexed entries cannot predate the watcher handoff.
+                            (self.place_tree_watch_and_parse_gitmodules()?, true)
+                        }
                     }
                 }
-                HandleEventsExit::TripwireError { index } => {
-                    self.tripwires.remove(index);
-                    self.watchers.truncate(ROOT_WATCHER_COUNT);
-                    true
+                HandleEventsExit::WatcherError { source } => {
+                    // Watches may have died with the failing instance, and the
+                    // submodule set may have changed while coverage was degraded,
+                    // so rebuild and reindex. A tree-side failure keeps the
+                    // healthy git watch.
+                    if matches!(source, WatchSource::Git) {
+                        self.place_git_watch()?;
+                    }
+                    (self.place_tree_watch_and_parse_gitmodules()?, true)
                 }
             };
 
-            let status_guard = status_lock.lock().expect("Mutex poisoned");
-            self.populate_status_map(false, new_submod_watches, status_guard)?;
+            self.populate_status_map(
+                entries,
+                false,
+                new_submod_watches,
+                status_lock.lock().expect("Mutex poisoned"),
+            )?;
 
             exit_reason = self.handle_events()?;
         }

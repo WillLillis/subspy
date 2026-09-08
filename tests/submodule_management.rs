@@ -235,3 +235,28 @@ fn remove_submodule_detected_by_server(_run: u32) {
         !statuses.iter().any(|(name, _)| name == "sub_b")
     });
 }
+
+/// A non-replacing reindex request can win the race against the debounced
+/// replacing reindex that a `.gitmodules` change arms, and would then read a
+/// submodule set the live slots don't describe. The server upgrades such a
+/// request to a replacing pass: whichever side wins the race, `sub_b` must end
+/// up slotted and watched.
+#[apply(common::repeat)]
+fn nonreplacing_reindex_against_changed_gitmodules_converges(_run: u32) {
+    let mut harness = common::HarnessBuilder::new().submodule("sub_a").build();
+    harness.assert_all_clean();
+
+    harness.add_submodule_no_commit("sub_b");
+    harness.request_reindex(false);
+
+    harness.assert_submodule_status("sub_b", StatusSummary::STAGED_NEW);
+
+    // Changes inside sub_b prove it got a watch root, not just a map entry.
+    harness.submodule("sub_b").write("new_file.txt", "hello\n");
+    harness.assert_submodule_status(
+        "sub_b",
+        StatusSummary::UNTRACKED_CONTENT | StatusSummary::STAGED_NEW,
+    );
+
+    harness.assert_submodule_status("sub_a", StatusSummary::clean());
+}
