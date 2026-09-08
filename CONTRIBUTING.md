@@ -16,7 +16,7 @@ over IPC to retrieve or manipulate that cache.
       |
   Watch Server (background process)
       |
-      +-- notify file watchers (recursive, per-submodule)
+      +-- two shared notify watchers (git dir | working tree), routed by path
       +-- git2/libgit2 (submodule status computation)
       +-- BTreeMap<String, StatusSummary> (cached state)
 ```
@@ -25,8 +25,13 @@ over IPC to retrieve or manipulate that cache.
 
 1. `subspy status` (or `prompt`) connects to the server. If none is running, it spawns
    one via `spawn_daemon` and retries.
-2. The server places recursive filesystem watchers on `.git/`, `.gitmodules`, and each
-   submodule directory, then runs an initial indexing pass.
+2. The server places two shared watcher instances. The **git watch** covers the git
+   directory recursively (plus shared refs for linked worktrees). The **tree watch**
+   hosts a non-recursive watch on the repository root (delivering `.gitmodules`
+   changes and doubling as the root tripwire), one recursive watch root per submodule
+   workdir, and non-recursive tripwires on submodule ancestor directories. An initial
+   indexing pass then runs. Events are routed to submodules by path, not by watcher
+   identity.
 3. On filesystem events, the server re-computes status for affected submodules (debounced,
    with cancellation of in-flight tasks via `AtomicBool`).
 4. Client requests are handled on the server's main thread. Status responses are
@@ -102,10 +107,10 @@ each with its own renderer. Long stands alone; short + porcelain v1 share an
 
 | File | Purpose |
 |---|---|
-| `mod.rs` | The `WatchServer` struct, shared vocabulary (consts, type aliases, `ControlMessage`, `StatusMap`), the `watch()` entry, and the run-loop spine |
-| `classify.rs` | Event classification: `classify_event`, the `EventType` enum, and the path predicates |
-| `placement.rs` | Watcher and tripwire setup (`place_*`, `build_watcher`, `WatchEntry`) |
-| `indexing.rs` | Full status-map population (`populate_status_map`, `get_modules_path`) |
+| `mod.rs` | The `WatchServer` struct, shared vocabulary (consts, type aliases, `ControlMessage`, `StatusMap`, `SharedWatch`, `SubmoduleSlot`), the `watch()` entry, and the run-loop spine |
+| `classify.rs` | Event classification and path routing: `classify_git_event`, `classify_tree_path`, the `EventType`/`TreeAction` enums, and the path predicates |
+| `placement.rs` | Watcher and tripwire setup (`place_git_watch`, `place_tree_watch`, `watch_submodule`, `place_tripwires`) |
+| `indexing.rs` | Full status-map population (`populate_status_map`, `slots_match`, `get_modules_path`) |
 | `update.rs` | The in-flight rayon update engine (`try_spawn_submod_update`, `InFlightTask`/`InFlightTracker`) |
 | `event_loop.rs` | The `crossbeam` select loop, dispatch, tripwire handling, and reindex-deferral wiring |
 | `debounce.rs` | Debounced reindex deadlines (`ReindexDebounce`, `DebounceKind`, `earliest_deadline`) shared by the `.gitmodules` and structural-tripwire reindex paths |
@@ -210,9 +215,61 @@ old path lands in a record with no valid `XY ` prefix, which consumers can't par
 due to libgit2 overhead. Our custom `.gitmodules` parser takes ~600us when measured on
 boost.
 
-**Sequential watcher placement.** Creating `notify::RecommendedWatcher` instances
-concurrently on rayon threads causes them to silently miss filesystem events. Watcher
-placement must remain sequential -- do not attempt to parallelize it.
+**A broken `.gitmodules` never kills a running server.** git writes conflict markers
+into `.gitmodules` when a merge conflicts on it, and a mid-edit save can leave invalid
+syntax. The reindex loop parses before touching any watcher (one parse per reindex,
+shared by the slot-staleness check and `populate_status_map`, so the check can never
+disagree with the data indexed). On parse failure the server keeps the last indexed
+state and its live watches, and the next `.gitmodules` rewrite, reported by the root
+watch, schedules the reindex that reads the fixed file. During the broken window,
+untouched submodules keep their last status, while a submodule that changes flips to
+`UNREADABLE`: libgit2's `submodule_status` parses `.gitmodules` itself, so no fresh
+status is computable until the file is fixed, and the recovering reindex re-reads
+everything. Startup is the exception: with no last good state to serve, a parse
+failure is fatal, and clients fall back (the shim forwards to real git) until the file
+is fixed. A *missing* `.gitmodules` is not an error anywhere: it parses as no entries.
+
+**A non-replacing reindex upgrades itself when the slots are stale.** Retry marks and
+event routing key on slot indices, and slot `i` holds the `i`-th `.gitmodules` entry.
+A `ClientMessage::Reindex { replace_watchers: false }` that races a `.gitmodules`
+change would index a submodule set the live slots don't describe, so the spine checks
+`slots_match` against the just-parsed entries and rebuilds the tree watch (a replacing
+pass) on any membership or order difference.
+
+**Two shared watcher instances, routed by path.** The server once created one
+`notify::RecommendedWatcher` per submodule (plus tripwires and the root watchers). Each
+instance costs an OS thread and, on Linux, an inotify instance plus two more file
+descriptors, so a repository like boost (172 submodules) consumed ~178 inotify
+instances and ~197 threads against a kernel *default* cap of 128 instances per user.
+Instead, two instances host every watch root: the **git watch** (git dir, plus common
+refs for worktrees) and the **tree watch** (repo root non-recursive, submodule
+workdirs recursive, ancestor tripwires non-recursive). Watch-descriptor consumption is
+unchanged, but instances, threads, and fds are O(1). Events carry full paths, so
+routing looks the path up instead of keying on which channel fired: gitdir events via
+`modules_path_to_index`, workdir events via a longest-prefix probe of
+`workdir_to_index`, structural events via a prefix range over the same map. The git
+dir stays on its own instance because it is the noisiest event source: each instance
+has its own kernel event queue (`fs.inotify.max_queued_events`), so a workdir event
+storm cannot overflow git-op events, and vice versa. An overflow (`Flag::Rescan`,
+which notify reports as an `EventKind::Other` event) arms the structural debounce so a
+replacing reindex reconciles from disk after the burst settles. One consequence of
+shared instances: inotify pairs the two halves of a rename by cookie within an
+instance, so a `mv` between two submodules arrives as a single event whose paths span
+both. Every path of an event routes independently for this reason.
+
+**Sequential watcher creation.** Creating `notify::RecommendedWatcher` instances
+concurrently on rayon threads causes them to silently miss filesystem events. All
+instance creation happens on the server thread. Registering watch roots on an
+existing instance takes `&mut`, so placement is sequential by construction.
+
+**`.gitmodules` is watched through its parent directory.** git rewrites `.gitmodules`
+by writing `.gitmodules.lock` and renaming it over the file. An inotify watch on the
+file itself is bound to the inode, which the rename replaces: the watch dies after the
+first rewrite and later edits go unseen. The tree watch's non-recursive root watch
+reports events for direct children by name, so it survives any number of rewrites (and
+also covers a repository whose `.gitmodules` does not exist yet). The lock file's
+rename routes as a `.gitmodules` change too, because the watcher may deliver only the
+source half of the rename.
 
 **`FxHashMap`/`FxHashSet` for internal maps.** We use rustc-hash for non-cryptographic
 hashing where key distribution is predictable (submodule paths, watcher indices).
@@ -372,7 +429,7 @@ harness.assert_submodule_status("sub_b", StatusSummary::clean());
 
 **Thread count**: Limited to 4 in `.cargo/config.toml` because each test spins up a
 real watch server with filesystem watchers. Too many concurrent servers exhaust
-OS watcher limits (e.g. inotify instances on Linux).
+OS watcher limits (e.g. inotify watch descriptors on Linux).
 
 ### Tracing watch-server failures (`--cfg trace_events`)
 
@@ -390,7 +447,7 @@ for the event loop, `[ThreadId(N)]` for rayon workers) and merged into one sorte
 timeline:
 
 ```text
-+    50347us [test_watch_server] watcher[2] (sub_a) Access(Close(Write)) [".../sub_a/README.md"] -> Some(SubmoduleChange)
++    50347us [test_watch_server] tree watcher Access(Close(Write)) .../sub_a/README.md -> Submodule(0)
 +    50697us [ThreadId(7)] re-read sub_a -> MODIFIED_CONTENT
 ```
 
@@ -426,13 +483,11 @@ RUSTFLAGS='--cfg trace_events' cargo test
 ## Platform Notes
 
 - **Linux**: Each watch server uses inotify. It consumes watch descriptors
-  (`fs.inotify.max_user_watches`) for its recursive watches, and -- since it opens one
-  inotify *instance* per submodule (plus tripwires and the root) -- can also exhaust the
-  per-user instance cap (`fs.inotify.max_user_instances`), which is as low as 128 on some
-  distros. A repo with many submodules, or running the test suite (which starts many
-  servers at once), may need either raised via
-  `sudo sysctl fs.inotify.max_user_watches=<value>` or
-  `sudo sysctl fs.inotify.max_user_instances=<value>`.
+  (`fs.inotify.max_user_watches`) for its recursive watches, one per directory in the
+  watched tree. Instances are not a concern: a hot server holds exactly two
+  (`fs.inotify.max_user_instances` defaults to 128 per user), a parked one holds one.
+  A very large repository may need the watch limit raised via
+  `sudo sysctl fs.inotify.max_user_watches=<value>`.
 - **Windows**: Uses `uds_windows` for AF_UNIX sockets (requires Windows 10 1809+).
   When `std::os::windows::net::UnixStream` stabilizes in std, the `uds_windows`
   dependency can be dropped.
@@ -501,7 +556,7 @@ absent, which a client would render as clean.
 
 `notify` delivers events differently per platform. On Linux (inotify), a `git add`
 inside a submodule may produce only a `MOVED_TO index` rename event, not a write event.
-The server's `classify_event` has platform-specific carve-outs for these cases. When
+The server's `classify_git_event` has platform-specific carve-outs for these cases. When
 adding new event handling, test on both Linux and Windows -- an event pattern that works
 on one platform may be invisible on the other.
 
@@ -526,10 +581,10 @@ subspy start /path/to/repo --foreground --log-level trace 2>&1
 
 ### `subspy debug`
 
-Dumps the server's live internal state: watcher list with pending event counts,
-in-flight rayon tasks, progress subscribers, cached submodule statuses, and the
-last watcher error. This is the first thing to check when the server reports incorrect
-status.
+Dumps the server's live internal state: pending event counts for the git and tree
+watcher queues, the watched submodules and tripwires, in-flight rayon tasks, progress
+subscribers, cached submodule statuses, and the last watcher error. This is the first
+thing to check when the server reports incorrect status.
 
 ```sh
 subspy debug
@@ -552,9 +607,9 @@ mismatch is: the server's cached state, the event pipeline, or the display logic
 4. **Full restart**: `subspy stop` followed by a fresh `subspy status` (which auto-spawns
    a new server). If even this doesn't fix it, the bug is likely in the initial
    `populate_status_map` or in `submodule_status` itself.
-5. **Check for pending events**: In `subspy debug` output, watchers with high pending
-   event counts suggest the server is falling behind on processing, which can cause
-   temporarily stale status.
+5. **Check for pending events**: In `subspy debug` output, a watcher queue with a high
+   pending event count suggests the server is falling behind on processing, which can
+   cause temporarily stale status.
 
 ### Tracing watcher events (`--cfg trace_events`)
 

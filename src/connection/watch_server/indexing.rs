@@ -9,29 +9,33 @@ use crate::{
     DOT_GIT, StatusSummary,
     connection::{
         progress::{ProgressUpdate, broadcast_progress},
-        watch_server::{ROOT_WATCHER_COUNT, WatchEntry, WatchServer},
+        watch_server::{SubmoduleSlot, WatchServer},
     },
     create_progress_bar,
-    git::{parse_gitmodules, submodule_modules_subpath},
+    git::{GitmodulesEntry, submodule_modules_subpath},
     watch::{WatchError, WatchResult},
 };
 
 impl WatchServer {
-    /// Gathers the status for all submodules within the given repository. When
-    /// `place_submod_watches` is true, also places watchers on their directories.
+    /// Gathers the status for every submodule in `gitmodule_entries`. When
+    /// `place_submod_watches` is true, also places watch roots on their
+    /// directories.
+    ///
+    /// The caller parses `.gitmodules` and owns the placement decision: a
+    /// non-replacing pass is only sound while the entries line up one to one
+    /// with the live slots (see [`Self::slots_match`]).
     ///
     /// # Errors
     ///
-    /// Returns:
-    ///     - [`git2::Error`] if `.gitmodules` cannot be opened or parsed.
-    ///     - [`notify::Error`] if a submodule watcher cannot be created, or
-    ///       if it cannot be armed for a path that still exists.
+    /// Returns [`notify::Error`] if a submodule watch root cannot be
+    /// registered for a path that still exists.
     ///
     /// Per-submodule metadata and status failures are published as
     /// [`StatusSummary::UNREADABLE`] instead.
     #[allow(clippy::too_many_lines)]
     pub(super) fn populate_status_map(
         &mut self,
+        gitmodule_entries: Vec<GitmodulesEntry>,
         display_progress: bool,
         place_submod_watches: bool,
         mut status_guard: MutexGuard<'_, BTreeMap<String, StatusSummary>>,
@@ -39,11 +43,6 @@ impl WatchServer {
         use std::sync::atomic::{AtomicU32, Ordering};
 
         use rayon::prelude::*;
-
-        // git replaces `.gitmodules` via an atomic rename, so a reader always
-        // sees a complete old-or-new file, and the `.gitmodules` watcher re-fires
-        // for eventual consistency.
-        let gitmodule_entries = parse_gitmodules(&self.root_path)?;
 
         if gitmodule_entries.is_empty() {
             log::warn!(
@@ -141,54 +140,49 @@ impl WatchServer {
             .collect();
 
         status_guard.clear();
-        // Bitset accessors require in-bounds indices. `self.watchers` and this
-        // pass's submodule slots can differ during a reindex without watcher
-        // replacement, so size `pending_rescan` for the larger index range.
-        let watcher_slot_count = self.watchers.len().max(ROOT_WATCHER_COUNT + results.len());
-        self.pending_rescan.clear_and_resize(watcher_slot_count);
+        // Bitset accessors require in-bounds indices. `self.submodules` and this
+        // pass's slots can differ during a reindex without watcher replacement,
+        // so size `pending_rescan` for the larger index range.
+        let slot_count = self.submodules.len().max(results.len());
+        self.pending_rescan.clear_and_resize(slot_count);
         if place_submod_watches {
             self.modules_path_to_index.clear();
             self.workdir_to_index.clear();
+            self.submodules.clear();
         }
-        // NOTE: Watcher placement must not be parallelized. Creating
-        // `notify::RecommendedWatcher` instances concurrently on rayon threads
-        // causes watchers to silently miss subsequent filesystem events, likely
-        // due to interference between rayon's work-stealing and notify's
-        // internal event threads.
-        //
         // Every submodule occupies a slot in this loop regardless of whether
-        // its status read succeeded. This keeps `index` (= ROOT_WATCHER_COUNT + i)
-        // aligned with watcher positions across calls. `rayon` preserves order for
-        // indexed iterators, and `parse_gitmodules()` returns a consistent order.
+        // its status read succeeded. This keeps slot `i` aligned with `results`
+        // order across calls. `rayon` preserves order for indexed iterators,
+        // and `parse_gitmodules()` returns a consistent order.
         for (i, (relative_path, full_path, modules_path, status)) in results.into_iter().enumerate()
         {
-            let index = ROOT_WATCHER_COUNT + i;
             if let Ok(status) = status {
                 status_guard.insert(relative_path.clone(), status);
             } else {
                 status_guard.insert(relative_path.clone(), StatusSummary::UNREADABLE);
-                self.pending_rescan.insert(index);
+                self.pending_rescan.insert(i);
             }
             if place_submod_watches {
-                self.pending_rescan.insert(index);
+                self.pending_rescan.insert(i);
                 // Preserve `.git/modules/<name>` event routing when the status
                 // read fails. Deleted workdirs regain this entry after a restoring
                 // reindex resolves the gitlink.
                 if let Some(modules_path) = modules_path {
-                    self.modules_path_to_index.insert(modules_path, index);
+                    self.modules_path_to_index.insert(modules_path, i);
                 }
-                let (rx, watcher) = Self::place_submodule_watch(&full_path)?;
+                self.watch_submodule(&full_path)?;
                 wtrace!(|s| WatchSubmod {
-                    index,
+                    index: i,
                     path: s.intern_path(&full_path),
                 });
-                // Record the (root-relative) workdir->index mapping for every
-                // submodule, even ones whose status read failed. Tripwire
-                // routing must still be able to find a submodule by path.
-                self.workdir_to_index
-                    .insert(PathBuf::from(&relative_path), index);
-                self.watchers
-                    .push(WatchEntry::new(relative_path, full_path, rx, watcher));
+                // Record the (root-relative) workdir->slot mapping for every
+                // submodule, even ones whose status read failed. Path routing
+                // must still be able to find a submodule by prefix.
+                self.workdir_to_index.insert(PathBuf::from(&relative_path), i);
+                self.submodules.push(SubmoduleSlot {
+                    relative_path,
+                    workdir_path: full_path,
+                });
             }
         }
         drop(status_guard);
@@ -204,6 +198,18 @@ impl WatchServer {
         }
 
         Ok(())
+    }
+
+    /// Whether `entries` still lines up one to one with the live submodule
+    /// slots. Retry marks and event routing key on slot indices, and slot `i`
+    /// holds the `i`-th parsed entry, so a non-replacing reindex is only sound
+    /// while the entries match the slots in both membership and order.
+    pub(super) fn slots_match(&self, entries: &[GitmodulesEntry]) -> bool {
+        entries.len() == self.submodules.len()
+            && entries
+                .iter()
+                .zip(&self.submodules)
+                .all(|((_, relative_path, _), slot)| *relative_path == slot.relative_path)
     }
 
     /// Returns the path to the submodule's `.git/modules/` entry (e.g.
@@ -238,5 +244,48 @@ impl WatchServer {
         })?;
 
         Ok(self.root_modules_path.join(suffix))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::*;
+    use crate::connection::watch_server::layout::GitLayout;
+
+    fn entry(path: &str) -> GitmodulesEntry {
+        (path.to_owned(), path.to_owned(), None)
+    }
+
+    // Slot `i` must hold the `i`-th parsed entry for retry marks and event
+    // routing to reach the right submodule, so a same-set reordering of
+    // `.gitmodules` invalidates the slots just like a membership change.
+    #[test]
+    fn slots_match_requires_membership_and_order() {
+        let (_tx, rx) = crossbeam_channel::unbounded();
+        let layout = GitLayout::from_dirs(
+            Path::new("/repo/.git").to_path_buf(),
+            Path::new("/repo/.git").to_path_buf(),
+        );
+        let mut server = WatchServer::new(Path::new("/repo"), &layout, rx);
+        for name in ["libs/a", "libs/b"] {
+            server.submodules.push(SubmoduleSlot {
+                relative_path: name.to_owned(),
+                workdir_path: Path::new("/repo").join(name),
+            });
+        }
+
+        assert!(server.slots_match(&[entry("libs/a"), entry("libs/b")]));
+        assert!(!server.slots_match(&[entry("libs/b"), entry("libs/a")]));
+        assert!(!server.slots_match(&[entry("libs/a")]));
+        assert!(!server.slots_match(&[entry("libs/a"), entry("libs/b"), entry("libs/c")]));
+        assert!(!server.slots_match(&[entry("libs/a"), entry("libs/c")]));
+
+        // An emptied `.gitmodules` mismatches live slots, and matches once the
+        // slots are gone too.
+        assert!(!server.slots_match(&[]));
+        server.submodules.clear();
+        assert!(server.slots_match(&[]));
     }
 }

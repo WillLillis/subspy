@@ -20,7 +20,7 @@ There are a few potential workarounds you should try before using this tool, inc
 
 ### The Solution
 
-SubSpy provides a solution to this issue by placing recursive filesystem watches on your repository's `.git` folder, `.gitmodules`
+SubSpy provides a solution to this issue by placing filesystem watches on your repository's `.git` folder, `.gitmodules`
 file, and all submodule directories. The status for all submodules is cached by an initial indexing operation and updated
 any time a change is detected in one of these locations. For sufficiently many submodules, `subspy status` is typically
 100-1000x faster than `git status` on Windows and 67-360x faster on Linux, with the gap widening as working tree churn increases.
@@ -213,8 +213,8 @@ changes on disk again. SubSpy never modifies your repository, so the remedy is a
 `subspy reindex`.
 - Not every git configuration option is modeled. When `subspy status` encounters one it cannot honor, it prints a warning
 and reports what it can. The `subspy-git` shim forwards to the git on your path when it can't fully service a request.
-- On Linux, each watch server consumes inotify watches. For very large repositories or many concurrent servers, you may
-need to increase the system limit (e.g. `sudo sysctl fs.inotify.max_user_watches=<value>` or
-`sudo sysctl fs.inotify.max_user_instances=<value>`).
+- On Linux, each watch server consumes inotify watch descriptors (one per watched directory). For very large
+repositories or many concurrent servers, you may need to increase the system limit
+(e.g. `sudo sysctl fs.inotify.max_user_watches=<value>`).
 - On Windows, AF_UNIX sockets are used for IPC, which requires Windows 10 version 1809 (October 2018 Update) or Windows
 Server 2019 or later.

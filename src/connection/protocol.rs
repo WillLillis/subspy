@@ -41,8 +41,12 @@ pub struct DebugState {
     /// `(pid, Some((curr, total)))`.
     #[expect(clippy::type_complexity)]
     pub progress_subscribers: Option<Vec<(u32, Option<(u32, u32)>)>>,
-    pub watcher_count: u32,
-    pub watched_paths: Vec<(String, String, u32)>,
+    /// Pending event count on the git-side watcher, `None` while parked.
+    pub git_watch_pending: Option<u32>,
+    /// Pending event count on the tree-side watcher, `None` while parked.
+    pub tree_watch_pending: Option<u32>,
+    /// Watched submodules: `(relative_path, workdir_path)`.
+    pub submodules: Vec<(String, String)>,
     pub root_path: String,
     pub socket_name: String,
     pub submodule_statuses: Option<Vec<(String, StatusSummary)>>,
@@ -51,9 +55,9 @@ pub struct DebugState {
     pub in_flight: Option<Vec<(String, String)>>,
     /// The last watcher error that triggered a reindex, if any.
     pub last_watcher_error: Option<String>,
-    /// Non-recursive tripwire watches on submodule ancestor directories:
-    /// `(watch_path, pending_event_count)`.
-    pub tripwires: Vec<(String, u32)>,
+    /// Root-relative submodule ancestor directories watched as non-recursive
+    /// tripwires.
+    pub tripwires: Vec<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Encode, BorrowDecode)]
@@ -287,6 +291,8 @@ mod tests {
     /// Hardcoded byte sequences for every IPC message variant. If any of these
     /// change, the wire format has broken: bump `IPC_VERSION` and update the
     /// expected byte slices to match the actual bytes shown in the failure output.
+    /// `DebugState` is the exception: `subspy debug` is a developer utility, so
+    /// its payload may change shape without a version bump. Update its bytes only.
     #[test]
     #[allow(clippy::too_many_lines)]
     fn wire_format_stability() {
@@ -380,8 +386,9 @@ mod tests {
                         server_pid: 0,
                         rayon_threads: 0,
                         progress_subscribers: None,
-                        watcher_count: 0,
-                        watched_paths: vec![],
+                        git_watch_pending: None,
+                        tree_watch_pending: None,
+                        submodules: vec![],
                         root_path: String::new(),
                         socket_name: String::new(),
                         submodule_statuses: None,
@@ -395,8 +402,9 @@ mod tests {
                 // variant(3,0,0,0)
                 // | server_pid(0,0,0,0) | rayon_threads(0,0,0,0)
                 // | progress_subscribers:None(0)
-                // | watcher_count(0,0,0,0)
-                // | watched_paths:empty(0,0,0,0,0,0,0,0)
+                // | git_watch_pending:None(0)
+                // | tree_watch_pending:None(0)
+                // | submodules:empty(0,0,0,0,0,0,0,0)
                 // | root_path:""(0,0,0,0,0,0,0,0)
                 // | socket_name:""(0,0,0,0,0,0,0,0)
                 // | submodule_statuses:None(0)
@@ -405,7 +413,7 @@ mod tests {
                 // | tripwires:empty(0,0,0,0,0,0,0,0)
                 &[
                     3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-                    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
                 ],
             ),
             (

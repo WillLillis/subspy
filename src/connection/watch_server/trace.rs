@@ -88,7 +88,9 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use thread_local::ThreadLocal;
 
 #[cfg(trace_events)]
-use super::classify::EventType;
+use super::WatchSource;
+#[cfg(trace_events)]
+use super::classify::{EventType, TreeAction};
 #[cfg(trace_events)]
 use super::debounce::DebounceKind;
 #[cfg(trace_events)]
@@ -97,15 +99,26 @@ use crate::StatusSummary;
 /// A single watch server trace event.
 #[cfg(trace_events)]
 pub(super) enum TraceEvent {
-    /// A raw filesystem event was classified.
-    Classified {
-        index: usize,
-        rel: Arc<OsStr>,
+    /// A raw git-watcher event was classified.
+    GitClassified {
         kind: EventKind,
         paths: Vec<Arc<OsStr>>,
         result: Option<EventType>,
     },
-    /// A submodule watch has no registered paths.
+    /// One path of a tree-watcher event was routed.
+    TreeRouted {
+        kind: EventKind,
+        path: Arc<OsStr>,
+        action: TreeAction,
+    },
+    /// A watcher reported a kernel event-queue overflow (rescan flag).
+    RescanFlagged,
+    /// A hot watcher reported an error. Its instance gets replaced.
+    WatcherErrored { source: WatchSource },
+    /// `.gitmodules` failed to parse. The reindex keeps the last indexed
+    /// state until a rewrite schedules the next one.
+    GitmodulesParseFailed { error: Arc<OsStr> },
+    /// A submodule watch root has no registered paths.
     WatchUnregistered { path: Arc<OsStr> },
     /// A non-recursive tripwire watch was placed on an ancestor directory.
     TripwirePlaced { path: Arc<OsStr> },
@@ -148,19 +161,33 @@ pub(super) enum TraceEvent {
 impl fmt::Display for TraceEvent {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Classified {
-                index,
-                rel,
+            Self::GitClassified {
                 kind,
                 paths,
                 result,
             } => {
-                write!(f, "watcher[{index}] ({}) {kind:?} ", rel.to_string_lossy())?;
+                write!(f, "git watcher {kind:?} ")?;
                 f.debug_list()
                     .entries(paths.iter().map(Path::new))
                     .finish()?;
                 write!(f, " -> {result:?}")
             }
+            Self::TreeRouted { kind, path, action } => write!(
+                f,
+                "tree watcher {kind:?} {} -> {action:?}",
+                Path::new(path).display()
+            ),
+            Self::RescanFlagged => {
+                f.write_str("event queue overflowed (rescan flag) -> deferring replacing reindex")
+            }
+            Self::WatcherErrored { source } => {
+                write!(f, "{source:?} watcher errored -> replacing watchers")
+            }
+            Self::GitmodulesParseFailed { error } => write!(
+                f,
+                ".gitmodules failed to parse -> keeping last indexed state: {}",
+                error.to_string_lossy()
+            ),
             Self::WatchUnregistered { path } => write!(
                 f,
                 "submod watch for {} has no registered paths",

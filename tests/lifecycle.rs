@@ -165,3 +165,44 @@ fn stale_socket_file_recovered_on_start(_run: u32) {
         "socket file should be removed after shutdown"
     );
 }
+
+/// A merge that conflicts on `.gitmodules` leaves conflict markers in it,
+/// which don't parse as git config. The running server must keep serving the
+/// last indexed state with its watches live, and must recover once the file
+/// is restored.
+#[apply(common::repeat)]
+fn broken_gitmodules_keeps_serving_last_state(_run: u32) {
+    let harness = common::HarnessBuilder::new()
+        .submodule("sub_a")
+        .submodule("sub_b")
+        .build();
+    harness.assert_all_clean();
+
+    let gitmodules_path = harness.root().path().join(".gitmodules");
+    let original = std::fs::read_to_string(&gitmodules_path).unwrap();
+
+    // Corrupt the file the way a conflicted merge does. The rewrite schedules
+    // a reindex whose parse fails.
+    harness.root().write(
+        ".gitmodules",
+        "<<<<<<< ours\n[submodule \"sub_a\"]\n\tpath = sub_a\n=======\n",
+    );
+
+    // The server survives with its watches intact. The change in sub_a is
+    // seen, but libgit2's status read parses `.gitmodules` itself, so the
+    // re-read fails and publishes an honest UNREADABLE. Untouched sub_b
+    // keeps its last indexed status.
+    harness.submodule("sub_a").write("during.txt", "x\n");
+    harness.assert_submodule_status("sub_a", StatusSummary::UNREADABLE);
+    harness.assert_submodule_status("sub_b", StatusSummary::clean());
+
+    // Restoring the file schedules the reindex that re-reads the real set,
+    // including the change made while it was broken.
+    harness.root().write(".gitmodules", &original);
+    harness.assert_submodule_status("sub_a", StatusSummary::UNTRACKED_CONTENT);
+    harness.assert_submodule_status("sub_b", StatusSummary::clean());
+
+    // Liveness after recovery: removing the file returns sub_a to clean.
+    std::fs::remove_file(harness.submodule("sub_a").path().join("during.txt")).unwrap();
+    harness.assert_all_clean();
+}
