@@ -33,6 +33,7 @@ pub enum Commands {
     /// Reindex a watch server
     Reindex(Reindex),
     /// Dump the internal state of the watch server
+    #[clap(hide = true)]
     Debug(DebugDump),
     /// List submodule metadata
     List(List),

@@ -69,12 +69,14 @@ Commands:
   status   Display the status of a watched git project [aliases: st, s]
   stop     Shutdown one or all watch servers
   reindex  Reindex a watch server [aliases: re, r]
-  debug    Dump the internal state of the watch server [aliases: dbg, d]
   list     List submodule metadata [aliases: ls, l]
   prompt   Submodule status summary for shell prompt integration
 
 Options:
-  -h, --help  Print help
+  -h, --help     Print help
+  -V, --version  Print version
+
+Use `subspy <COMMAND> --help` for more information on a subcommand.
 
 ~/very_large_project/ > subspy status # spawns a watch server if needed
 -- top level status here --
