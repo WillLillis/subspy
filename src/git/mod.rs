@@ -1,5 +1,7 @@
 //! Lightweight git helpers that bypass expensive libgit2 machinery.
 
+pub mod substatus;
+
 use git2::{Config, Repository};
 use rustc_hash::FxHashMap;
 

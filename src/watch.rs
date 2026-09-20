@@ -21,6 +21,8 @@ pub enum WatchError {
     #[error(transparent)]
     Git(#[from] git2::Error),
     #[error(transparent)]
+    Substatus(#[from] crate::git::substatus::SubstatusError),
+    #[error(transparent)]
     IO(#[from] std::io::Error),
     #[error(transparent)]
     Receive(#[from] crossbeam_channel::RecvError),

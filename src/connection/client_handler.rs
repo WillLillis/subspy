@@ -54,8 +54,8 @@ fn dispatch_client_message(
 ) -> WatchResult<()> {
     let mut conn = BufReader::new(conn);
 
-    // 1 byte version + 4 byte variant index + 4 byte u32 + 1 byte bool (fixint)
-    let mut buffer = [0u8; 10];
+    // 1 byte version + 4 byte variant index + 4 byte u32 (fixint)
+    let mut buffer = [0u8; 9];
     let msg_len = read_full_message_fixed(&mut conn, &mut buffer)?;
     let (request, _): (ClientRequest, usize) =
         bincode::borrow_decode_from_slice(&buffer[..msg_len], BINCODE_CFG)?;
@@ -76,16 +76,13 @@ fn dispatch_client_message(
     }
 
     match request.message {
-        ClientMessage::Reindex {
-            pid,
-            replace_watchers,
-        } => {
+        ClientMessage::Reindex { pid } => {
             subscribers
                 .lock()
                 .expect("Subscribers mutex poisoned")
                 .insert(pid, None);
             control_tx
-                .send(ControlMessage::Reindex { replace_watchers })
+                .send(ControlMessage::Reindex)
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::BrokenPipe, e.to_string()))?;
             handle_reindex_request(conn, pid, subscribers)?;
         }

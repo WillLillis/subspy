@@ -21,14 +21,6 @@ pub enum ReindexError {
 ///
 /// Returns `Err` if connecting to the server, encoding the request,
 /// or receiving the response fails.
-pub fn reindex(
-    root_path: &Path,
-    replace_watchers: bool,
-    display_progress: bool,
-) -> ReindexResult<()> {
-    Ok(request_reindex(
-        root_path,
-        replace_watchers,
-        display_progress,
-    )?)
+pub fn reindex(root_path: &Path, display_progress: bool) -> ReindexResult<()> {
+    Ok(request_reindex(root_path, display_progress)?)
 }

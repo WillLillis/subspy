@@ -202,7 +202,7 @@ fn reindex_over_deleted_workdir_still_reports_deleted(_run: u32) {
     harness.assert_submodule_status("sub_b", StatusSummary::DELETED_WORKDIR);
 
     // Force a full reindex over the deleted workdir.
-    harness.request_reindex(false);
+    harness.request_reindex();
     harness.assert_submodule_status("sub_b", StatusSummary::DELETED_WORKDIR);
 
     // sub_a is unaffected.
@@ -236,18 +236,17 @@ fn remove_submodule_detected_by_server(_run: u32) {
     });
 }
 
-/// A non-replacing reindex request can win the race against the debounced
-/// replacing reindex that a `.gitmodules` change arms, and would then read a
-/// submodule set the live slots don't describe. The server upgrades such a
-/// request to a replacing pass: whichever side wins the race, `sub_b` must end
-/// up slotted and watched.
+/// A reindex request can win the race against the debounced replacing reindex
+/// that a `.gitmodules` change arms, and would then read a submodule set the live
+/// slots don't describe. Whichever side wins the race, `sub_b` must end up slotted
+/// and watched.
 #[apply(common::repeat)]
-fn nonreplacing_reindex_against_changed_gitmodules_converges(_run: u32) {
+fn reindex_against_changed_gitmodules_converges(_run: u32) {
     let mut harness = common::HarnessBuilder::new().submodule("sub_a").build();
     harness.assert_all_clean();
 
     harness.add_submodule_no_commit("sub_b");
-    harness.request_reindex(false);
+    harness.request_reindex();
 
     harness.assert_submodule_status("sub_b", StatusSummary::STAGED_NEW);
 

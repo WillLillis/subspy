@@ -12,7 +12,7 @@ use crate::{
         IpcError,
         client::{recv_status_response, send_status_request},
     },
-    git::{parse_gitmodules, read_submodule_head},
+    git::{parse_gitmodules, read_submodule_head, substatus},
     template::{Template, TemplateError},
 };
 
@@ -22,6 +22,8 @@ pub type ListResult<T> = Result<T, ListError>;
 pub enum ListError {
     #[error(transparent)]
     Git(#[from] git2::Error),
+    #[error(transparent)]
+    Substatus(#[from] substatus::SubstatusError),
     #[error(transparent)]
     Ipc(#[from] IpcError),
     #[error(transparent)]
@@ -189,9 +191,7 @@ fn gather_info(
                 ),
                 None if need_local_status => {
                     let repo = tl_repo.get_or_try(|| Repository::open(root_path))?;
-                    Some(StatusSummary::from(
-                        repo.submodule_status(&name, git2::SubmoduleIgnore::None)?,
-                    ))
+                    Some(substatus::submodule_status(repo, &path_str)?)
                 }
                 None => None,
             };

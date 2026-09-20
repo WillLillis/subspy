@@ -41,7 +41,7 @@ use crate::{
         IpcStream, cleanup_socket, create_listener, ipc_connect, ipc_socket_path,
         protocol::SHUTDOWN_ACK, watch_server::trace::wtrace, write_full_message_fixed,
     },
-    git::GitmodulesEntry,
+    git::substatus,
     watch::WatchResult,
 };
 
@@ -151,7 +151,7 @@ struct WatchServer {
 
     /// Receiver for control messages from the listener thread
     control_rx: crossbeam_channel::Receiver<ControlMessage>,
-    /// Maps root-relative submodule paths from `.gitmodules` to cached statuses.
+    /// Maps root-relative submodule paths to cached statuses.
     submod_statuses: Arc<StatusMap>,
     /// Client PIDs that should receive progress updates during indexing, each
     /// holding the update it has not read yet.
@@ -165,7 +165,7 @@ struct WatchServer {
 
 /// Control messages sent from the listener thread to the main event loop
 pub(super) enum ControlMessage {
-    Reindex { replace_watchers: bool },
+    Reindex,
     Shutdown { conn: BufReader<IpcStream> },
     Debug { conn: BufReader<IpcStream> },
 }
@@ -273,29 +273,47 @@ impl WatchServer {
         }
     }
 
-    /// Parse the `.gitmodules` file to extract submodule names, paths, and branches.
+    /// The submodule paths currently recorded as index gitlinks.
+    ///
+    /// Git publishes the index by atomic rename, so failures are rare, but Windows
+    /// can surface sharing violations for several milliseconds around a publication.
     ///
     /// # Errors
     ///
-    /// Returns `git2::Error` if `.gitmodules` cannot be parsed.
-    fn parse_gitmodules(&self) -> Result<Vec<GitmodulesEntry>, git2::Error> {
-        #[cfg_attr(not(trace_events), expect(unused))]
-        crate::git::parse_gitmodules(&self.root_path).inspect_err(|e| {
-            wtrace!(|s| GitmodulesParseFailed {
-                error: s.intern_str(&e.to_string())
-            });
-        })
-    }
+    /// Returns `git2::Error` when the read still fails at the end of the
+    /// budget.
+    fn read_gitlink_paths(&self) -> Result<Vec<String>, git2::Error> {
+        const YIELD_RETRIES: usize = 16;
+        const SLEEP_RETRIES: usize = 50;
+        const SLEEP_STEP: Duration = Duration::from_millis(1);
 
-    /// Places a fresh tree watcher before parsing `.gitmodules`, ensuring any
-    /// rewrite after the parse is queued on the watcher that survives the reindex.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if watcher placement or `.gitmodules` parsing fails.
-    fn place_tree_watch_and_parse_gitmodules(&mut self) -> WatchResult<Vec<GitmodulesEntry>> {
-        self.place_tree_watch()?;
-        Ok(self.parse_gitmodules()?)
+        // fast path for short, transient errors
+        let mut last_err = None;
+        for _ in 0..YIELD_RETRIES {
+            match git2::Repository::open(&self.root_path)
+                .and_then(|repo| substatus::gitlink_paths(&repo))
+            {
+                Ok(paths) => return Ok(paths),
+                Err(e) => last_err = Some(e),
+            }
+            std::thread::yield_now();
+        }
+
+        // longer tail backoff for the windows fs
+        for _ in 0..SLEEP_RETRIES {
+            match git2::Repository::open(&self.root_path)
+                .and_then(|repo| substatus::gitlink_paths(&repo))
+            {
+                Ok(paths) => return Ok(paths),
+                Err(e) => last_err = Some(e),
+            }
+            std::thread::sleep(SLEEP_STEP);
+        }
+        let e = last_err.unwrap();
+        wtrace!(|s| GitlinkReadFailed {
+            error: s.intern_str(&e.to_string())
+        });
+        Err(e)
     }
 
     /// The main watch loop for the server. Will loop until a client shutdown request is received
@@ -308,20 +326,24 @@ impl WatchServer {
         display_progress: bool,
         status_guard: MutexGuard<'_, BTreeMap<String, StatusSummary>>,
     ) -> WatchResult<()> {
+        const READ_RETRY_LIMIT: u32 = 16;
+
         // Place the two shared watcher instances. The git watch lives for the
         // entirety of the server's hot execution unless a watcher error requires
         // replacement. The tree watch is rebuilt by every reindex that re-places
         // submodule watch roots.
         self.place_git_watch()?;
-        let entries = self.place_tree_watch_and_parse_gitmodules()?;
+        self.place_tree_watch()?;
+        let submodule_paths = self.read_gitlink_paths()?;
 
-        self.populate_status_map(entries, display_progress, true, status_guard)?;
-        let mut exit_reason = self.handle_events()?;
+        self.populate_status_map(submodule_paths, display_progress, status_guard)?;
+        let mut exit_reason = self.handle_events(false)?;
 
         // Subsequent reindex iterations
+        let mut failed_reads: u32 = 0;
         let status_lock = Arc::clone(&self.submod_statuses);
         loop {
-            let (entries, new_submod_watches) = match exit_reason {
+            let read = match exit_reason {
                 HandleEventsExit::Park => {
                     let idle_watch = self.place_idle_watch()?;
 
@@ -343,8 +365,9 @@ impl WatchServer {
 
                     if hot_activity {
                         // The timeout raced with filesystem activity. Keep the
-                        // git watch and arm the new tree watch before parsing.
-                        (self.place_tree_watch_and_parse_gitmodules()?, true)
+                        // git watch and arm the new tree watch before reading.
+                        self.place_tree_watch()?;
+                        self.read_gitlink_paths()
                     } else {
                         self.git_watch = None;
                         self.tree_watch = None;
@@ -370,9 +393,10 @@ impl WatchServer {
                 }
                 HandleEventsExit::Wake => {
                     // A parked server holds no watches. Rebuild both instances
-                    // before parsing so later `.gitmodules` rewrites are queued.
+                    // before reading so later topology changes are queued.
                     self.place_git_watch()?;
-                    (self.place_tree_watch_and_parse_gitmodules()?, true)
+                    self.place_tree_watch()?;
+                    self.read_gitlink_paths()
                 }
                 HandleEventsExit::IdleWatcherError => {
                     let idle_watch = self.place_idle_watch()?;
@@ -380,24 +404,14 @@ impl WatchServer {
                     continue;
                 }
                 HandleEventsExit::ReindexEvent => {
-                    (self.place_tree_watch_and_parse_gitmodules()?, true)
+                    self.place_tree_watch()?;
+                    self.read_gitlink_paths()
                 }
                 HandleEventsExit::Shutdown { .. } => break,
-                HandleEventsExit::ReindexRequest { replace_watchers } => {
-                    if replace_watchers {
-                        self.place_git_watch()?;
-                        (self.place_tree_watch_and_parse_gitmodules()?, true)
-                    } else {
-                        let entries = self.parse_gitmodules()?;
-                        if self.slots_match(&entries) {
-                            (entries, false)
-                        } else {
-                            // The topology changed, upgrading this to a replacing pass.
-                            // Re-parse after the replacement root watch is active so
-                            // the indexed entries cannot predate the watcher handoff.
-                            (self.place_tree_watch_and_parse_gitmodules()?, true)
-                        }
-                    }
+                HandleEventsExit::ReindexRequest => {
+                    self.place_git_watch()?;
+                    self.place_tree_watch()?;
+                    self.read_gitlink_paths()
                 }
                 HandleEventsExit::WatcherError { source } => {
                     // Watches may have died with the failing instance, and the
@@ -407,18 +421,39 @@ impl WatchServer {
                     if matches!(source, WatchSource::Git) {
                         self.place_git_watch()?;
                     }
-                    (self.place_tree_watch_and_parse_gitmodules()?, true)
+                    self.place_tree_watch()?;
+                    self.read_gitlink_paths()
+                }
+            };
+
+            let submodule_paths = match read {
+                Ok(paths) => {
+                    failed_reads = 0;
+                    paths
+                }
+                Err(e) => {
+                    failed_reads += 1;
+                    let retry_scheduled = failed_reads < READ_RETRY_LIMIT;
+                    error!(
+                        "Failed to read index gitlinks (attempt {failed_reads}), keeping the last indexed state: {e}"
+                    );
+                    if !retry_scheduled {
+                        error!(
+                            "Scheduled reindex retries exhausted, statuses refresh on the next git operation"
+                        );
+                    }
+                    exit_reason = self.handle_events(retry_scheduled)?;
+                    continue;
                 }
             };
 
             self.populate_status_map(
-                entries,
+                submodule_paths,
                 false,
-                new_submod_watches,
                 status_lock.lock().expect("Mutex poisoned"),
             )?;
 
-            exit_reason = self.handle_events()?;
+            exit_reason = self.handle_events(false)?;
         }
 
         if let HandleEventsExit::Shutdown { conn } = exit_reason {

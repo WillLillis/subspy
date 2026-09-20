@@ -25,7 +25,7 @@ impl ClientRequest {
 
 #[derive(Clone, Debug, Eq, PartialEq, Encode, BorrowDecode)]
 pub enum ClientMessage {
-    Reindex { pid: u32, replace_watchers: bool },
+    Reindex { pid: u32 },
     Shutdown,
     Status(u32),
     Debug,
@@ -79,8 +79,8 @@ pub enum ServerMessage {
 
 /// Pre-encoded wire bytes for the payload-free messages, allowing their send paths
 /// to write directly with no fallible encoding step.
-pub(super) const SHUTDOWN_REQUEST: [u8; 5] = [0, 1, 0, 0, 0];
-pub(super) const DEBUG_REQUEST: [u8; 5] = [0, 3, 0, 0, 0];
+pub(super) const SHUTDOWN_REQUEST: [u8; 5] = [1, 1, 0, 0, 0];
+pub(super) const DEBUG_REQUEST: [u8; 5] = [1, 3, 0, 0, 0];
 pub(super) const SHUTDOWN_ACK: [u8; 4] = [2, 0, 0, 0];
 
 #[cfg(test)]
@@ -141,16 +141,13 @@ mod tests {
     fn max_message_sizes() {
         // ClientRequest wrapping Reindex with max u32 is the largest request
         let reindex_max = bincode::encode_to_vec(
-            ClientRequest::new(ClientMessage::Reindex {
-                pid: u32::MAX,
-                replace_watchers: true,
-            }),
+            ClientRequest::new(ClientMessage::Reindex { pid: u32::MAX }),
             BINCODE_CFG,
         )
         .unwrap();
         assert!(
-            reindex_max.len() <= 10,
-            "ClientRequest(Reindex(u32::MAX, true)) encoded to {} bytes, exceeds buffer size of 10",
+            reindex_max.len() <= 9,
+            "ClientRequest(Reindex(u32::MAX, true)) encoded to {} bytes, exceeds buffer size of 9",
             reindex_max.len(),
         );
 
@@ -207,10 +204,7 @@ mod tests {
             (
                 "ClientRequest(Reindex)",
                 bincode::encode_to_vec(
-                    ClientRequest::new(ClientMessage::Reindex {
-                        pid: u32::MAX,
-                        replace_watchers: true,
-                    }),
+                    ClientRequest::new(ClientMessage::Reindex { pid: u32::MAX }),
                     BINCODE_CFG,
                 )
                 .unwrap(),
@@ -299,42 +293,37 @@ mod tests {
         use crate::{StatusSummary, connection::DebugState};
 
         let cases: &[(&str, Vec<u8>, &[u8])] = &[
-            // -- ClientRequest variants --
             (
-                "ClientRequest(Reindex { pid: 1, replace_watchers: false })",
+                "ClientRequest(Reindex { pid: 1 })",
                 bincode::encode_to_vec(
-                    ClientRequest::new(ClientMessage::Reindex {
-                        pid: 1,
-                        replace_watchers: false,
-                    }),
+                    ClientRequest::new(ClientMessage::Reindex { pid: 1 }),
                     BINCODE_CFG,
                 )
                 .unwrap(),
-                // version(0) | variant(0,0,0,0) | pid(1,0,0,0) | bool(0)
-                &[0, 0, 0, 0, 0, 1, 0, 0, 0, 0],
+                // version(1) | variant(0,0,0,0) | pid(1,0,0,0)
+                &[1, 0, 0, 0, 0, 1, 0, 0, 0],
             ),
             (
                 "ClientRequest(Shutdown)",
                 bincode::encode_to_vec(ClientRequest::new(ClientMessage::Shutdown), BINCODE_CFG)
                     .unwrap(),
-                // version(0) | variant(1,0,0,0)
-                &[0, 1, 0, 0, 0],
+                // version(1) | variant(1,0,0,0)
+                &[1, 1, 0, 0, 0],
             ),
             (
                 "ClientRequest(Status(42))",
                 bincode::encode_to_vec(ClientRequest::new(ClientMessage::Status(42)), BINCODE_CFG)
                     .unwrap(),
-                // version(0) | variant(2,0,0,0) | pid(42,0,0,0)
-                &[0, 2, 0, 0, 0, 42, 0, 0, 0],
+                // version(1) | variant(2,0,0,0) | pid(42,0,0,0)
+                &[1, 2, 0, 0, 0, 42, 0, 0, 0],
             ),
             (
                 "ClientRequest(Debug)",
                 bincode::encode_to_vec(ClientRequest::new(ClientMessage::Debug), BINCODE_CFG)
                     .unwrap(),
-                // version(0) | variant(3,0,0,0)
-                &[0, 3, 0, 0, 0],
+                // version(1) | variant(3,0,0,0)
+                &[1, 3, 0, 0, 0],
             ),
-            // -- ServerMessage variants --
             (
                 "ServerMessage::Status(empty, total=0)",
                 bincode::encode_to_vec(
@@ -417,14 +406,14 @@ mod tests {
                 ],
             ),
             (
-                "ServerMessage::VersionMismatch { server_version: 0 }",
+                "ServerMessage::VersionMismatch { server_version: 1 }",
                 bincode::encode_to_vec(
-                    ServerMessage::VersionMismatch { server_version: 0 },
+                    ServerMessage::VersionMismatch { server_version: 1 },
                     BINCODE_CFG,
                 )
                 .unwrap(),
                 // variant(4,0,0,0) | version(0)
-                &[4, 0, 0, 0, 0],
+                &[4, 0, 0, 0, 1],
             ),
         ];
 

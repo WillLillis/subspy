@@ -38,7 +38,7 @@ pub const BINCODE_CFG: bincode::config::Configuration<
     .with_no_limit();
 
 /// IPC protocol version. Bump when the wire format changes.
-pub const IPC_VERSION: u8 = 0;
+pub const IPC_VERSION: u8 = 1;
 
 /// Errors that can occur during client-server IPC communication.
 #[derive(Debug, Error)]

@@ -7,7 +7,12 @@ use git2::Repository;
 use log::error;
 use rustc_hash::FxHashMap;
 
-use crate::{StatusSummary, bitset::BitSet, connection::watch_server::WatchServer};
+use crate::{
+    StatusSummary,
+    bitset::BitSet,
+    connection::watch_server::WatchServer,
+    git::substatus::{self, SubstatusError},
+};
 
 use super::trace::{spawn_submod_task, wtrace};
 
@@ -152,29 +157,35 @@ impl WatchServer {
                     }
                 };
 
-                let read_ok =
-                    match repo.submodule_status(&relative_path, git2::SubmoduleIgnore::None) {
-                        Ok(st) => {
-                            let submod_status: StatusSummary = st.into();
-                            wtrace!(|s| ReReadOk {
-                                rel: s.intern_str(&relative_path),
-                                status: submod_status,
-                            });
-                            publish_status(submod_status);
-                            true
-                        }
-                        #[cfg_attr(not(trace_events), allow(unused_variables))]
-                        Err(e) => {
-                            wtrace!(|s| ReReadFailed {
-                                rel: s.intern_str(&relative_path),
-                                code: e.code(),
-                                class: e.class(),
-                                msg: s.intern_str(e.message()),
-                            });
-                            publish_status(StatusSummary::UNREADABLE);
-                            false
-                        }
-                    };
+                let read_ok = match substatus::submodule_status(&repo, &relative_path) {
+                    Ok(submod_status) => {
+                        wtrace!(|s| ReReadOk {
+                            rel: s.intern_str(&relative_path),
+                            status: submod_status,
+                        });
+                        publish_status(submod_status);
+                        true
+                    }
+                    #[cfg_attr(not(trace_events), allow(unused_variables))]
+                    Err(SubstatusError::Git(e)) => {
+                        wtrace!(|s| ReReadFailed {
+                            rel: s.intern_str(&relative_path),
+                            code: e.code(),
+                            class: e.class(),
+                            msg: s.intern_str(e.message()),
+                        });
+                        publish_status(StatusSummary::UNREADABLE);
+                        false
+                    }
+                    Err(SubstatusError::BareRepository) => {
+                        error!(
+                            "Failed to read status for {relative_path}: {}",
+                            SubstatusError::BareRepository
+                        );
+                        publish_status(StatusSummary::UNREADABLE);
+                        false
+                    }
+                };
 
                 // Update `pending_retries` before the dirty check and task removal.
                 // A lock-release event arriving between them marks this task dirty,
