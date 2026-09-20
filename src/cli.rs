@@ -47,9 +47,6 @@ pub struct Reindex {
     /// The directory whose watcher should reindex
     #[arg(index = 1)]
     pub dir: Option<PathBuf>,
-    /// Replace all filesystem watchers during the reindex
-    #[arg(short = 'w', long)]
-    pub replace_watchers: bool,
 }
 
 #[derive(Args, Debug)]
@@ -329,11 +326,7 @@ impl Reindex {
     pub fn run(self) -> RunResult<()> {
         let repo_root = get_project_path(self.dir)?.require_with_submodules()?;
         let display_progress = std::io::stderr().is_terminal();
-        Ok(reindex(
-            &repo_root,
-            self.replace_watchers,
-            display_progress,
-        )?)
+        Ok(reindex(&repo_root, display_progress)?)
     }
 }
 

@@ -59,20 +59,7 @@ fn reindex_preserves_status(_run: u32) {
     harness.submodule("sub_a").write("dirty.txt", "dirty\n");
     harness.assert_submodule_status("sub_a", StatusSummary::UNTRACKED_CONTENT);
 
-    request_reindex(harness.root().path(), false, false).unwrap();
-
-    harness.assert_submodule_status("sub_a", StatusSummary::UNTRACKED_CONTENT);
-}
-
-#[apply(common::repeat)]
-fn reindex_replace_watchers_preserves_status(_run: u32) {
-    let harness = common::HarnessBuilder::new().submodule("sub_a").build();
-    harness.assert_all_clean();
-
-    harness.submodule("sub_a").write("dirty.txt", "dirty\n");
-    harness.assert_submodule_status("sub_a", StatusSummary::UNTRACKED_CONTENT);
-
-    request_reindex(harness.root().path(), true, false).unwrap();
+    request_reindex(harness.root().path(), false).unwrap();
 
     // Existing status should survive the reindex
     harness.assert_submodule_status("sub_a", StatusSummary::UNTRACKED_CONTENT);
@@ -164,4 +151,109 @@ fn stale_socket_file_recovered_on_start(_run: u32) {
         !std::path::Path::new(&sock_path).exists(),
         "socket file should be removed after shutdown"
     );
+}
+
+#[apply(common::repeat)]
+fn broken_gitmodules_does_not_degrade_statuses(_run: u32) {
+    let harness = common::HarnessBuilder::new()
+        .submodule("sub_a")
+        .submodule("sub_b")
+        .build();
+    harness.assert_all_clean();
+
+    let gitmodules_path = harness.root().path().join(".gitmodules");
+    let original = std::fs::read_to_string(&gitmodules_path).unwrap();
+
+    harness.root().write(
+        ".gitmodules",
+        "<<<<<<< ours\n[submodule \"sub_a\"]\n\tpath = sub_a\n=======\n",
+    );
+    harness.assert_all_clean();
+
+    harness.submodule("sub_a").write("during.txt", "x\n");
+    harness.assert_submodule_status("sub_a", StatusSummary::UNTRACKED_CONTENT);
+
+    // Sound to assert mid-window: a read of untouched sub_b cannot fail on
+    // the broken file, so it returns clean under any schedule.
+    harness.assert_submodule_status("sub_b", StatusSummary::clean());
+
+    harness.root().write(".gitmodules", &original);
+    std::fs::remove_file(harness.submodule("sub_a").path().join("during.txt")).unwrap();
+    harness.assert_all_clean();
+}
+
+/// A server must start and serve real statuses while `.gitmodules` sits in a
+/// genuine merge conflict
+#[apply(common::repeat)]
+fn server_starts_and_serves_with_conflicted_gitmodules(_run: u32) {
+    let mut harness = common::HarnessBuilder::new()
+        .submodule("sub_a")
+        .no_server()
+        .build();
+
+    let root = harness.root();
+    root.run_git(&["branch", "basepoint"]);
+    root.run_git(&["checkout", "-qb", "left"]);
+    root.run_git(&[
+        "config",
+        "-f",
+        ".gitmodules",
+        "submodule.sub_a.branch",
+        "left",
+    ]);
+    root.add(".gitmodules").commit("left");
+    root.run_git(&["checkout", "-qb", "right", "basepoint"]);
+    root.run_git(&[
+        "config",
+        "-f",
+        ".gitmodules",
+        "submodule.sub_a.branch",
+        "right",
+    ]);
+    root.add(".gitmodules").commit("right");
+    root.run_git(&["checkout", "-q", "left"]);
+    let merge = root.try_git(&["merge", "right"]);
+    assert!(
+        !merge.status.success(),
+        "merge must conflict on .gitmodules"
+    );
+    // the conflicted file must be unparsable.
+    let parse = root.try_git(&["config", "-f", ".gitmodules", "-l"]);
+    assert!(
+        !parse.status.success(),
+        "conflicted .gitmodules must not parse"
+    );
+
+    harness.submodule("sub_a").write("during.txt", "x\n");
+
+    harness.start_server();
+    harness.assert_submodule_status("sub_a", StatusSummary::UNTRACKED_CONTENT);
+}
+
+/// A gitlink staged with plain `git add`, no `git submodule add` and no
+/// `.gitmodules` entry, is a submodule to git: `git status` reports it with
+/// full submodule annotations. The add publishes an index with the new
+/// gitlink but produces no `.gitmodules` event, so the gitlink drift check
+/// is what must slot and watch it.
+#[apply(common::repeat)]
+fn bare_gitlink_add_detected_by_server(_run: u32) {
+    let harness = common::HarnessBuilder::new().submodule("sub_a").build();
+    harness.assert_all_clean();
+
+    let inner_path = harness.root().path().join("inner");
+    std::fs::create_dir(&inner_path).unwrap();
+    let inner = common::Repo::init(&inner_path);
+    inner.write("f.txt", "x\n").add_all().commit("init");
+    harness.root().run_git(&["add", "inner"]);
+
+    harness.assert_submodule_status("inner", StatusSummary::STAGED_NEW);
+
+    // A change inside proves it got a watch root, not just a map entry.
+    inner.write("new_file.txt", "y\n");
+    harness.assert_submodule_status(
+        "inner",
+        StatusSummary::UNTRACKED_CONTENT | StatusSummary::STAGED_NEW,
+    );
+
+    harness.assert_submodule_status("sub_a", StatusSummary::clean());
 }

@@ -3,15 +3,13 @@ mod common;
 use rstest_reuse::apply;
 use subspy::StatusSummary;
 
-// ---------------------------------------------------------------------------
 // Linked worktree support
 //
 // A linked worktree's `.git` is a *file* pointing at
 // `<main>/.git/worktrees/<name>/`, where its index, HEAD, and submodule gitdirs
-// (`modules/<sub>`) live; refs stay shared in the main repo's `.git/`. These
+// (`modules/<sub>`) live. Refs stay shared in the main repo's `.git/`. These
 // tests run the watch server against the worktree (via `.worktree()`) and check
 // that submodule status is tracked correctly through the resolved git dir.
-// ---------------------------------------------------------------------------
 
 #[apply(common::repeat)]
 fn worktree_clean(_run: u32) {
@@ -125,10 +123,7 @@ fn worktree_reindex_preserves_status(_run: u32) {
     harness.submodule("sub").write("new.txt", "u\n");
     harness.assert_submodule_status("sub", StatusSummary::UNTRACKED_CONTENT);
 
-    harness.request_reindex(false);
-    harness.assert_submodule_status("sub", StatusSummary::UNTRACKED_CONTENT);
-
-    harness.request_reindex(true); // replace watchers
+    harness.request_reindex();
     harness.assert_submodule_status("sub", StatusSummary::UNTRACKED_CONTENT);
 }
 

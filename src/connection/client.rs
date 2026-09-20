@@ -29,21 +29,14 @@ use crate::{
 /// # Errors
 ///
 /// Returns `Err` if client-server communication or bincode encoding fails.
-pub fn request_reindex(
-    root_path: &Path,
-    replace_watchers: bool,
-    display_progress: bool,
-) -> IpcResult<()> {
+pub fn request_reindex(root_path: &Path, display_progress: bool) -> IpcResult<()> {
     let sock_path = ipc_socket_path(root_path);
     let conn = ipc_connect(&sock_path)?;
     let mut conn = BufReader::new(conn);
     let client_pid = std::process::id();
-    let req = ClientRequest::new(ClientMessage::Reindex {
-        pid: client_pid,
-        replace_watchers,
-    });
-    // 1 byte version + 4 byte variant index + 4 byte u32 pid + 1 byte bool (fixint)
-    let mut msg = [0; 10];
+    let req = ClientRequest::new(ClientMessage::Reindex { pid: client_pid });
+    // 1 byte version + 4 byte variant index + 4 byte u32 pid (fixint)
+    let mut msg = [0; 9];
     let msg_len = bincode::encode_into_slice(&req, &mut msg, BINCODE_CFG)?;
     write_full_message_fixed(&mut conn, &msg[..msg_len])?;
 

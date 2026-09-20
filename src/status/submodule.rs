@@ -7,7 +7,7 @@ use std::path::Path;
 
 use crate::{
     StatusSummary,
-    git::{parse_gitmodules, read_submodule_head},
+    git::{parse_gitmodules, read_submodule_head, substatus},
 };
 
 use super::{IgnoreSubmodules, StatusResult, conflict::conflicted_paths};
@@ -303,8 +303,9 @@ pub fn compute_local_statuses(
         .map(|(_, path, _)| -> (String, StatusSummary) {
             let summary = tl_repo
                 .get_or_try(|| Repository::open(root_path))
-                .and_then(|repo| repo.submodule_status(&path, git2::SubmoduleIgnore::None))
-                .map_or(StatusSummary::UNREADABLE, Into::into);
+                .map_err(substatus::SubstatusError::from)
+                .and_then(|repo| substatus::submodule_status(repo, &path))
+                .unwrap_or(StatusSummary::UNREADABLE);
             (path, summary)
         })
         .filter(|(_, s)| *s != StatusSummary::clean())

@@ -22,6 +22,7 @@ use crate::{
             update::wait_for_in_flight,
         },
     },
+    git::substatus,
     watch::WatchResult,
 };
 
@@ -36,7 +37,7 @@ pub(super) enum HandleEventsExit {
     /// A filesystem event requires a reindex.
     ReindexEvent,
     /// A reindex was requested by a client.
-    ReindexRequest { replace_watchers: bool },
+    ReindexRequest,
     /// A shutdown was requested by a client.
     Shutdown { conn: BufReader<IpcStream> },
     /// The shared watcher for `source` reported an error.
@@ -51,7 +52,10 @@ impl WatchServer {
     ///     - a client message requesting a shutdown is received
     ///     - a watcher error is detected
     ///     - the idle timer expires
-    pub(super) fn handle_events(&mut self) -> WatchResult<HandleEventsExit> {
+    pub(super) fn handle_events(
+        &mut self,
+        arm_reindex_window: bool,
+    ) -> WatchResult<HandleEventsExit> {
         // Shared state for parallel submodule status updates
         let in_flight: Arc<(Mutex<InFlightTracker>, Condvar)> =
             Arc::new((Mutex::new(InFlightTracker::default()), Condvar::new()));
@@ -67,6 +71,9 @@ impl WatchServer {
         // burst dies down.
         let mut gitmodules_debounce = ReindexDebounce::new(DebounceKind::Gitmodules);
         let mut tripwire_debounce = ReindexDebounce::new(DebounceKind::Structural);
+        if arm_reindex_window {
+            gitmodules_debounce.arm();
+        }
 
         self.drain_pending_rescans(&in_flight, &pending_status_retries);
 
@@ -129,9 +136,9 @@ impl WatchServer {
                     }
                 },
                 recv(control_rx) -> msg => match msg? {
-                    ControlMessage::Reindex { replace_watchers } => {
+                    ControlMessage::Reindex => {
                         wait_for_in_flight(&in_flight);
-                        return Ok(HandleEventsExit::ReindexRequest { replace_watchers });
+                        return Ok(HandleEventsExit::ReindexRequest);
                     }
                     ControlMessage::Shutdown { conn } => {
                         wait_for_in_flight(&in_flight);
@@ -183,9 +190,7 @@ impl WatchServer {
                     }
                 },
                 recv(control_rx) -> msg => match msg? {
-                    ControlMessage::Reindex { .. } => {
-                        return Ok(HandleEventsExit::Wake);
-                    }
+                    ControlMessage::Reindex => return Ok(HandleEventsExit::Wake),
                     ControlMessage::Shutdown { conn } => {
                         return Ok(HandleEventsExit::Shutdown { conn });
                     }
@@ -235,6 +240,17 @@ impl WatchServer {
                 gitmodules_debounce.bump();
                 for i in 0..self.submodules.len() {
                     self.try_spawn_submod_update(i, in_flight, pending_status_retries);
+                }
+                // The operation may have changed the gitlink set itself with no
+                // `.gitmodules` event. A pending reindex re-reads the set anyway,
+                // so only check while none is armed. A failed read
+                // reports nothing: the next root event retries.
+                if gitmodules_debounce.deadline().is_none()
+                    && let Ok(paths) = git2::Repository::open(&self.root_path)
+                        .and_then(|repo| substatus::gitlink_paths(&repo))
+                    && paths != self.submodules
+                {
+                    gitmodules_debounce.arm();
                 }
             }
             Some(EventType::SubmoduleGitOperation) => {
