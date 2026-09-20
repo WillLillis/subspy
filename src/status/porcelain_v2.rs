@@ -342,10 +342,20 @@ const fn submodule_cmu(st: StatusSummary) -> (char, char, char) {
     (c, m, u)
 }
 
+/// The `<sub>` field of a porcelain v2 `1`/`2` line, derived from the entry's
+/// three modes. Git marks the entry `S...` when any side records gitlink mode
+/// (a gitlink-to-file typechange keeps it on the HEAD or index side).
+fn sub_field(m_head: u32, m_idx: u32, m_work: u32) -> &'static str {
+    let gitlink_mode = u32::from(git2::FileMode::Commit);
+    if m_head == gitlink_mode || m_idx == gitlink_mode || m_work == gitlink_mode {
+        "S..."
+    } else {
+        "N..."
+    }
+}
+
 /// Writes a non-rename, non-conflict tracked entry as a porcelain v2
 /// `1` line: `1 XY <sub> <m_head> <m_idx> <m_work> <h_head> <h_idx> PATH`.
-/// `sub` is always `N...` here for a non-submodule. Modes and OIDs come
-/// from [`extract_modes_and_oids`].
 fn write_ordinary(
     entry: &git2::StatusEntry<'_>,
     st: git2::Status,
@@ -360,9 +370,10 @@ fn write_ordinary(
         h_head,
         h_idx,
     } = extract_modes_and_oids(entry, st);
+    let sub = sub_field(m_head, m_idx, m_work);
     write!(
         out,
-        "1 {x}{y} N... {m_head:06o} {m_idx:06o} {m_work:06o} {h_head} {h_idx} ",
+        "1 {x}{y} {sub} {m_head:06o} {m_idx:06o} {m_work:06o} {h_head} {h_idx} ",
     )?;
     render_opts.rel.write_quoted(
         out,
@@ -388,9 +399,10 @@ fn write_synthetic_ordinary(
         h_idx,
         path,
     } = row;
+    let sub = sub_field(*m_head, *m_idx, *m_work);
     write!(
         out,
-        "1 {x}{y} N... {m_head:06o} {m_idx:06o} {m_work:06o} {h_head} {h_idx} ",
+        "1 {x}{y} {sub} {m_head:06o} {m_idx:06o} {m_work:06o} {h_head} {h_idx} ",
     )?;
     render_opts.rel.write_quoted(
         out,
@@ -436,10 +448,11 @@ fn write_renamed(
         h_head,
         h_idx,
     } = extract_modes_and_oids(entry, st);
+    let sub = sub_field(m_head, m_idx, m_work);
     let score = rename_similarity(repo, h_head, h_idx);
     write!(
         out,
-        "2 {x}{y} N... {m_head:06o} {m_idx:06o} {m_work:06o} {h_head} {h_idx} R{score} ",
+        "2 {x}{y} {sub} {m_head:06o} {m_idx:06o} {m_work:06o} {h_head} {h_idx} R{score} ",
     )?;
     render_opts.rel.write_quoted(
         out,
@@ -467,9 +480,10 @@ fn write_synthetic_rename(
     out: &mut impl Write,
     render_opts: &RenderOpts<'_>,
 ) -> Result<(), io::Error> {
+    let sub = sub_field(row.old.mode, row.new.mode, row.new.wt_mode);
     write!(
         out,
-        "2 R{y} N... {m_head:06o} {m_idx:06o} {m_work:06o} {h_head} {h_idx} R{score} ",
+        "2 R{y} {sub} {m_head:06o} {m_idx:06o} {m_work:06o} {h_head} {h_idx} R{score} ",
         y = row.new.wt_y,
         m_head = row.old.mode,
         m_idx = row.new.mode,

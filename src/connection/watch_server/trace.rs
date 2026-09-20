@@ -115,8 +115,8 @@ pub(super) enum TraceEvent {
     RescanFlagged,
     /// A hot watcher reported an error. Its instance gets replaced.
     WatcherErrored { source: WatchSource },
-    /// `.gitmodules` failed to parse. Terminating the watch server.
-    GitmodulesParseFailed { error: Arc<OsStr> },
+    /// The index gitlink read failed after retries.
+    GitlinkReadFailed { error: Arc<OsStr> },
     /// A submodule watch root has no registered paths.
     WatchUnregistered { path: Arc<OsStr> },
     /// A non-recursive tripwire watch was placed on an ancestor directory.
@@ -151,7 +151,7 @@ pub(super) enum TraceEvent {
         msg: Arc<OsStr>,
     },
     /// (Re)indexing started over `n` submodules.
-    Reindexing { n: u32, place_watches: bool },
+    Reindexing { n: u32 },
     /// A submodule workdir watch was placed during indexing.
     WatchSubmod { index: usize, path: Arc<OsStr> },
 }
@@ -182,9 +182,9 @@ impl fmt::Display for TraceEvent {
             Self::WatcherErrored { source } => {
                 write!(f, "{source:?} watcher errored -> replacing watchers")
             }
-            Self::GitmodulesParseFailed { error } => write!(
+            Self::GitlinkReadFailed { error } => write!(
                 f,
-                ".gitmodules failed to parse -> terminating the watch server: {}",
+                "index gitlink failed after retries: {}",
                 error.to_string_lossy()
             ),
             Self::WatchUnregistered { path } => write!(
@@ -224,12 +224,7 @@ impl fmt::Display for TraceEvent {
                 rel.to_string_lossy(),
                 msg.to_string_lossy()
             ),
-            Self::Reindexing { n, place_watches } => {
-                write!(
-                    f,
-                    "(re)indexing {n} submodules (place_watches={place_watches})"
-                )
-            }
+            Self::Reindexing { n } => write!(f, "(re)indexing {n} submodules"),
             Self::WatchSubmod { index, path } => {
                 write!(f, "watch submod[{index}] {}", Path::new(path).display())
             }

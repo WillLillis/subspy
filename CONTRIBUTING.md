@@ -17,7 +17,7 @@ over IPC to retrieve or manipulate that cache.
   Watch Server (background process)
       |
       +-- two shared notify watchers (git dir | working tree), routed by path
-      +-- git2/libgit2 (submodule status computation)
+      +-- git2/libgit2 (index/HEAD gitlinks + sub-repository state)
       +-- BTreeMap<String, StatusSummary> (cached state)
 ```
 
@@ -30,8 +30,9 @@ over IPC to retrieve or manipulate that cache.
    hosts a non-recursive watch on the repository root (delivering `.gitmodules`
    changes and doubling as the root tripwire), one recursive watch root per submodule
    workdir, and non-recursive tripwires on submodule ancestor directories. An initial
-   indexing pass then runs. Events are routed to submodules by path, not by watcher
-   identity.
+   indexing pass reads the root index's gitlinks to establish the submodule slots,
+   then computes each status from the superproject index and HEAD plus the sub-repository
+   state. Events are routed to submodules by path, not by watcher identity.
 3. On filesystem events, the server re-computes status for affected submodules (debounced,
    with cancellation of in-flight tasks via `AtomicBool`).
 4. Client requests are handled on the server's main thread. Status responses are
@@ -51,7 +52,8 @@ over IPC to retrieve or manipulate that cache.
 | `paint.rs` | ANSI styling primitives (`Paint<T>` zero-alloc Display wrapper, `paint_into` streaming form, `NO_COLOR` handling) |
 | `proc.rs` | Cross-platform `Command` flag helpers (`configure_detached_daemon`, `configure_hidden_console`); no-ops on non-Windows |
 | `bitset.rs` | Inline bitset for dense integer sets (watcher indices) |
-| `git.rs` | Lightweight git helpers (`parse_gitmodules` -- fast `.gitmodules` parser; `configure_git2` for global libgit2 options) |
+| `git/` | Lightweight Git helpers, `.gitmodules` parsing, and global libgit2 configuration |
+| `git/substatus.rs` | Manual submodule status engine and index-gitlink enumeration. Avoids libgit2's `.gitmodules`-dependent submodule API |
 | `watch.rs` | `spawn_daemon`, `build_daemon_command` |
 | `status/` | Status output (see below) |
 | `prompt.rs` | Shell prompt integration -- fast, silent on all errors (experimental; exposed primitives may change) |
@@ -110,7 +112,7 @@ each with its own renderer. Long stands alone; short + porcelain v1 share an
 | `mod.rs` | The `WatchServer` struct, shared vocabulary (consts, type aliases, `ControlMessage`, `StatusMap`, `SharedWatch`, `SubmoduleSlot`), the `watch()` entry, and the run-loop spine |
 | `classify.rs` | Event classification and path routing: `classify_git_event`, `classify_tree_path`, the `EventType`/`TreeAction` enums, and the path predicates |
 | `placement.rs` | Watcher and tripwire setup (`place_git_watch`, `place_tree_watch`, `watch_submodule`, `place_tripwires`) |
-| `indexing.rs` | Full status-map population (`populate_status_map`, `slots_match`, `get_modules_path`) |
+| `indexing.rs` | Full status-map population (`populate_status_map`) and submodule gitdir resolution (`get_modules_path`) |
 | `update.rs` | The in-flight rayon update engine (`try_spawn_submod_update`, `InFlightTask`/`InFlightTracker`) |
 | `event_loop.rs` | The `crossbeam` select loop, dispatch, tripwire handling, and reindex-deferral wiring |
 | `debounce.rs` | Debounced reindex deadlines (`ReindexDebounce`, `DebounceKind`, `earliest_deadline`) shared by the `.gitmodules` and structural-tripwire reindex paths |
@@ -211,16 +213,22 @@ deletion with an untracked file - a plain `mv` shows `D old` + `?? new`, not a r
 libgit2's `renames_index_to_workdir` would pair them and emit a worktree rename whose
 old path lands in a record with no valid `XY ` prefix, which consumers can't parse.
 
-**`parse_gitmodules` over `repo.submodules()`.** Calling `repo.submodules()` takes ~100ms
-due to libgit2 overhead. Our custom `.gitmodules` parser takes ~600us when measured on
-boost.
+**Submodule status comes from git primitives instead of libgit2's submodule API.**
+`git::substatus` reads the superproject index and `HEAD` gitlinks plus the
+sub-repository's `HEAD` and status walk. It deliberately avoids
+`Repository::submodule_status`, which resolves `.gitmodules` configuration on
+every call and therefore fails when that file is conflicted or unparsable.
 
-**A non-replacing reindex upgrades itself when the slots are stale.** Retry marks and
-event routing key on slot indices, and slot `i` holds the `i`-th `.gitmodules` entry.
-A `ClientMessage::Reindex { replace_watchers: false }` that races a `.gitmodules`
-change would index a submodule set the live slots don't describe, so the spine checks
-`slots_match` against the just-parsed entries and rebuilds the tree watch (a replacing
-pass) on any membership or order difference.
+**Index gitlinks define watch-server topology.** The server's submodule slots
+come from the unique mode-`160000` paths in the root index, including unmerged
+index stages. A gitlink without a corresponding `.gitmodules` entry still receives
+a status slot and watcher coverage.
+
+**Every reindex replaces the watcher slots.** Each pass re-reads the index
+gitlinks, clears the previous submodule watches and routing maps, and rebuilds
+them in index order. `.gitmodules` changes still schedule reconciliation, while
+the root-git-operation path also compares the current gitlink set with the live
+slots so index-only topology changes converge without a `.gitmodules` event.
 
 **Two shared watcher instances, routed by path.** The server once created one
 `notify::RecommendedWatcher` per submodule (plus tripwires and the root watchers). Each
@@ -255,7 +263,8 @@ first rewrite and later edits go unseen. The tree watch's non-recursive root wat
 reports events for direct children by name, so it survives any number of rewrites (and
 also covers a repository whose `.gitmodules` does not exist yet). The lock file's
 rename routes as a `.gitmodules` change too, because the watcher may deliver only the
-source half of the rename.
+source half of the rename. The event schedules reconciliation; the reindex derives
+the actual slot set from index gitlinks rather than from the file's parsed entries.
 
 **`FxHashMap`/`FxHashSet` for internal maps.** We use rustc-hash for non-cryptographic
 hashing where key distribution is predictable (submodule paths, watcher indices).
@@ -264,25 +273,20 @@ hashing where key distribution is predictable (submodule paths, watcher indices)
 **`thread_local::ThreadLocal` for git2 `Repository`.** `git2::Repository` is `!Sync`,
 so we cache one per rayon thread for parallel submodule status computation.
 
-**`deleted_submodule_paths` is separate from `StatusSummary`.** When a submodule is
-staged for deletion (`git rm <submodule>`), its gitlink is removed from the index but
-remains in the HEAD tree. The watch server can't detect this through filesystem events
-alone -- the submodule's directory is gone, so there's nothing to watch. Instead,
-`deleted_submodule_paths` walks the HEAD tree at display time, comparing gitlink entries
-against the index to find removals. This is computed client-side in `status.rs`, not
-cached by the server. Tracking deletions server-side was explored but didn't work: the
-server discovers submodules from `.gitmodules`, and a deleted submodule is absent from
-`.gitmodules`. Detecting the deletion requires comparing old status map keys against new
-`.gitmodules` entries during reindex, but then cleaning up stale `DELETED` entries after
-a commit (which doesn't trigger a reindex) requires additional git operations on the
-`RootGitOperation` hot path. The client-side tree walk is cheap and avoids this
-complexity.
+**`deleted_submodule_paths` is separate from `StatusSummary`.** When a submodule
+is staged for deletion (`git rm <submodule>`), its gitlink is removed from the index
+but remains in the `HEAD` tree. The watch server intentionally tracks the index-gitlink
+set, so that path no longer has a server slot. Instead, `deleted_submodule_paths`
+compares `HEAD` gitlinks with the index at display time and emits staged deletions
+client-side. This avoids caching stale deletion state or adding extra work to the
+root-git-operation path.
 
-**`--no-server` fallback.** The `status`, `prompt`, and `list` commands support a
-`--no-server` flag that computes submodule status locally via `compute_local_statuses`
-instead of connecting to the watch server. This uses `parse_gitmodules` + parallel
-`repo.submodule_status()` calls. It's slower than the server path but useful when no
-server is desired (e.g. CI, one-off checks).
+**`--no-server` fallback.** The `status`, `prompt`, and `list` commands support
+a `--no-server` flag that computes submodule status locally instead of connecting
+to the watch server. The direct path still uses `parse_gitmodules` to enumerate
+paths, but computes each path through the same manual `git::substatus` engine
+rather than `Repository::submodule_status`. It is slower than the cached server
+path but useful when no server is desired (e.g. CI or one-off checks).
 
 **No nested submodule support.** SubSpy must be run from the top-level repository.
 Submodules that contain submodules of their own are not recursed into.
@@ -490,11 +494,12 @@ unlock step, so a reader always sees a complete old-or-new index.
 
 **The server never holds an `index.lock`** -- not the root's, not a submodule's:
 
-- **`.gitmodules` during `populate_status_map`**: read **lock-free**. Git replaces it via
-  an atomic rename, so a reader always sees a complete old-or-new file.
-- **Submodule status, on every path**: no lock. `submodule_status()` is read-only and
-  never calls `git_index_write()`, so the reindex (`populate_status_map`) and the
-  incremental path (`try_spawn_submod_update`) read exactly the same way.
+- **Root topology and status inputs**: read **lock-free** from the index.
+  `read_gitlink_paths` adds bounded retries for transient publication-time failures,
+  including Windows sharing violations.
+- **Submodule status, on every path**: no lock. `git::substatus::submodule_status` is
+  read-only and never writes an index, so the reindex (`populate_status_map`) and
+  incremental path (`try_spawn_submod_update`) use the same locking discipline.
 
 Holding a lock is worse than unnecessary: it makes the user's own git command fail with
 `Unable to create '<path>/index.lock': File exists`. The reindex used to take each
@@ -525,11 +530,12 @@ exposed the reindex's `index.lock` acquisition.
 
 ### Transient read failures in rayon tasks
 
-A `submodule_status()` call can fail while git is publishing a new index: the read is
-lock-free by design, so it races the operation rather than excluding it. Three retry
-paths cover this (documented in detail in `try_spawn_submod_update`): dirty retry (event
-loop marks the in-flight task), new task spawn (event loop creates a fresh task after
-the rename), and `SubmoduleLockRelease` safety net (for aborted git operations).
+A `git::substatus::submodule_status` call can fail while git is publishing a new index:
+the read is lock-free by design, so it races the operation rather than excluding it.
+Three retry paths cover this (documented in detail in `try_spawn_submod_update`): dirty
+retry (event loop marks the in-flight task), new task spawn (event loop creates a fresh
+task after the rename), and `SubmoduleLockRelease` safety net (for aborted git
+operations).
 
 The reindex has no such retries, and reads each submodule *before* arming the replacement
 watchers, so events the old watchers had queued are lost with them. Both gaps route
@@ -581,9 +587,10 @@ subspy debug
 When `subspy status` shows wrong output, the first step is figuring out *where* the
 mismatch is: the server's cached state, the event pipeline, or the display logic.
 
-1. **Compare against git ground truth**: Run `subspy status --no-server` (uses libgit2
-   directly) and `git status` side by side. If `--no-server` matches git but the server
-   doesn't, the bug is in the server's event handling or status caching.
+1. **Compare against git ground truth**: Run `subspy status --no-server` (uses the same
+   manual status engine without the server cache) and `git status` side by side. If
+   `--no-server` matches git but the server doesn't, the bug is in the server's event
+   handling or status caching.
 2. **Check the server's cached state**: Run `subspy debug` and look at the "Submodule
    statuses" section. If the cached flags are correct but `subspy status` displays them
    wrong, the bug is in `status.rs` display logic.
@@ -592,7 +599,7 @@ mismatch is: the server's cached state, the event pipeline, or the display logic
    filesystem event. Check the log file for watcher errors.
 4. **Full restart**: `subspy stop` followed by a fresh `subspy status` (which auto-spawns
    a new server). If even this doesn't fix it, the bug is likely in the initial
-   `populate_status_map` or in `submodule_status` itself.
+   `populate_status_map` or `git::substatus::submodule_status` itself.
 5. **Check for pending events**: In `subspy debug` output, a watcher queue with a high
    pending event count suggests the server is falling behind on processing, which can
    cause temporarily stale status.
@@ -602,7 +609,7 @@ mismatch is: the server's cached state, the event pipeline, or the display logic
 When a bug comes down to *which* filesystem event the watch server received and how
 it classified it (step 3 above), build with the internal `trace_events` cfg. The
 `wtrace!` macro then prints, to stderr (prefixed `[subspy]`), every received event
-with its classification, the reindex / `.gitmodules`-tracker decisions, watcher
+with its classification, the reindex-debounce and gitlink-read decisions, watcher
 placement, and each submodule status re-read:
 
 ```sh

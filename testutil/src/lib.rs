@@ -350,8 +350,8 @@ impl TestHarness {
     }
 
     /// Request a reindex from the watch server.
-    pub fn request_reindex(&self, replace_watchers: bool) {
-        request_reindex(self.root.path(), replace_watchers, false).expect("Reindex request failed");
+    pub fn request_reindex(&self) {
+        request_reindex(self.root.path(), false).expect("Reindex request failed");
     }
 
     /// Shut down the watch server and wait for the thread to exit.
