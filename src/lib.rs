@@ -164,38 +164,6 @@ impl std::fmt::Display for StatusSummary {
     }
 }
 
-impl From<git2::SubmoduleStatus> for StatusSummary {
-    fn from(value: git2::SubmoduleStatus) -> Self {
-        let mut submod_status = Self::clean();
-        if value.contains(git2::SubmoduleStatus::WD_MODIFIED) {
-            submod_status |= Self::NEW_COMMITS;
-        }
-        if value.contains(git2::SubmoduleStatus::WD_INDEX_MODIFIED)
-            || value.contains(git2::SubmoduleStatus::WD_WD_MODIFIED)
-        {
-            submod_status |= Self::MODIFIED_CONTENT;
-        }
-        if value.contains(git2::SubmoduleStatus::WD_UNTRACKED) {
-            submod_status |= Self::UNTRACKED_CONTENT;
-        }
-        if value.contains(git2::SubmoduleStatus::WD_DELETED) {
-            submod_status |= Self::DELETED_WORKDIR;
-        }
-
-        if value.contains(git2::SubmoduleStatus::INDEX_ADDED) {
-            submod_status |= Self::STAGED_NEW;
-        } else if value.contains(
-            git2::SubmoduleStatus::IN_HEAD
-                | git2::SubmoduleStatus::IN_INDEX
-                | git2::SubmoduleStatus::INDEX_MODIFIED,
-        ) {
-            submod_status |= Self::STAGED;
-        }
-
-        submod_status
-    }
-}
-
 /// Creates a new styled `indicatif::ProgressBar`
 fn create_progress_bar(len: u64, prefix: impl Into<Cow<'static, str>>) -> indicatif::ProgressBar {
     ProgressBar::new(len)
@@ -210,21 +178,6 @@ mod tests {
     use super::*;
 
     use pretty_assertions::assert_eq;
-
-    // -- StatusSummary Display --
-
-    #[test]
-    fn display_clean() {
-        assert_eq!(StatusSummary::clean().to_string(), "");
-    }
-
-    #[test]
-    fn display_single_flag() {
-        assert_eq!(
-            StatusSummary::MODIFIED_CONTENT.to_string(),
-            "(modified content)"
-        );
-    }
 
     #[test]
     fn display_multiple_flags() {
@@ -247,79 +200,5 @@ mod tests {
             s.to_string(),
             "(new commits, modified content, untracked content)"
         );
-    }
-
-    // -- From<git2::SubmoduleStatus> --
-
-    #[test]
-    fn from_submodule_status_clean() {
-        let s = StatusSummary::from(git2::SubmoduleStatus::empty());
-        assert_eq!(s, StatusSummary::clean());
-    }
-
-    #[test]
-    fn from_submodule_status_wd_modified_is_new_commits() {
-        let s = StatusSummary::from(git2::SubmoduleStatus::WD_MODIFIED);
-        assert!(s.contains(StatusSummary::NEW_COMMITS));
-    }
-
-    #[test]
-    fn from_submodule_status_wd_index_modified_is_modified_content() {
-        let s = StatusSummary::from(git2::SubmoduleStatus::WD_INDEX_MODIFIED);
-        assert!(s.contains(StatusSummary::MODIFIED_CONTENT));
-    }
-
-    #[test]
-    fn from_submodule_status_wd_wd_modified_is_modified_content() {
-        let s = StatusSummary::from(git2::SubmoduleStatus::WD_WD_MODIFIED);
-        assert!(s.contains(StatusSummary::MODIFIED_CONTENT));
-    }
-
-    #[test]
-    fn from_submodule_status_wd_untracked() {
-        let s = StatusSummary::from(git2::SubmoduleStatus::WD_UNTRACKED);
-        assert!(s.contains(StatusSummary::UNTRACKED_CONTENT));
-    }
-
-    #[test]
-    fn from_submodule_status_staged() {
-        let s = StatusSummary::from(
-            git2::SubmoduleStatus::IN_HEAD
-                | git2::SubmoduleStatus::IN_INDEX
-                | git2::SubmoduleStatus::INDEX_MODIFIED,
-        );
-        assert!(s.contains(StatusSummary::STAGED));
-    }
-
-    #[test]
-    fn from_submodule_status_staged_new() {
-        let s = StatusSummary::from(git2::SubmoduleStatus::INDEX_ADDED);
-        assert!(s.contains(StatusSummary::STAGED_NEW));
-        assert!(!s.contains(StatusSummary::STAGED));
-    }
-
-    #[test]
-    fn from_submodule_status_wd_deleted() {
-        let s = StatusSummary::from(
-            git2::SubmoduleStatus::IN_HEAD
-                | git2::SubmoduleStatus::IN_INDEX
-                | git2::SubmoduleStatus::WD_DELETED,
-        );
-        assert!(s.contains(StatusSummary::DELETED_WORKDIR));
-        // IN_HEAD+IN_INDEX without INDEX_MODIFIED should not flag STAGED;
-        // the gitlink in HEAD and index is unchanged for an `rm -rf`.
-        assert!(!s.contains(StatusSummary::STAGED));
-    }
-
-    #[test]
-    fn from_submodule_status_combined() {
-        let s = StatusSummary::from(
-            git2::SubmoduleStatus::WD_MODIFIED
-                | git2::SubmoduleStatus::WD_UNTRACKED
-                | git2::SubmoduleStatus::WD_WD_MODIFIED,
-        );
-        assert!(s.contains(StatusSummary::NEW_COMMITS));
-        assert!(s.contains(StatusSummary::UNTRACKED_CONTENT));
-        assert!(s.contains(StatusSummary::MODIFIED_CONTENT));
     }
 }
