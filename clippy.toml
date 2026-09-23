@@ -1,0 +1,5 @@
+disallowed-methods = [
+    { path = "git2::Repository::submodule_status", reason = "use crate::git::substatus::submodule_status so status does not depend on .gitmodules" },
+    { path = "git2::Repository::submodules", reason = "derive status identity from index gitlinks or parse metadata explicitly" },
+    { path = "git2::Repository::find_submodule", reason = "derive status identity from index gitlinks or parse metadata explicitly" },
+]
