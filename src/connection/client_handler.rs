@@ -17,7 +17,7 @@ use crate::{
         BINCODE_CFG, ClientMessage, ClientRequest, IPC_VERSION, ServerMessage,
         read_full_message_fixed, transport::MSG_PREFIX_LEN, write_full_message_fixed,
     },
-    watch::WatchResult,
+    watch::{WatchError, WatchResult},
 };
 
 use super::{
@@ -83,7 +83,7 @@ fn dispatch_client_message(
                 .insert(pid, None);
             control_tx
                 .send(ControlMessage::Reindex)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::BrokenPipe, e.to_string()))?;
+                .map_err(|_| WatchError::ControlChannelClosed)?;
             handle_reindex_request(conn, pid, subscribers)?;
         }
         ClientMessage::Status(client_pid) => {
@@ -92,12 +92,12 @@ fn dispatch_client_message(
         ClientMessage::Shutdown => {
             control_tx
                 .send(ControlMessage::Shutdown { conn })
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::BrokenPipe, e.to_string()))?;
+                .map_err(|_| WatchError::ControlChannelClosed)?;
         }
         ClientMessage::Debug => {
             control_tx
                 .send(ControlMessage::Debug { conn })
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::BrokenPipe, e.to_string()))?;
+                .map_err(|_| WatchError::ControlChannelClosed)?;
         }
     }
 
