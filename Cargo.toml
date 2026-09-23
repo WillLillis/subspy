@@ -19,6 +19,7 @@ exclude = ["/assets/**"]
 [lints.clippy]
 dbg_macro = "deny"
 todo = "deny"
+disallowed_methods = "deny"
 pedantic = { level = "warn", priority = -1 }
 nursery = { level = "warn", priority = -1 }
 cargo = { level = "warn", priority = -1 }
