@@ -24,6 +24,8 @@ pub enum WatchError {
     Substatus(#[from] crate::git::substatus::SubstatusError),
     #[error(transparent)]
     IO(#[from] std::io::Error),
+    #[error("watch server control channel closed")]
+    ControlChannelClosed,
     #[error(transparent)]
     Receive(#[from] crossbeam_channel::RecvError),
     #[error("{} is not a submodule gitlink (its gitdir is not under .git/modules/)", .0.display())]
