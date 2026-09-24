@@ -12,6 +12,8 @@ use pretty_assertions::assert_eq;
 use rstest_reuse::apply;
 use tempfile::TempDir;
 
+use subspy::StatusSummary;
+
 const fn shim_path() -> &'static str {
     env!("CARGO_BIN_EXE_subspy-git")
 }
@@ -353,6 +355,52 @@ fn cwd_pathspec_splits_cross_boundary_submodule_renames(ref_format: RefFormat) {
             assert_rendered_locally_matches(&selected, args);
         }
     }
+}
+
+/// A root and submodules in different ref formats render locally exactly as
+/// git renders them.
+#[rstest::rstest]
+#[case::reftable_submodules(RefFormat::Files, RefFormat::Reftable)]
+#[case::files_submodules(RefFormat::Reftable, RefFormat::Files)]
+#[ignore = "reftable: needs libgit2 support (git2-rs#1259)"]
+fn mixed_ref_formats_are_rendered_locally(
+    #[case] root_format: RefFormat,
+    #[case] submodule_format: RefFormat,
+) {
+    let harness = HarnessBuilder::new()
+        .ref_format(root_format)
+        .submodule_ref_format(submodule_format)
+        .submodule("sub_a")
+        .submodule("sub_b")
+        .build();
+    let assert_renders_like_git = || {
+        for args in [
+            &["status"][..],
+            &["status", "--porcelain"][..],
+            &["status", "--porcelain=2"][..],
+        ] {
+            assert_rendered_locally_matches(harness.root().path(), args);
+        }
+    };
+    harness.assert_all_clean();
+    assert_renders_like_git();
+
+    harness.submodule("sub_a").write("untracked.txt", "x\n");
+    harness.assert_submodule_status("sub_a", StatusSummary::UNTRACKED_CONTENT);
+    assert_renders_like_git();
+
+    let sub_b = harness.submodule("sub_b");
+    sub_b.write("new.txt", "content\n");
+    harness.assert_submodule_status("sub_b", StatusSummary::UNTRACKED_CONTENT);
+    assert_renders_like_git();
+
+    sub_b.add_all();
+    harness.assert_submodule_status("sub_b", StatusSummary::MODIFIED_CONTENT);
+    assert_renders_like_git();
+
+    sub_b.commit("add new.txt");
+    harness.assert_submodule_status("sub_b", StatusSummary::NEW_COMMITS);
+    assert_renders_like_git();
 }
 
 #[apply(common::formats)]

@@ -321,7 +321,7 @@ mod tests {
     use pretty_assertions::assert_eq;
     use rstest_reuse::apply;
     use tempfile::TempDir;
-    use testutil::{RefFormat, Repo};
+    use testutil::{HarnessBuilder, RefFormat, Repo};
 
     use crate::test_support::formats;
 
@@ -415,6 +415,55 @@ mod tests {
         assert_eq!(statuses.len(), 1);
         assert_eq!(statuses[0].0, "my_sub");
         assert!(statuses[0].1.contains(StatusSummary::UNTRACKED_CONTENT));
+    }
+
+    /// Each submodule is read in its own ref format, whatever the root's.
+    #[rstest::rstest]
+    #[case::reftable_submodules(RefFormat::Files, RefFormat::Reftable)]
+    #[case::files_submodules(RefFormat::Reftable, RefFormat::Files)]
+    #[ignore = "reftable: needs libgit2 support (git2-rs#1259)"]
+    fn compute_local_statuses_mixed_ref_formats(
+        #[case] root_format: RefFormat,
+        #[case] submodule_format: RefFormat,
+    ) {
+        let harness = HarnessBuilder::new()
+            .no_server()
+            .ref_format(root_format)
+            .submodule_ref_format(submodule_format)
+            .submodule("sub_a")
+            .submodule("sub_b")
+            .build();
+        let assert_statuses = |expected: &[(&str, StatusSummary)]| {
+            let statuses = compute_local_statuses(harness.root().path()).unwrap();
+            let statuses: Vec<_> = statuses
+                .iter()
+                .map(|(path, status)| (path.as_str(), *status))
+                .collect();
+            assert_eq!(statuses, expected);
+        };
+        assert_statuses(&[]);
+
+        harness.submodule("sub_a").write("untracked.txt", "x\n");
+        assert_statuses(&[("sub_a", StatusSummary::UNTRACKED_CONTENT)]);
+
+        let sub_b = harness.submodule("sub_b");
+        sub_b.write("new.txt", "content\n");
+        assert_statuses(&[
+            ("sub_a", StatusSummary::UNTRACKED_CONTENT),
+            ("sub_b", StatusSummary::UNTRACKED_CONTENT),
+        ]);
+
+        sub_b.add_all();
+        assert_statuses(&[
+            ("sub_a", StatusSummary::UNTRACKED_CONTENT),
+            ("sub_b", StatusSummary::MODIFIED_CONTENT),
+        ]);
+
+        sub_b.commit("add new.txt");
+        assert_statuses(&[
+            ("sub_a", StatusSummary::UNTRACKED_CONTENT),
+            ("sub_b", StatusSummary::NEW_COMMITS),
+        ]);
     }
 
     /// Two submodules cloned from the same source repo share a gitlink

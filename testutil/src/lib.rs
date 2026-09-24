@@ -71,6 +71,7 @@ pub struct HarnessBuilder {
     as_worktree: bool,
     worktree_init_submodules: bool,
     ref_format: RefFormat,
+    submodule_ref_format: Option<RefFormat>,
 }
 
 impl HarnessBuilder {
@@ -82,6 +83,7 @@ impl HarnessBuilder {
             as_worktree: false,
             worktree_init_submodules: true,
             ref_format: RefFormat::Files,
+            submodule_ref_format: None,
         }
     }
 
@@ -120,9 +122,18 @@ impl HarnessBuilder {
     }
 
     /// Stores the refs of every fixture repository, and of any repository a harness
-    /// [`Repo`] creates later in `ref_format`.
+    /// [`Repo`] creates later in `ref_format`. [`Self::submodule_ref_format`] overrides
+    /// it for everything but the root.
     pub const fn ref_format(mut self, ref_format: RefFormat) -> Self {
         self.ref_format = ref_format;
+        self
+    }
+
+    /// Stores the refs of every submodule, and of any repository a harness [`Repo`]
+    /// creates later, in `ref_format`, while the root keeps the format from
+    /// [`Self::ref_format`].
+    pub const fn submodule_ref_format(mut self, ref_format: RefFormat) -> Self {
+        self.submodule_ref_format = Some(ref_format);
         self
     }
 
@@ -145,6 +156,12 @@ impl HarnessBuilder {
         let submodule_paths =
             init_repo_with_submodules(temp_dir.path(), &root_path, &self.submodule_names);
         Repo::new(&root_path).migrate_refs(self.ref_format);
+        let submodule_ref_format = self.submodule_ref_format.unwrap_or(self.ref_format);
+        if submodule_ref_format != self.ref_format {
+            for path in submodule_paths.values() {
+                Repo::new(path).migrate_refs(submodule_ref_format);
+            }
+        }
 
         // In worktree mode, add a linked worktree of the superproject and watch
         // it instead. Its submodules are re-checked-out under the worktree's own
@@ -155,7 +172,7 @@ impl HarnessBuilder {
                 &root_path,
                 &self.submodule_names,
                 self.worktree_init_submodules,
-                self.ref_format,
+                submodule_ref_format,
             );
             let wt_submods = self
                 .submodule_names
@@ -175,11 +192,11 @@ impl HarnessBuilder {
 
         let submodules = submodule_paths
             .into_iter()
-            .map(|(name, path)| (name, Repo::new(&path).with_ref_format(self.ref_format)))
+            .map(|(name, path)| (name, Repo::new(&path).with_ref_format(submodule_ref_format)))
             .collect();
 
         let harness = TestHarness {
-            root: Repo::new(&active_root).with_ref_format(self.ref_format),
+            root: Repo::new(&active_root).with_ref_format(submodule_ref_format),
             server_thread,
             submodules,
             _temp_dir: temp_dir,
