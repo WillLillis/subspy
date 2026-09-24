@@ -19,6 +19,10 @@ use subspy::{
 };
 use tempfile::TempDir;
 
+mod ref_format;
+
+pub use ref_format::RefFormat;
+
 /// Configures global libgit2 options once across all test threads.
 /// See `git::configure_git2` for rationale.
 static GIT2_INIT: LazyLock<()> = LazyLock::new(|| {
@@ -66,6 +70,7 @@ pub struct HarnessBuilder {
     start_server: bool,
     as_worktree: bool,
     worktree_init_submodules: bool,
+    ref_format: RefFormat,
 }
 
 impl HarnessBuilder {
@@ -76,6 +81,7 @@ impl HarnessBuilder {
             start_server: true,
             as_worktree: false,
             worktree_init_submodules: true,
+            ref_format: RefFormat::Files,
         }
     }
 
@@ -113,6 +119,13 @@ impl HarnessBuilder {
         self
     }
 
+    /// Stores the refs of every fixture repository, and of any repository a harness
+    /// [`Repo`] creates later in `ref_format`.
+    pub const fn ref_format(mut self, ref_format: RefFormat) -> Self {
+        self.ref_format = ref_format;
+        self
+    }
+
     /// Do not start the watch server (useful for testing auto-start).
     pub const fn no_server(mut self) -> Self {
         self.start_server = false;
@@ -131,6 +144,7 @@ impl HarnessBuilder {
 
         let submodule_paths =
             init_repo_with_submodules(temp_dir.path(), &root_path, &self.submodule_names);
+        Repo::new(&root_path).migrate_refs(self.ref_format);
 
         // In worktree mode, add a linked worktree of the superproject and watch
         // it instead. Its submodules are re-checked-out under the worktree's own
@@ -141,6 +155,7 @@ impl HarnessBuilder {
                 &root_path,
                 &self.submodule_names,
                 self.worktree_init_submodules,
+                self.ref_format,
             );
             let wt_submods = self
                 .submodule_names
@@ -160,11 +175,11 @@ impl HarnessBuilder {
 
         let submodules = submodule_paths
             .into_iter()
-            .map(|(name, path)| (name, Repo::new(&path)))
+            .map(|(name, path)| (name, Repo::new(&path).with_ref_format(self.ref_format)))
             .collect();
 
         let harness = TestHarness {
-            root: Repo::new(&active_root),
+            root: Repo::new(&active_root).with_ref_format(self.ref_format),
             server_thread,
             submodules,
             _temp_dir: temp_dir,
@@ -309,8 +324,9 @@ impl TestHarness {
         let source = source_path.display().to_string();
         self.root.run_git(&["submodule", "add", &source, name]);
 
-        self.submodules
-            .insert(name.to_string(), Repo::new(&self.root.path().join(name)));
+        let submodule =
+            Repo::new(&self.root.path().join(name)).with_ref_format(self.root.ref_format);
+        self.submodules.insert(name.to_string(), submodule);
     }
 
     /// Add a new submodule to the root repo at runtime.
@@ -383,6 +399,13 @@ impl TestHarness {
                 let _ = recv_status_response(&mut conn, false);
                 return;
             }
+            assert!(
+                !self
+                    .server_thread
+                    .as_ref()
+                    .is_some_and(JoinHandle::is_finished),
+                "Watch server exited before it became ready"
+            );
             assert!(
                 start.elapsed() < timeout,
                 "Watch server did not become ready within {timeout:?}"
@@ -522,11 +545,9 @@ fn init_repo_with_submodules(
 /// Builder for a fixture git repo, used to set up specific repo states
 /// declaratively for tests. Wraps `git -C <root> ...` and filesystem
 /// mutations so test setups read top-down without scattered boilerplate.
-///
-/// All methods take `&self` and return `&Self` so calls can chain freely
-/// off a single `Repo::init` call.
 pub struct Repo {
     root: PathBuf,
+    ref_format: RefFormat,
 }
 
 impl Repo {
@@ -543,7 +564,13 @@ impl Repo {
     pub fn new(root: &Path) -> Self {
         Self {
             root: root.to_path_buf(),
+            ref_format: RefFormat::default(),
         }
+    }
+
+    pub fn with_ref_format(mut self, ref_format: RefFormat) -> Self {
+        self.ref_format = ref_format;
+        self
     }
 
     /// Returns the repository root path.
@@ -619,10 +646,14 @@ impl Repo {
 
     /// Run a git command relative to this repo's root via [`git`], asserting success.
     pub fn run_git(&self, args: &[&str]) {
-        let r = self.root.display().to_string();
-        let mut full: Vec<&str> = vec!["-C", &r];
-        full.extend(args);
-        git(&full);
+        let output = self.try_git(args);
+        assert!(
+            output.status.success(),
+            "git -C {} {} failed: {}",
+            self.root.display(),
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr),
+        );
     }
 
     /// Run a git command relative to this repo's root via [`git_may_fail`],
@@ -632,7 +663,10 @@ impl Repo {
         let r = self.root.display().to_string();
         let mut full: Vec<&str> = vec!["-C", &r];
         full.extend(args);
-        git_may_fail(&full)
+        git_command(&full)
+            .env("GIT_DEFAULT_REF_FORMAT", self.ref_format.to_string())
+            .output()
+            .unwrap()
     }
 }
 
@@ -657,8 +691,13 @@ pub fn git(args: &[&str]) {
 /// hitting a conflict). Pins author/committer identity + date via env
 /// so fixture commit SHAs are deterministic.
 pub fn git_may_fail(args: &[&str]) -> std::process::Output {
+    git_command(args).output().unwrap()
+}
+
+fn git_command(args: &[&str]) -> std::process::Command {
     let pinned_date = format!("{FIXTURE_TIME} +0000");
-    std::process::Command::new("git")
+    let mut command = std::process::Command::new("git");
+    command
         .args([
             "-c",
             "user.name=Test",
@@ -679,9 +718,8 @@ pub fn git_may_fail(args: &[&str]) -> std::process::Output {
         .env("GIT_COMMITTER_NAME", FIXTURE_NAME)
         .env("GIT_COMMITTER_EMAIL", FIXTURE_EMAIL)
         .env("GIT_COMMITTER_DATE", &pinned_date)
-        .args(args)
-        .output()
-        .expect("Failed to run git")
+        .args(args);
+    command
 }
 
 /// Starts the watch server on a background thread. Returns the `JoinHandle`.
@@ -694,6 +732,7 @@ fn setup_worktree(
     super_root: &Path,
     submodule_names: &[String],
     init_submodules: bool,
+    ref_format: RefFormat,
 ) -> PathBuf {
     let wt_path = temp_dir.join("worktree");
     // Create the worktree on its own branch (the common case for `git worktree
@@ -709,7 +748,7 @@ fn setup_worktree(
     ]);
     if init_submodules && !submodule_names.is_empty() {
         // Local-path submodule URLs need the file-protocol opt-in on modern git.
-        Repo::new(&wt_path).run_git(&[
+        Repo::new(&wt_path).with_ref_format(ref_format).run_git(&[
             "-c",
             "protocol.file.allow=always",
             "submodule",
