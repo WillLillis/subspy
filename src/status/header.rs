@@ -1017,7 +1017,11 @@ mod tests {
     use std::path::Path;
 
     use pretty_assertions::assert_eq;
+    use rstest_reuse::apply;
     use tempfile::TempDir;
+    use testutil::{RefFormat, Repo};
+
+    use crate::test_support::formats;
 
     fn git(args: &[&str]) {
         let output = git_may_fail(args);
@@ -1042,13 +1046,14 @@ mod tests {
     }
 
     /// Creates a repo with an initial commit containing `file.txt`.
-    fn init_repo() -> (TempDir, Repository) {
+    fn init_repo(ref_format: RefFormat) -> (TempDir, Repository) {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path().display().to_string();
         git(&["-C", &root, "init"]);
         std::fs::write(tmp.path().join("file.txt"), "initial\n").unwrap();
         git(&["-C", &root, "add", "-A"]);
         git(&["-C", &root, "commit", "-m", "initial"]);
+        Repo::new(tmp.path()).migrate_refs(ref_format);
         let repo = Repository::open(tmp.path()).unwrap();
         (tmp, repo)
     }
@@ -1065,9 +1070,9 @@ mod tests {
         git(&["-C", root, "commit", "-m", "master diverge"]);
     }
 
-    #[test]
-    fn header_state_clean_repo() {
-        let (_tmp, repo) = init_repo();
+    #[apply(formats)]
+    fn header_state_clean_repo(ref_format: RefFormat) {
+        let (_tmp, repo) = init_repo(ref_format);
         let state = get_header_state(&repo, true).unwrap();
         assert!(
             matches!(state.body, HeaderBody::Normal { .. }),
@@ -1075,11 +1080,12 @@ mod tests {
         );
     }
 
-    #[test]
-    fn header_state_unborn_branch() {
+    #[apply(formats)]
+    fn header_state_unborn_branch(ref_format: RefFormat) {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path().display().to_string();
         git(&["-C", &root, "init", "--initial-branch=master"]);
+        Repo::new(tmp.path()).migrate_refs(ref_format);
         let repo = Repository::open(tmp.path()).unwrap();
 
         let state = get_header_state(&repo, true).unwrap();
@@ -1094,9 +1100,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn header_state_cherry_pick_with_conflict() {
-        let (tmp, _repo) = init_repo();
+    #[apply(formats)]
+    fn header_state_cherry_pick_with_conflict(ref_format: RefFormat) {
+        let (tmp, _repo) = init_repo(ref_format);
         let root = tmp.path().display().to_string();
         create_conflicting_branch(&root, tmp.path(), "pick-me");
 
@@ -1120,9 +1126,9 @@ mod tests {
         }
     }
 
-    #[test]
-    fn header_state_merge_with_conflict() {
-        let (tmp, _repo) = init_repo();
+    #[apply(formats)]
+    fn header_state_merge_with_conflict(ref_format: RefFormat) {
+        let (tmp, _repo) = init_repo(ref_format);
         let root = tmp.path().display().to_string();
         create_conflicting_branch(&root, tmp.path(), "feature");
 
@@ -1142,9 +1148,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn header_state_revert_with_conflict() {
-        let (tmp, _repo) = init_repo();
+    #[apply(formats)]
+    fn header_state_revert_with_conflict(ref_format: RefFormat) {
+        let (tmp, _repo) = init_repo(ref_format);
         let root = tmp.path().display().to_string();
 
         std::fs::write(tmp.path().join("file.txt"), "aaa\n").unwrap();
@@ -1175,9 +1181,9 @@ mod tests {
         }
     }
 
-    #[test]
-    fn header_state_cherry_pick_conflicts_resolved() {
-        let (tmp, _repo) = init_repo();
+    #[apply(formats)]
+    fn header_state_cherry_pick_conflicts_resolved(ref_format: RefFormat) {
+        let (tmp, _repo) = init_repo(ref_format);
         let root = tmp.path().display().to_string();
         create_conflicting_branch(&root, tmp.path(), "pick-me");
 
@@ -1201,9 +1207,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn header_state_merge_conflicts_resolved() {
-        let (tmp, _repo) = init_repo();
+    #[apply(formats)]
+    fn header_state_merge_conflicts_resolved(ref_format: RefFormat) {
+        let (tmp, _repo) = init_repo(ref_format);
         let root = tmp.path().display().to_string();
         create_conflicting_branch(&root, tmp.path(), "feature");
 
@@ -1226,9 +1232,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn header_state_bisect() {
-        let (tmp, _repo) = init_repo();
+    #[apply(formats)]
+    fn header_state_bisect(ref_format: RefFormat) {
+        let (tmp, _repo) = init_repo(ref_format);
         let root = tmp.path().display().to_string();
 
         std::fs::write(tmp.path().join("file.txt"), "changed\n").unwrap();
@@ -1249,9 +1255,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn header_state_git_am_with_conflict() {
-        let (tmp, _repo) = init_repo();
+    #[apply(formats)]
+    fn header_state_git_am_with_conflict(ref_format: RefFormat) {
+        let (tmp, _repo) = init_repo(ref_format);
         let root = tmp.path().display().to_string();
         create_conflicting_branch(&root, tmp.path(), "patch-src");
 
@@ -1274,9 +1280,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn header_state_rebase_apply_backend_with_conflict() {
-        let (tmp, _repo) = init_repo();
+    #[apply(formats)]
+    fn header_state_rebase_apply_backend_with_conflict(ref_format: RefFormat) {
+        let (tmp, _repo) = init_repo(ref_format);
         let root = tmp.path().display().to_string();
         create_conflicting_branch(&root, tmp.path(), "rebase-src");
 
@@ -1304,58 +1310,58 @@ mod tests {
 
     /// Abbreviation needs a repository. These hashes are invented, so nothing
     /// resolves and the length stays at the floor a fresh repo yields.
-    fn shorten_rebase_lines(input: &str) -> Vec<String> {
-        let (_tmp, repo) = init_repo();
+    fn shorten_rebase_lines(input: &str, ref_format: RefFormat) -> Vec<String> {
+        let (_tmp, repo) = init_repo(ref_format);
         parse_rebase_lines(input, &Abbrev::new(&repo))
     }
 
-    #[test]
-    fn rebase_lines_shortens_full_hash() {
+    #[apply(formats)]
+    fn rebase_lines_shortens_full_hash(ref_format: RefFormat) {
         let input = "pick abcdef1234567890abcdef1234567890abcdef12 Fix the bug\n";
-        let result = shorten_rebase_lines(input);
+        let result = shorten_rebase_lines(input, ref_format);
         assert_eq!(result, ["pick abcdef1 Fix the bug"]);
     }
 
-    #[test]
-    fn rebase_lines_preserves_short_hash() {
+    #[apply(formats)]
+    fn rebase_lines_preserves_short_hash(ref_format: RefFormat) {
         let input = "pick abcdef1 Fix the bug\n";
-        let result = shorten_rebase_lines(input);
+        let result = shorten_rebase_lines(input, ref_format);
         assert_eq!(result, ["pick abcdef1 Fix the bug"]);
     }
 
-    #[test]
-    fn rebase_lines_skips_comments_and_blanks() {
+    #[apply(formats)]
+    fn rebase_lines_skips_comments_and_blanks(ref_format: RefFormat) {
         let input = "# This is a comment\n\npick abcdef1 Do stuff\n";
-        let result = shorten_rebase_lines(input);
+        let result = shorten_rebase_lines(input, ref_format);
         assert_eq!(result, ["pick abcdef1 Do stuff"]);
     }
 
-    #[test]
-    fn rebase_lines_full_hash_no_message() {
+    #[apply(formats)]
+    fn rebase_lines_full_hash_no_message(ref_format: RefFormat) {
         let input = "drop abcdef1234567890abcdef1234567890abcdef12\n";
-        let result = shorten_rebase_lines(input);
+        let result = shorten_rebase_lines(input, ref_format);
         assert_eq!(result, ["drop abcdef1"]);
     }
 
-    #[test]
-    fn rebase_lines_real_done_file_format() {
+    #[apply(formats)]
+    fn rebase_lines_real_done_file_format(ref_format: RefFormat) {
         let input = "\
             pick 4e0411814cb5bd9cf38ee803978966a39df7ac54 # feature 1\n\
             pick 66ec2060c6cb15d5ca911f52502d0f009f17233c # feature 2\n";
-        let result = shorten_rebase_lines(input);
+        let result = shorten_rebase_lines(input, ref_format);
         assert_eq!(
             result,
             ["pick 4e04118 # feature 1", "pick 66ec206 # feature 2"]
         );
     }
 
-    #[test]
-    fn rebase_lines_multiple_ops() {
+    #[apply(formats)]
+    fn rebase_lines_multiple_ops(ref_format: RefFormat) {
         let input = "\
             pick aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa First commit\n\
             fixup bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb Second commit\n\
             reword cccccccccccccccccccccccccccccccccccccccc Third commit\n";
-        let result = shorten_rebase_lines(input);
+        let result = shorten_rebase_lines(input, ref_format);
         assert_eq!(
             result,
             [
@@ -1370,7 +1376,7 @@ mod tests {
 
     /// Creates a repo cloned from a local bare remote so that
     /// `get_upstream_status` has a tracking branch to compare against.
-    fn init_repo_with_remote() -> (TempDir, Repository) {
+    fn init_repo_with_remote(ref_format: RefFormat) -> (TempDir, Repository) {
         let tmp = TempDir::new().unwrap();
 
         let remote_path = tmp.path().join("remote.git");
@@ -1390,14 +1396,15 @@ mod tests {
         git(&["-C", &local, "add", "-A"]);
         git(&["-C", &local, "commit", "-m", "initial"]);
         git(&["-C", &local, "push"]);
+        Repo::new(&local_path).migrate_refs(ref_format);
 
         let repo = Repository::open(&local_path).unwrap();
         (tmp, repo)
     }
 
-    #[test]
-    fn upstream_up_to_date() {
-        let (_tmp, repo) = init_repo_with_remote();
+    #[apply(formats)]
+    fn upstream_up_to_date(ref_format: RefFormat) {
+        let (_tmp, repo) = init_repo_with_remote(ref_format);
         let (status_line, hint) = get_upstream_status(&repo, &repo.head().unwrap(), true)
             .unwrap()
             .unwrap();
@@ -1408,9 +1415,9 @@ mod tests {
         assert_eq!(hint, "");
     }
 
-    #[test]
-    fn upstream_ahead() {
-        let (_tmp, repo) = init_repo_with_remote();
+    #[apply(formats)]
+    fn upstream_ahead(ref_format: RefFormat) {
+        let (_tmp, repo) = init_repo_with_remote(ref_format);
         let local = repo.workdir().unwrap().display().to_string();
         std::fs::write(repo.workdir().unwrap().join("file.txt"), "ahead\n").unwrap();
         git(&["-C", &local, "add", "-A"]);
@@ -1427,9 +1434,9 @@ mod tests {
         assert_eq!(hint, "(use \"git push\" to publish your local commits)");
     }
 
-    #[test]
-    fn upstream_behind() {
-        let (tmp, repo) = init_repo_with_remote();
+    #[apply(formats)]
+    fn upstream_behind(ref_format: RefFormat) {
+        let (tmp, repo) = init_repo_with_remote(ref_format);
         let remote_path = tmp.path().join("remote.git");
 
         let other = tmp.path().join("other");
@@ -1460,9 +1467,9 @@ mod tests {
         assert_eq!(hint, "(use \"git pull\" to update your local branch)");
     }
 
-    #[test]
-    fn upstream_diverged() {
-        let (tmp, repo) = init_repo_with_remote();
+    #[apply(formats)]
+    fn upstream_diverged(ref_format: RefFormat) {
+        let (tmp, repo) = init_repo_with_remote(ref_format);
         let remote_path = tmp.path().join("remote.git");
 
         let other = tmp.path().join("other");
@@ -1500,9 +1507,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn upstream_none_without_remote() {
-        let (_tmp, repo) = init_repo();
+    #[apply(formats)]
+    fn upstream_none_without_remote(ref_format: RefFormat) {
+        let (_tmp, repo) = init_repo(ref_format);
         assert!(
             get_upstream_status(&repo, &repo.head().unwrap(), true)
                 .unwrap()

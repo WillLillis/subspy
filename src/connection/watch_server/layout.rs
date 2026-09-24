@@ -101,7 +101,11 @@ mod tests {
     use std::process::Command;
 
     use pretty_assertions::assert_eq;
+    use rstest_reuse::apply;
     use tempfile::TempDir;
+    use testutil::{RefFormat, Repo};
+
+    use crate::test_support::formats;
 
     fn git(dir: &Path, args: &[&str]) {
         let ok = Command::new("git")
@@ -115,20 +119,21 @@ mod tests {
         assert!(ok, "git {args:?} failed in {}", dir.display());
     }
 
-    fn init_repo(dir: &Path) {
+    fn init_repo(dir: &Path, ref_format: RefFormat) {
         git(dir, &["init", "-q"]);
         git(dir, &["config", "user.email", "t@t"]);
         git(dir, &["config", "user.name", "t"]);
         std::fs::write(dir.join("f.txt"), "x\n").unwrap();
         git(dir, &["add", "."]);
         git(dir, &["commit", "-qm", "init"]);
+        Repo::new(dir).migrate_refs(ref_format);
     }
 
-    #[test]
-    fn normal_repo_git_dir_equals_common_dir() {
+    #[apply(formats)]
+    fn normal_repo_git_dir_equals_common_dir(ref_format: RefFormat) {
         let tmp = TempDir::new().unwrap();
         let root = dunce::canonicalize(tmp.path()).unwrap();
-        init_repo(&root);
+        init_repo(&root, ref_format);
 
         let layout = GitLayout::resolve(&root).unwrap();
         assert_eq!(
@@ -143,12 +148,12 @@ mod tests {
         assert!(layout.git_dir().starts_with(root));
     }
 
-    #[test]
-    fn linked_worktree_splits_git_dir_from_common_dir() {
+    #[apply(formats)]
+    fn linked_worktree_splits_git_dir_from_common_dir(ref_format: RefFormat) {
         let tmp = TempDir::new().unwrap();
         let main = tmp.path().join("main");
         std::fs::create_dir(&main).unwrap();
-        init_repo(&main);
+        init_repo(&main, ref_format);
         git(&main, &["worktree", "add", "-q", "../wt", "HEAD"]);
         let wt = tmp.path().join("wt");
 
@@ -173,8 +178,8 @@ mod tests {
         assert!(!layout.refs_heads().starts_with(layout.git_dir()));
     }
 
-    #[test]
-    fn separate_git_dir_resolves_external_git_dir() {
+    #[apply(formats)]
+    fn separate_git_dir_resolves_external_git_dir(ref_format: RefFormat) {
         let tmp = TempDir::new().unwrap();
         let tmp_path = dunce::canonicalize(tmp.path()).unwrap();
         let work = tmp_path.join("work");
@@ -184,6 +189,7 @@ mod tests {
             &work,
             &["init", "-q", "--separate-git-dir", gitdir.to_str().unwrap()],
         );
+        Repo::new(&work).migrate_refs(ref_format);
 
         let layout = GitLayout::resolve(&work).unwrap();
         assert!(
