@@ -303,7 +303,11 @@ mod tests {
     use super::*;
 
     use pretty_assertions::assert_eq;
+    use rstest_reuse::apply;
     use tempfile::TempDir;
+    use testutil::{RefFormat, Repo};
+
+    use crate::test_support::formats;
 
     fn write_gitmodules(root: &Path, content: &str) {
         std::fs::write(root.join(".gitmodules"), content).unwrap();
@@ -609,7 +613,7 @@ mod tests {
     }
 
     /// Creates a repo with a single submodule checked out on `master`.
-    fn init_repo_with_submodule() -> (TempDir, PathBuf) {
+    fn init_repo_with_submodule(ref_format: RefFormat) -> (TempDir, PathBuf) {
         let tmp = TempDir::new().unwrap();
 
         // Source repo
@@ -649,14 +653,15 @@ mod tests {
             "sub",
         ]);
         git(&["-C", &root.display().to_string(), "commit", "-m", "add sub"]);
+        Repo::new(&root).migrate_refs(ref_format);
 
         let submod_path = root.join("sub");
         (tmp, submod_path)
     }
 
-    #[test]
-    fn resolve_git_dir_submodule() {
-        let (_tmp, submod_path) = init_repo_with_submodule();
+    #[apply(formats)]
+    fn resolve_git_dir_submodule(ref_format: RefFormat) {
+        let (_tmp, submod_path) = init_repo_with_submodule(ref_format);
         let git_dir = resolve_git_dir(&submod_path).expect("should resolve");
         // Submodule .git is a file pointing to ../../.git/modules/sub
         assert!(git_dir.join("HEAD").exists());
@@ -669,17 +674,21 @@ mod tests {
         assert!(resolve_git_dir(tmp.path()).is_none());
     }
 
-    #[test]
-    fn resolve_git_dir_normal_repo() {
+    #[apply(formats)]
+    fn resolve_git_dir_normal_repo(ref_format: RefFormat) {
         let tmp = TempDir::new().unwrap();
         git(&["-C", &tmp.path().display().to_string(), "init"]);
+        Repo::new(tmp.path()).migrate_refs(ref_format);
         let git_dir = resolve_git_dir(tmp.path()).expect("should resolve");
         assert!(git_dir.join("HEAD").exists());
     }
 
+    // `resolve_ref` reads loose refs and `packed-refs`, which only the files
+    // format has.
+
     #[test]
     fn resolve_ref_loose() {
-        let (_tmp, submod_path) = init_repo_with_submodule();
+        let (_tmp, submod_path) = init_repo_with_submodule(RefFormat::Files);
         let git_dir = resolve_git_dir(&submod_path).unwrap();
         let oid = resolve_ref(&git_dir, "refs/heads/master");
         assert!(oid.is_some(), "loose ref should resolve");
@@ -687,22 +696,22 @@ mod tests {
 
     #[test]
     fn resolve_ref_nonexistent() {
-        let (_tmp, submod_path) = init_repo_with_submodule();
+        let (_tmp, submod_path) = init_repo_with_submodule(RefFormat::Files);
         let git_dir = resolve_git_dir(&submod_path).unwrap();
         assert!(resolve_ref(&git_dir, "refs/heads/nonexistent").is_none());
     }
 
-    #[test]
-    fn read_submodule_head_on_branch() {
-        let (_tmp, submod_path) = init_repo_with_submodule();
+    #[apply(formats)]
+    fn read_submodule_head_on_branch(ref_format: RefFormat) {
+        let (_tmp, submod_path) = init_repo_with_submodule(ref_format);
         let (oid, branch) = read_submodule_head(&submod_path);
         assert!(oid.is_some(), "should have an OID");
         assert_eq!(branch.as_deref(), Some("master"));
     }
 
-    #[test]
-    fn read_submodule_head_detached() {
-        let (_tmp, submod_path) = init_repo_with_submodule();
+    #[apply(formats)]
+    fn read_submodule_head_detached(ref_format: RefFormat) {
+        let (_tmp, submod_path) = init_repo_with_submodule(ref_format);
         // Detach HEAD
         git(&[
             "-C",

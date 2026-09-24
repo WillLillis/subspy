@@ -5,9 +5,10 @@
 //! workflow details.
 
 use pretty_assertions::assert_eq;
+use rstest_reuse::apply;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
-use testutil::HarnessBuilder;
+use testutil::{HarnessBuilder, RefFormat, Repo};
 
 use crate::{
     RepoKind,
@@ -16,6 +17,7 @@ use crate::{
         IgnoreSubmodules, IgnoredFiles, LongOpts, OutputFormat, OutputOpts, UntrackedFiles,
         assemble_status, compute_local_statuses, display::display_status,
     },
+    test_support::formats,
 };
 
 use super::fixtures::*;
@@ -355,16 +357,21 @@ fn run_subspy_long(project: &ProjectPath, opts: OutputOpts) -> Vec<u8> {
     .unwrap()
 }
 
-fn assert_snapshot(case_name: &str, got: &[u8]) {
+/// Compares `got` with the committed snapshot, or rewrites the snapshot under
+/// `UPDATE_LONG_SNAPSHOTS`. Snapshots come from the files case alone, and the
+/// reftable case must match them in a normal run.
+fn assert_snapshot(case_name: &str, got: &[u8], ref_format: RefFormat) {
     let path = snapshot_path(case_name);
     let updating = std::env::var_os("UPDATE_LONG_SNAPSHOTS").is_some();
 
     if updating {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).unwrap();
+        if ref_format == RefFormat::Files {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(&path, got)
+                .unwrap_or_else(|e| panic!("failed to write snapshot {}: {e}", path.display()));
         }
-        std::fs::write(&path, got)
-            .unwrap_or_else(|e| panic!("failed to write snapshot {}: {e}", path.display()));
         return;
     }
 
@@ -386,32 +393,34 @@ fn assert_snapshot(case_name: &str, got: &[u8]) {
     );
 }
 
-fn run_case(case: &Case, opts: OutputOpts) {
+fn run_case(case: &Case, opts: OutputOpts, ref_format: RefFormat) {
     match &case.setup {
         Setup::Plain(setup) => {
             let tmp = TempDir::new().unwrap();
             setup(tmp.path());
+            Repo::new(tmp.path()).migrate_refs(ref_format);
             let project = ProjectPath {
                 repo_root: tmp.path().to_path_buf(),
                 effective_cwd: tmp.path().to_path_buf(),
                 kind: RepoKind::Normal,
             };
             let got = run_subspy_long(&project, opts);
-            assert_snapshot(case.name, &got);
+            assert_snapshot(case.name, &got, ref_format);
         }
         Setup::Subdir { setup, subdir } => {
             let tmp = TempDir::new().unwrap();
             setup(tmp.path());
+            Repo::new(tmp.path()).migrate_refs(ref_format);
             let project = ProjectPath {
                 repo_root: tmp.path().to_path_buf(),
                 effective_cwd: tmp.path().join(subdir),
                 kind: RepoKind::Normal,
             };
             let got = run_subspy_long(&project, opts);
-            assert_snapshot(case.name, &got);
+            assert_snapshot(case.name, &got, ref_format);
         }
         Setup::WithSubmodules { names, setup } => {
-            let mut builder = HarnessBuilder::new().no_server();
+            let mut builder = HarnessBuilder::new().ref_format(ref_format).no_server();
             for n in *names {
                 builder = builder.submodule(n);
             }
@@ -423,20 +432,20 @@ fn run_case(case: &Case, opts: OutputOpts) {
                 kind: RepoKind::WithSubmodules,
             };
             let got = run_subspy_long(&project, opts);
-            assert_snapshot(case.name, &got);
+            assert_snapshot(case.name, &got, ref_format);
         }
     }
 }
 
-#[test]
-fn long_snapshots() {
+#[apply(formats)]
+fn long_snapshots(ref_format: RefFormat) {
     for case in CASES {
-        run_case(case, default_opts());
+        run_case(case, default_opts(), ref_format);
     }
 }
 
-#[test]
-fn long_nested_superproject_snapshot() {
+#[apply(formats)]
+fn long_nested_superproject_snapshot(ref_format: RefFormat) {
     // A submodule that is itself a superproject (`SubmoduleWithSubmodules`)
     // computes its submodule statuses locally, like a top-level superproject,
     // so a modified submodule must still show the `(new commits, modified
@@ -444,7 +453,11 @@ fn long_nested_superproject_snapshot() {
     // yields this kind is covered by `cli`'s `get_project_path` tests; this
     // covers the display path for the kind, so it hardcodes the kind like the
     // other submodule cases.
-    let harness = HarnessBuilder::new().no_server().submodule("sub").build();
+    let harness = HarnessBuilder::new()
+        .ref_format(ref_format)
+        .no_server()
+        .submodule("sub")
+        .build();
     setup_submodule_modified_and_new_commits(&harness);
     let project = ProjectPath {
         repo_root: harness.root().path().to_path_buf(),
@@ -452,14 +465,14 @@ fn long_nested_superproject_snapshot() {
         kind: RepoKind::SubmoduleWithSubmodules,
     };
     let got = run_subspy_long(&project, default_opts());
-    assert_snapshot("nested_superproject_modified", &got);
+    assert_snapshot("nested_superproject_modified", &got, ref_format);
 }
 
 /// `advice.statusHints=false` drops the `(use "git ...")` lines from every
 /// section and trims the trailer's parenthetical, leaving titles, file rows,
 /// and the blank lines between sections untouched.
-#[test]
-fn long_no_status_hints_snapshot() {
+#[apply(formats)]
+fn long_no_status_hints_snapshot(ref_format: RefFormat) {
     let case = Case {
         name: "no_status_hints",
         setup: Setup::Plain(setup_all_sections),
@@ -468,13 +481,13 @@ fn long_no_status_hints_snapshot() {
         status_hints: false,
         ..default_opts()
     };
-    run_case(&case, opts);
+    run_case(&case, opts, ref_format);
 }
 
 /// `status.relativePaths=false` keeps paths repo-root-relative even when run
 /// from a subdirectory.
-#[test]
-fn long_relative_paths_off_snapshot() {
+#[apply(formats)]
+fn long_relative_paths_off_snapshot(ref_format: RefFormat) {
     let case = Case {
         name: "relative_paths_off",
         setup: Setup::Subdir {
@@ -486,11 +499,11 @@ fn long_relative_paths_off_snapshot() {
         relative_paths: false,
         ..default_opts()
     };
-    run_case(&case, opts);
+    run_case(&case, opts, ref_format);
 }
 
-#[test]
-fn long_show_stash_snapshot() {
+#[apply(formats)]
+fn long_show_stash_snapshot(ref_format: RefFormat) {
     let case = Case {
         name: "show_stash_trailer",
         setup: Setup::Plain(setup_with_stashes),
@@ -499,11 +512,11 @@ fn long_show_stash_snapshot() {
         show_stash: true,
         ..default_opts()
     };
-    run_case(&case, opts);
+    run_case(&case, opts, ref_format);
 }
 
-#[test]
-fn long_quote_path_false_snapshot() {
+#[apply(formats)]
+fn long_quote_path_false_snapshot(ref_format: RefFormat) {
     // `core.quotePath=false` writes high bytes verbatim instead of
     // C-escaped (`café.txt` rather than `"caf\303\251.txt"`).
     let case = Case {
@@ -514,11 +527,11 @@ fn long_quote_path_false_snapshot() {
         quote_path: false,
         ..default_opts()
     };
-    run_case(&case, opts);
+    run_case(&case, opts, ref_format);
 }
 
-#[test]
-fn long_untracked_all_snapshot() {
+#[apply(formats)]
+fn long_untracked_all_snapshot(ref_format: RefFormat) {
     // `--untracked-files=all` recurses into untracked directories
     // (in contrast to `normal` which collapses them to one entry).
     let case = Case {
@@ -529,14 +542,14 @@ fn long_untracked_all_snapshot() {
         untracked_files: UntrackedFiles::All,
         ..default_opts()
     };
-    run_case(&case, opts);
+    run_case(&case, opts, ref_format);
 }
 
 /// `--untracked-files=no` swaps two lines in: `Untracked files not listed` where
 /// the untracked section would go when the index has something to commit, and a
 /// `nothing to commit` trailer that points at `-u` when it does not.
-#[test]
-fn long_untracked_none_snapshots() {
+#[apply(formats)]
+fn long_untracked_none_snapshots(ref_format: RefFormat) {
     const CASES: &[Case] = &[
         // Staged change, so the "not listed" line and no trailer.
         Case {
@@ -570,12 +583,12 @@ fn long_untracked_none_snapshots() {
         ..default_opts()
     };
     for case in CASES {
-        run_case(case, opts);
+        run_case(case, opts, ref_format);
     }
 }
 
-#[test]
-fn long_ignored_snapshots() {
+#[apply(formats)]
+fn long_ignored_snapshots(ref_format: RefFormat) {
     const CASES: &[Case] = &[
         Case {
             name: "ignored_files",
@@ -591,12 +604,12 @@ fn long_ignored_snapshots() {
         ..default_opts()
     };
     for case in CASES {
-        run_case(case, opts);
+        run_case(case, opts, ref_format);
     }
 }
 
-#[test]
-fn long_no_ahead_behind_snapshots() {
+#[apply(formats)]
+fn long_no_ahead_behind_snapshots(ref_format: RefFormat) {
     // `--no-ahead-behind` only changes output when the upstream is
     // diverged from local; matched-OID cases short-circuit identically
     // in both modes. Cover the ahead and diverged shapes.
@@ -615,6 +628,6 @@ fn long_no_ahead_behind_snapshots() {
         ..default_opts()
     };
     for case in CASES {
-        run_case(case, opts);
+        run_case(case, opts, ref_format);
     }
 }

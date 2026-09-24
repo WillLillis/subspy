@@ -5,9 +5,10 @@
 //! workflow details.
 
 use pretty_assertions::assert_eq;
+use rstest_reuse::apply;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
-use testutil::HarnessBuilder;
+use testutil::{HarnessBuilder, RefFormat, Repo};
 
 use crate::{
     RepoKind,
@@ -16,6 +17,7 @@ use crate::{
         IgnoreSubmodules, IgnoredFiles, OutputFormat, OutputOpts, PorcelainOpts, UntrackedFiles,
         assemble_status, compute_local_statuses, short::display_short,
     },
+    test_support::formats,
 };
 
 use super::fixtures::*;
@@ -317,16 +319,21 @@ fn run_subspy_short(project: &ProjectPath, opts: OutputOpts) -> Vec<u8> {
     .unwrap()
 }
 
-fn assert_snapshot(case_name: &str, got: &[u8]) {
+/// Compares `got` with the committed snapshot, or rewrites the snapshot under
+/// `UPDATE_SHORT_SNAPSHOTS`. Snapshots come from the files case alone, and the
+/// reftable case must match them in a normal run.
+fn assert_snapshot(case_name: &str, got: &[u8], ref_format: RefFormat) {
     let path = snapshot_path(case_name);
     let updating = std::env::var_os("UPDATE_SHORT_SNAPSHOTS").is_some();
 
     if updating {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).unwrap();
+        if ref_format == RefFormat::Files {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(&path, got)
+                .unwrap_or_else(|e| panic!("failed to write snapshot {}: {e}", path.display()));
         }
-        std::fs::write(&path, got)
-            .unwrap_or_else(|e| panic!("failed to write snapshot {}: {e}", path.display()));
         return;
     }
 
@@ -348,36 +355,38 @@ fn assert_snapshot(case_name: &str, got: &[u8]) {
     );
 }
 
-fn run_case(case: &Case) {
-    run_case_with(case, opts_for(case.branch));
+fn run_case(case: &Case, ref_format: RefFormat) {
+    run_case_with(case, opts_for(case.branch), ref_format);
 }
 
-fn run_case_with(case: &Case, opts: OutputOpts) {
+fn run_case_with(case: &Case, opts: OutputOpts, ref_format: RefFormat) {
     match &case.setup {
         Setup::Plain(setup) => {
             let tmp = TempDir::new().unwrap();
             setup(tmp.path());
+            Repo::new(tmp.path()).migrate_refs(ref_format);
             let project = ProjectPath {
                 repo_root: tmp.path().to_path_buf(),
                 effective_cwd: tmp.path().to_path_buf(),
                 kind: RepoKind::Normal,
             };
             let got = run_subspy_short(&project, opts);
-            assert_snapshot(case.name, &got);
+            assert_snapshot(case.name, &got, ref_format);
         }
         Setup::Subdir { setup, subdir } => {
             let tmp = TempDir::new().unwrap();
             setup(tmp.path());
+            Repo::new(tmp.path()).migrate_refs(ref_format);
             let project = ProjectPath {
                 repo_root: tmp.path().to_path_buf(),
                 effective_cwd: tmp.path().join(subdir),
                 kind: RepoKind::Normal,
             };
             let got = run_subspy_short(&project, opts);
-            assert_snapshot(case.name, &got);
+            assert_snapshot(case.name, &got, ref_format);
         }
         Setup::WithSubmodules { names, setup } => {
-            let mut builder = HarnessBuilder::new().no_server();
+            let mut builder = HarnessBuilder::new().ref_format(ref_format).no_server();
             for n in *names {
                 builder = builder.submodule(n);
             }
@@ -389,20 +398,20 @@ fn run_case_with(case: &Case, opts: OutputOpts) {
                 kind: RepoKind::WithSubmodules,
             };
             let got = run_subspy_short(&project, opts);
-            assert_snapshot(case.name, &got);
+            assert_snapshot(case.name, &got, ref_format);
         }
     }
 }
 
-#[test]
-fn short_snapshots() {
+#[apply(formats)]
+fn short_snapshots(ref_format: RefFormat) {
     for case in CASES {
-        run_case(case);
+        run_case(case, ref_format);
     }
 }
 
-#[test]
-fn short_no_ahead_behind_snapshots() {
+#[apply(formats)]
+fn short_no_ahead_behind_snapshots(ref_format: RefFormat) {
     // `--no-ahead-behind` only changes output when the upstream is
     // diverged from local; matched-OID cases short-circuit identically
     // in both modes. The bracket suffix becomes `[different]`.
@@ -423,6 +432,6 @@ fn short_no_ahead_behind_snapshots() {
         ..opts_for(true)
     };
     for case in CASES {
-        run_case_with(case, opts);
+        run_case_with(case, opts, ref_format);
     }
 }

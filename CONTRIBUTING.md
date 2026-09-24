@@ -125,6 +125,7 @@ each with its own renderer. Long stands alone; short + porcelain v1 share an
 |---|---|
 | `testutil/` | Shared test harness crate (`HarnessBuilder`, `TestHarness`, git helpers) |
 | `tests/common/mod.rs` | Re-exports testutil, defines the `formats` template (runs each test once per ref format) and `repeat` (once per ref format, 10x each) |
+| `src/test_support.rs` | The `formats` template for unit tests |
 | `tests/*.rs` | Integration tests organized by git operation (basic, rebase, merge, etc.) |
 | `xtask/` | Maintenance tasks: `rename-score-corpus` generates the clean-room Git rename-score observation corpus |
 
@@ -400,8 +401,9 @@ computation. This is important because the server processes events asynchronousl
 a test that passes once might fail on the 8th run due to timing.
 
 **Ref formats**: Tests that build repositories take a `ref_format` case from the
-`formats` or `repeat` template and pass it to `HarnessBuilder::ref_format` or
-`Repo::with_ref_format`, so each runs once with files refs and once with reftable.
+`formats` or `repeat` template and pass it to `HarnessBuilder::ref_format`, or to
+`Repo::migrate_refs` for a repository they build by hand, so each runs once with
+files refs and once with reftable.
 The reftable case converts each fixture with `git refs migrate`, which needs Git 2.46
 or newer. It is ignored until git2 can read reftable repositories (git2-rs#1259), and
 `cargo test -- --ignored` runs it anyway. `.cargo/config.toml` pins Git's default ref

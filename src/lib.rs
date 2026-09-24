@@ -23,6 +23,8 @@ pub mod reindex;
 pub mod shutdown;
 pub mod status;
 pub mod template;
+#[cfg(test)]
+mod test_support;
 pub mod watch;
 
 pub const DOT_GITMODULES: &str = ".gitmodules";

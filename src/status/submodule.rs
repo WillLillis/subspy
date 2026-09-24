@@ -319,7 +319,11 @@ mod tests {
     use super::*;
 
     use pretty_assertions::assert_eq;
+    use rstest_reuse::apply;
     use tempfile::TempDir;
+    use testutil::{RefFormat, Repo};
+
+    use crate::test_support::formats;
 
     fn git(args: &[&str]) {
         let output = std::process::Command::new("git")
@@ -335,8 +339,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn compute_local_statuses_clean_repo() {
+    #[apply(formats)]
+    fn compute_local_statuses_clean_repo(ref_format: RefFormat) {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path().join("root");
         let sub_src = tmp.path().join("sub_src");
@@ -365,6 +369,7 @@ mod tests {
             "my_sub",
         ]);
         git(&["-C", &root_str, "commit", "-m", "add submodule"]);
+        Repo::new(&root).migrate_refs(ref_format);
 
         let statuses = compute_local_statuses(&root).unwrap();
         assert!(
@@ -373,8 +378,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn compute_local_statuses_dirty_submodule() {
+    #[apply(formats)]
+    fn compute_local_statuses_dirty_submodule(ref_format: RefFormat) {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path().join("root");
         let sub_src = tmp.path().join("sub_src");
@@ -401,6 +406,7 @@ mod tests {
             "my_sub",
         ]);
         git(&["-C", &root_str, "commit", "-m", "add submodule"]);
+        Repo::new(&root).migrate_refs(ref_format);
 
         // Dirty the submodule
         std::fs::write(root.join("my_sub").join("new.txt"), "untracked\n").unwrap();
@@ -414,8 +420,8 @@ mod tests {
     /// Two submodules cloned from the same source repo share a gitlink
     /// OID. Removing one of them must not be misclassified as a rename
     /// onto the surviving one.
-    #[test]
-    fn submodule_changes_same_oid_deletion_not_rename() {
+    #[apply(formats)]
+    fn submodule_changes_same_oid_deletion_not_rename(ref_format: RefFormat) {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path().join("root");
         let sub_src = tmp.path().join("sub_src");
@@ -446,6 +452,7 @@ mod tests {
             ]);
         }
         git(&["-C", &root_str, "commit", "-m", "add submodules"]);
+        Repo::new(&root).migrate_refs(ref_format);
 
         // Stage removal of one of them.
         git(&["-C", &root_str, "rm", "-f", "sub_b"]);

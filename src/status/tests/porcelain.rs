@@ -12,8 +12,9 @@ use std::{
 };
 
 use pretty_assertions::assert_eq;
+use rstest_reuse::apply;
 use tempfile::TempDir;
-use testutil::{HarnessBuilder, Repo, TestHarness};
+use testutil::{HarnessBuilder, RefFormat, Repo, TestHarness};
 
 use crate::{
     RepoKind,
@@ -23,6 +24,7 @@ use crate::{
         UntrackedFiles, assemble_status, compute_local_statuses,
         porcelain_v1::display_porcelain_v1, porcelain_v2::display_porcelain_v2,
     },
+    test_support::formats,
 };
 
 use super::fixtures::*;
@@ -553,11 +555,12 @@ fn git_status_args(opts: OutputOpts) -> Vec<String> {
 }
 
 /// Runs `case` with `opts` against both real git and subspy, asserts equal.
-fn run_case(case: &Case, opts: OutputOpts) {
+fn run_case(case: &Case, opts: OutputOpts, ref_format: RefFormat) {
     match &case.setup {
         CaseSetup::Plain(setup) => {
             let tmp = TempDir::new().unwrap();
             setup(tmp.path());
+            Repo::new(tmp.path()).migrate_refs(ref_format);
             let project = ProjectPath {
                 repo_root: tmp.path().to_path_buf(),
                 effective_cwd: tmp.path().to_path_buf(),
@@ -566,7 +569,7 @@ fn run_case(case: &Case, opts: OutputOpts) {
             assert_outputs_match(&project, case.name, opts);
         }
         CaseSetup::WithSubmodules { names, setup } => {
-            let mut builder = HarnessBuilder::new().no_server();
+            let mut builder = HarnessBuilder::new().ref_format(ref_format).no_server();
             for n in *names {
                 builder = builder.submodule(n);
             }
@@ -676,8 +679,8 @@ const fn opts_with(
     }
 }
 
-#[test]
-fn v1_default() {
+#[apply(formats)]
+fn v1_default(ref_format: RefFormat) {
     let opts = opts_with(
         PorcelainVersion::V1,
         false,
@@ -686,12 +689,12 @@ fn v1_default() {
         IgnoredFiles::No,
     );
     for c in CASES {
-        run_case(c, opts);
+        run_case(c, opts, ref_format);
     }
 }
 
-#[test]
-fn v1_z() {
+#[apply(formats)]
+fn v1_z(ref_format: RefFormat) {
     let opts = opts_with(
         PorcelainVersion::V1,
         true,
@@ -700,12 +703,12 @@ fn v1_z() {
         IgnoredFiles::No,
     );
     for c in CASES {
-        run_case(c, opts);
+        run_case(c, opts, ref_format);
     }
 }
 
-#[test]
-fn v1_branch() {
+#[apply(formats)]
+fn v1_branch(ref_format: RefFormat) {
     let opts = opts_with(
         PorcelainVersion::V1,
         false,
@@ -714,14 +717,14 @@ fn v1_branch() {
         IgnoredFiles::No,
     );
     for c in CASES {
-        run_case(c, opts);
+        run_case(c, opts, ref_format);
     }
 }
 
 /// Headers only exist under `--branch` and their terminator only matters
 /// under `-z`, so the two flags have to be crossed to cover them.
-#[test]
-fn v1_branch_z() {
+#[apply(formats)]
+fn v1_branch_z(ref_format: RefFormat) {
     let opts = opts_with(
         PorcelainVersion::V1,
         true,
@@ -730,12 +733,12 @@ fn v1_branch_z() {
         IgnoredFiles::No,
     );
     for c in CASES {
-        run_case(c, opts);
+        run_case(c, opts, ref_format);
     }
 }
 
-#[test]
-fn v2_default() {
+#[apply(formats)]
+fn v2_default(ref_format: RefFormat) {
     let opts = opts_with(
         PorcelainVersion::V2,
         false,
@@ -744,12 +747,12 @@ fn v2_default() {
         IgnoredFiles::No,
     );
     for c in CASES {
-        run_case(c, opts);
+        run_case(c, opts, ref_format);
     }
 }
 
-#[test]
-fn v2_z() {
+#[apply(formats)]
+fn v2_z(ref_format: RefFormat) {
     let opts = opts_with(
         PorcelainVersion::V2,
         true,
@@ -758,12 +761,12 @@ fn v2_z() {
         IgnoredFiles::No,
     );
     for c in CASES {
-        run_case(c, opts);
+        run_case(c, opts, ref_format);
     }
 }
 
-#[test]
-fn v2_rename_classification_matches_git_score_threshold() {
+#[apply(formats)]
+fn v2_rename_classification_matches_git_score_threshold(ref_format: RefFormat) {
     let opts = opts_with(
         PorcelainVersion::V2,
         false,
@@ -785,12 +788,12 @@ fn v2_rename_classification_matches_git_score_threshold() {
             setup_git_rename_long_record_staged,
         ),
     ] {
-        run_case(&case, opts);
+        run_case(&case, opts, ref_format);
     }
 }
 
-#[test]
-fn v2_z_rename_classification_matches_git_score_threshold() {
+#[apply(formats)]
+fn v2_z_rename_classification_matches_git_score_threshold(ref_format: RefFormat) {
     let opts = opts_with(
         PorcelainVersion::V2,
         true,
@@ -812,7 +815,7 @@ fn v2_z_rename_classification_matches_git_score_threshold() {
             setup_git_rename_long_record_staged,
         ),
     ] {
-        run_case(&case, opts);
+        run_case(&case, opts, ref_format);
     }
 }
 
@@ -820,8 +823,8 @@ fn v2_z_rename_classification_matches_git_score_threshold() {
 /// skipped wholesale (edited renames become add + delete) while exact (same
 /// blob) renames still survive. libgit2 ignores the limit, so subspy reconciles
 /// to match. Live oracle in both v2 and v2 -z (the fixtures set the config).
-#[test]
-fn v2_rename_limit_matches_git() {
+#[apply(formats)]
+fn v2_rename_limit_matches_git(ref_format: RefFormat) {
     for null_terminate in [false, true] {
         let opts = opts_with(
             PorcelainVersion::V2,
@@ -844,13 +847,13 @@ fn v2_rename_limit_matches_git() {
                 setup_rename_limit_drops_exact_staged,
             ),
         ] {
-            run_case(&case, opts);
+            run_case(&case, opts, ref_format);
         }
     }
 }
 
-#[test]
-fn v2_branch() {
+#[apply(formats)]
+fn v2_branch(ref_format: RefFormat) {
     let opts = opts_with(
         PorcelainVersion::V2,
         false,
@@ -859,15 +862,15 @@ fn v2_branch() {
         IgnoredFiles::No,
     );
     for c in CASES {
-        run_case(c, opts);
+        run_case(c, opts, ref_format);
     }
 }
 
 /// git emits `# stash <n>` whenever `--show-stash` is set and the count is
 /// above zero, independent of `--branch`. Most cases have no stashes, so this
 /// arm covers the suppression; `with stashes` covers the emission.
-#[test]
-fn v2_show_stash() {
+#[apply(formats)]
+fn v2_show_stash(ref_format: RefFormat) {
     let opts = OutputOpts {
         format: OutputFormat::Porcelain(PorcelainVersion::V2),
         null_terminate: false,
@@ -882,12 +885,12 @@ fn v2_show_stash() {
         status_hints: true,
     };
     for c in CASES {
-        run_case(c, opts);
+        run_case(c, opts, ref_format);
     }
 }
 
-#[test]
-fn v2_branch_show_stash() {
+#[apply(formats)]
+fn v2_branch_show_stash(ref_format: RefFormat) {
     let opts = OutputOpts {
         format: OutputFormat::Porcelain(PorcelainVersion::V2),
         null_terminate: false,
@@ -902,12 +905,12 @@ fn v2_branch_show_stash() {
         status_hints: true,
     };
     for c in CASES {
-        run_case(c, opts);
+        run_case(c, opts, ref_format);
     }
 }
 
-#[test]
-fn v2_branch_z() {
+#[apply(formats)]
+fn v2_branch_z(ref_format: RefFormat) {
     let opts = opts_with(
         PorcelainVersion::V2,
         true,
@@ -916,12 +919,12 @@ fn v2_branch_z() {
         IgnoredFiles::No,
     );
     for c in CASES {
-        run_case(c, opts);
+        run_case(c, opts, ref_format);
     }
 }
 
-#[test]
-fn v1_untracked_all() {
+#[apply(formats)]
+fn v1_untracked_all(ref_format: RefFormat) {
     let opts = opts_with(
         PorcelainVersion::V1,
         false,
@@ -930,12 +933,12 @@ fn v1_untracked_all() {
         IgnoredFiles::No,
     );
     for c in CASES {
-        run_case(c, opts);
+        run_case(c, opts, ref_format);
     }
 }
 
-#[test]
-fn v2_untracked_all() {
+#[apply(formats)]
+fn v2_untracked_all(ref_format: RefFormat) {
     let opts = opts_with(
         PorcelainVersion::V2,
         false,
@@ -944,14 +947,14 @@ fn v2_untracked_all() {
         IgnoredFiles::No,
     );
     for c in CASES {
-        run_case(c, opts);
+        run_case(c, opts, ref_format);
     }
 }
 
 /// The untracked mode changes what `--ignored` reports. git expands ignored
 /// directories under `-uall` and drops the ignored list entirely under `-uno`.
-#[test]
-fn v1_ignored_untracked_all() {
+#[apply(formats)]
+fn v1_ignored_untracked_all(ref_format: RefFormat) {
     let opts = opts_with(
         PorcelainVersion::V1,
         false,
@@ -960,12 +963,12 @@ fn v1_ignored_untracked_all() {
         IgnoredFiles::Traditional,
     );
     for c in CASES {
-        run_case(c, opts);
+        run_case(c, opts, ref_format);
     }
 }
 
-#[test]
-fn v1_ignored_untracked_none() {
+#[apply(formats)]
+fn v1_ignored_untracked_none(ref_format: RefFormat) {
     let opts = opts_with(
         PorcelainVersion::V1,
         false,
@@ -974,7 +977,7 @@ fn v1_ignored_untracked_none() {
         IgnoredFiles::Traditional,
     );
     for c in CASES {
-        run_case(c, opts);
+        run_case(c, opts, ref_format);
     }
 }
 
@@ -982,8 +985,8 @@ fn v1_ignored_untracked_none() {
 /// tree. Windows stores them as regular files unless the checkout is configured
 /// for them, which is exactly the distinction under test.
 #[cfg(unix)]
-#[test]
-fn symlink_rename_pairing() {
+#[apply(formats)]
+fn symlink_rename_pairing(ref_format: RefFormat) {
     const SYMLINK_CASES: &[Case] = &[
         plain(
             "symlink paired with regular",
@@ -1008,13 +1011,13 @@ fn symlink_rename_pairing() {
             IgnoredFiles::No,
         );
         for c in SYMLINK_CASES {
-            run_case(c, opts);
+            run_case(c, opts, ref_format);
         }
     }
 }
 
-#[test]
-fn v2_ignored_untracked_all() {
+#[apply(formats)]
+fn v2_ignored_untracked_all(ref_format: RefFormat) {
     let opts = opts_with(
         PorcelainVersion::V2,
         false,
@@ -1023,12 +1026,12 @@ fn v2_ignored_untracked_all() {
         IgnoredFiles::Traditional,
     );
     for c in CASES {
-        run_case(c, opts);
+        run_case(c, opts, ref_format);
     }
 }
 
-#[test]
-fn v1_ignored() {
+#[apply(formats)]
+fn v1_ignored(ref_format: RefFormat) {
     let opts = opts_with(
         PorcelainVersion::V1,
         false,
@@ -1037,12 +1040,12 @@ fn v1_ignored() {
         IgnoredFiles::Traditional,
     );
     for c in CASES {
-        run_case(c, opts);
+        run_case(c, opts, ref_format);
     }
 }
 
-#[test]
-fn v2_ignored() {
+#[apply(formats)]
+fn v2_ignored(ref_format: RefFormat) {
     let opts = opts_with(
         PorcelainVersion::V2,
         false,
@@ -1051,12 +1054,12 @@ fn v2_ignored() {
         IgnoredFiles::Traditional,
     );
     for c in CASES {
-        run_case(c, opts);
+        run_case(c, opts, ref_format);
     }
 }
 
-#[test]
-fn v1_quotepath_false() {
+#[apply(formats)]
+fn v1_quotepath_false(ref_format: RefFormat) {
     // `path_with_non_ASCII` is the case where the setting actually
     // changes output: bytes >= 0x80 should be emitted verbatim.
     let opts = OutputOpts {
@@ -1073,12 +1076,12 @@ fn v1_quotepath_false() {
         status_hints: true,
     };
     for c in CASES {
-        run_case(c, opts);
+        run_case(c, opts, ref_format);
     }
 }
 
-#[test]
-fn v2_quotepath_false() {
+#[apply(formats)]
+fn v2_quotepath_false(ref_format: RefFormat) {
     let opts = OutputOpts {
         format: OutputFormat::Porcelain(PorcelainVersion::V2),
         null_terminate: false,
@@ -1093,12 +1096,12 @@ fn v2_quotepath_false() {
         status_hints: true,
     };
     for c in CASES {
-        run_case(c, opts);
+        run_case(c, opts, ref_format);
     }
 }
 
-#[test]
-fn v1_branch_no_ahead_behind() {
+#[apply(formats)]
+fn v1_branch_no_ahead_behind(ref_format: RefFormat) {
     // `[different]` instead of `[ahead/behind N]` for diverged upstreams.
     let opts = OutputOpts {
         format: OutputFormat::Porcelain(PorcelainVersion::V1),
@@ -1114,12 +1117,12 @@ fn v1_branch_no_ahead_behind() {
         status_hints: true,
     };
     for c in CASES {
-        run_case(c, opts);
+        run_case(c, opts, ref_format);
     }
 }
 
-#[test]
-fn v2_branch_no_ahead_behind() {
+#[apply(formats)]
+fn v2_branch_no_ahead_behind(ref_format: RefFormat) {
     // `+? -?` instead of `+N -M` for diverged upstreams.
     let opts = OutputOpts {
         format: OutputFormat::Porcelain(PorcelainVersion::V2),
@@ -1135,7 +1138,7 @@ fn v2_branch_no_ahead_behind() {
         status_hints: true,
     };
     for c in CASES {
-        run_case(c, opts);
+        run_case(c, opts, ref_format);
     }
 }
 
@@ -1147,7 +1150,7 @@ fn v2_branch_no_ahead_behind() {
 // sibling (`tests/foo.rs`), plus a path with a space to exercise
 // quoting interaction with the `../` prefix.
 
-fn setup_subdir_fixture(root: &Path) -> PathBuf {
+fn setup_subdir_fixture(root: &Path, ref_format: RefFormat) -> PathBuf {
     let root_str = root.display().to_string();
     git(&["-C", &root_str, "init", "-q"]);
     git(&["-C", &root_str, "config", "user.email", "t@t"]);
@@ -1165,6 +1168,7 @@ fn setup_subdir_fixture(root: &Path) -> PathBuf {
     std::fs::write(root.join("src/main.rs"), "changed\n").unwrap();
     std::fs::write(root.join("tests/foo.rs"), "changed\n").unwrap();
     std::fs::write(root.join("with space.txt"), "changed\n").unwrap();
+    Repo::new(root).migrate_refs(ref_format);
     root.join("src")
 }
 
@@ -1186,10 +1190,10 @@ fn subdir_project(repo_root: PathBuf, effective_cwd: PathBuf) -> ProjectPath {
     }
 }
 
-#[test]
-fn v1_from_subdir() {
+#[apply(formats)]
+fn v1_from_subdir(ref_format: RefFormat) {
     let tmp = TempDir::new().unwrap();
-    let subdir = setup_subdir_fixture(tmp.path());
+    let subdir = setup_subdir_fixture(tmp.path(), ref_format);
     let project = subdir_project(tmp.path().to_path_buf(), subdir);
     let opts = opts_with(
         PorcelainVersion::V1,
@@ -1201,10 +1205,10 @@ fn v1_from_subdir() {
     assert_outputs_match(&project, "v1 from subdir", opts);
 }
 
-#[test]
-fn v1_z_from_subdir() {
+#[apply(formats)]
+fn v1_z_from_subdir(ref_format: RefFormat) {
     let tmp = TempDir::new().unwrap();
-    let subdir = setup_subdir_fixture(tmp.path());
+    let subdir = setup_subdir_fixture(tmp.path(), ref_format);
     let project = subdir_project(tmp.path().to_path_buf(), subdir);
     let opts = opts_with(
         PorcelainVersion::V1,
@@ -1216,10 +1220,10 @@ fn v1_z_from_subdir() {
     assert_outputs_match(&project, "v1 -z from subdir", opts);
 }
 
-#[test]
-fn v2_from_subdir() {
+#[apply(formats)]
+fn v2_from_subdir(ref_format: RefFormat) {
     let tmp = TempDir::new().unwrap();
-    let subdir = setup_subdir_fixture(tmp.path());
+    let subdir = setup_subdir_fixture(tmp.path(), ref_format);
     let project = subdir_project(tmp.path().to_path_buf(), subdir);
     let opts = opts_with(
         PorcelainVersion::V2,
@@ -1231,10 +1235,10 @@ fn v2_from_subdir() {
     assert_outputs_match(&project, "v2 from subdir", opts);
 }
 
-#[test]
-fn v2_z_from_subdir() {
+#[apply(formats)]
+fn v2_z_from_subdir(ref_format: RefFormat) {
     let tmp = TempDir::new().unwrap();
-    let subdir = setup_subdir_fixture(tmp.path());
+    let subdir = setup_subdir_fixture(tmp.path(), ref_format);
     let project = subdir_project(tmp.path().to_path_buf(), subdir);
     let opts = opts_with(
         PorcelainVersion::V2,
@@ -1252,15 +1256,16 @@ fn v2_z_from_subdir() {
 /// libgit2 reports the row as `subdir/`, a path that *is* the cwd rather than
 /// a descendant of it -- the one case where the cwd-relative form is neither a
 /// suffix nor a `../` walk. Git spells it `./`.
-fn setup_untracked_dir_fixture(root: &Path) -> PathBuf {
+fn setup_untracked_dir_fixture(root: &Path, ref_format: RefFormat) -> PathBuf {
     setup_untracked_in_dir(root);
+    Repo::new(root).migrate_refs(ref_format);
     root.join("subdir")
 }
 
-#[test]
-fn v2_from_inside_untracked_dir() {
+#[apply(formats)]
+fn v2_from_inside_untracked_dir(ref_format: RefFormat) {
     let tmp = TempDir::new().unwrap();
-    let untracked = setup_untracked_dir_fixture(tmp.path());
+    let untracked = setup_untracked_dir_fixture(tmp.path(), ref_format);
     let project = subdir_project(tmp.path().to_path_buf(), untracked);
     let opts = opts_with(
         PorcelainVersion::V2,
@@ -1272,12 +1277,12 @@ fn v2_from_inside_untracked_dir() {
     assert_outputs_match(&project, "v2 from inside untracked dir", opts);
 }
 
-#[test]
-fn v2_z_from_inside_untracked_dir() {
+#[apply(formats)]
+fn v2_z_from_inside_untracked_dir(ref_format: RefFormat) {
     // `-z` paths stay repo-root-relative, so the same row is `subdir/` here.
     // Guards the `./` rewrite against leaking into the stable-identifier mode.
     let tmp = TempDir::new().unwrap();
-    let untracked = setup_untracked_dir_fixture(tmp.path());
+    let untracked = setup_untracked_dir_fixture(tmp.path(), ref_format);
     let project = subdir_project(tmp.path().to_path_buf(), untracked);
     let opts = opts_with(
         PorcelainVersion::V2,
