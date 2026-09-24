@@ -3,12 +3,14 @@
 //! output / exit code against real `git`, exercising the "intercept
 //! when possible, forward to git otherwise" contract.
 
+mod common;
+
 use std::process::{Command, Output};
 
+use common::{HarnessBuilder, RefFormat, Repo};
 use pretty_assertions::assert_eq;
+use rstest_reuse::apply;
 use tempfile::TempDir;
-
-use testutil::HarnessBuilder;
 
 const fn shim_path() -> &'static str {
     env!("CARGO_BIN_EXE_subspy-git")
@@ -47,7 +49,7 @@ fn run_without_git(cwd: &std::path::Path, args: &[&str]) -> Output {
         .expect("spawn shim")
 }
 
-fn init_repo(path: &std::path::Path) {
+fn init_repo(path: &std::path::Path, ref_format: RefFormat) {
     run("git", path, &["init", "-q", "-b", "master"]);
     std::fs::write(path.join("seed.txt"), "seed\n").unwrap();
     run("git", path, &["add", "-A"]);
@@ -64,6 +66,7 @@ fn init_repo(path: &std::path::Path) {
             "initial",
         ],
     );
+    Repo::new(path).migrate_refs(ref_format);
 }
 
 fn assert_outputs_match(cwd: &std::path::Path, args: &[&str]) {
@@ -147,8 +150,8 @@ fn status_on_corrupt_repo_falls_back() {
 /// Happy path: in a normal repo, the shim's intercepted status output
 /// must match real git's, so the fallback machinery hasn't broken the
 /// success case.
-#[test]
-fn status_in_clean_repo_matches_git() {
+#[apply(common::formats)]
+fn status_in_clean_repo_matches_git(ref_format: RefFormat) {
     let tmp = TempDir::new().unwrap();
     run("git", tmp.path(), &["init", "-q", "-b", "master"]);
     std::fs::write(tmp.path().join("file.txt"), "hello\n").unwrap();
@@ -166,14 +169,15 @@ fn status_in_clean_repo_matches_git() {
             "initial",
         ],
     );
+    Repo::new(tmp.path()).migrate_refs(ref_format);
 
     assert_outputs_match(tmp.path(), &["status"]);
 }
 
-#[test]
-fn cwd_pathspec_is_rendered_locally_and_filters_siblings() {
+#[apply(common::formats)]
+fn cwd_pathspec_is_rendered_locally_and_filters_siblings(ref_format: RefFormat) {
     let tmp = TempDir::new().unwrap();
-    init_repo(tmp.path());
+    init_repo(tmp.path(), ref_format);
     let selected = tmp.path().join("selected");
     let sibling = tmp.path().join("selected-sibling");
     std::fs::create_dir_all(&selected).unwrap();
@@ -187,10 +191,10 @@ fn cwd_pathspec_is_rendered_locally_and_filters_siblings() {
     assert_eq!(shim.stdout, b"?? selected/\n");
 }
 
-#[test]
-fn cwd_pathspec_filters_tracked_rows_in_all_formats() {
+#[apply(common::formats)]
+fn cwd_pathspec_filters_tracked_rows_in_all_formats(ref_format: RefFormat) {
     let tmp = TempDir::new().unwrap();
-    init_repo(tmp.path());
+    init_repo(tmp.path(), ref_format);
     let selected = tmp.path().join("selected");
     let sibling = tmp.path().join("selected-sibling");
     std::fs::create_dir_all(&selected).unwrap();
@@ -226,14 +230,14 @@ fn cwd_pathspec_filters_tracked_rows_in_all_formats() {
     }
 }
 
-#[test]
-fn cwd_pathspec_splits_cross_boundary_renames() {
+#[apply(common::formats)]
+fn cwd_pathspec_splits_cross_boundary_renames(ref_format: RefFormat) {
     for (from, to) in [
         ("selected/file.txt", "outside/file.txt"),
         ("outside/file.txt", "selected/file.txt"),
     ] {
         let tmp = TempDir::new().unwrap();
-        init_repo(tmp.path());
+        init_repo(tmp.path(), ref_format);
         let selected = tmp.path().join("selected");
         std::fs::create_dir_all(&selected).unwrap();
         let source = tmp.path().join(from);
@@ -260,10 +264,10 @@ fn cwd_pathspec_splits_cross_boundary_renames() {
     }
 }
 
-#[test]
-fn cwd_pathspec_long_format_is_clean_when_only_sibling_changed() {
+#[apply(common::formats)]
+fn cwd_pathspec_long_format_is_clean_when_only_sibling_changed(ref_format: RefFormat) {
     let tmp = TempDir::new().unwrap();
-    init_repo(tmp.path());
+    init_repo(tmp.path(), ref_format);
     let selected = tmp.path().join("selected");
     std::fs::create_dir_all(&selected).unwrap();
     std::fs::write(selected.join("inside.txt"), "inside\n").unwrap();
@@ -288,10 +292,10 @@ fn cwd_pathspec_long_format_is_clean_when_only_sibling_changed() {
     assert!(String::from_utf8_lossy(&shim.stdout).contains("working tree clean"));
 }
 
-#[test]
-fn recursive_untracked_mode_avoids_collapsed_ancestor_decline() {
+#[apply(common::formats)]
+fn recursive_untracked_mode_avoids_collapsed_ancestor_decline(ref_format: RefFormat) {
     let tmp = TempDir::new().unwrap();
-    init_repo(tmp.path());
+    init_repo(tmp.path(), ref_format);
     let selected = tmp.path().join("untracked/sub");
     std::fs::create_dir_all(&selected).unwrap();
     std::fs::write(selected.join("file.txt"), "untracked\n").unwrap();
@@ -303,9 +307,10 @@ fn recursive_untracked_mode_avoids_collapsed_ancestor_decline() {
     assert_eq!(shim.stdout, b"?? untracked/sub/file.txt\n");
 }
 
-#[test]
-fn cwd_pathspec_filters_submodule_statuses() {
+#[apply(common::formats)]
+fn cwd_pathspec_filters_submodule_statuses(ref_format: RefFormat) {
     let harness = HarnessBuilder::new()
+        .ref_format(ref_format)
         .submodule("selected/inside")
         .submodule("outside")
         .build();
@@ -327,13 +332,16 @@ fn cwd_pathspec_filters_submodule_statuses() {
     }
 }
 
-#[test]
-fn cwd_pathspec_splits_cross_boundary_submodule_renames() {
+#[apply(common::formats)]
+fn cwd_pathspec_splits_cross_boundary_submodule_renames(ref_format: RefFormat) {
     for (from, to) in [
         ("selected/sub", "outside/sub"),
         ("outside/sub", "selected/sub"),
     ] {
-        let harness = HarnessBuilder::new().submodule(from).build();
+        let harness = HarnessBuilder::new()
+            .ref_format(ref_format)
+            .submodule(from)
+            .build();
         harness.root().mkdir(to.rsplit_once('/').unwrap().0);
         harness.root().mv(from, to);
 
@@ -347,10 +355,10 @@ fn cwd_pathspec_splits_cross_boundary_submodule_renames() {
     }
 }
 
-#[test]
-fn collapsed_untracked_ancestor_declines_and_forwards() {
+#[apply(common::formats)]
+fn collapsed_untracked_ancestor_declines_and_forwards(ref_format: RefFormat) {
     let tmp = TempDir::new().unwrap();
-    init_repo(tmp.path());
+    init_repo(tmp.path(), ref_format);
     let selected = tmp.path().join("untracked/sub");
     std::fs::create_dir_all(&selected).unwrap();
     std::fs::write(selected.join("file.txt"), "untracked\n").unwrap();
@@ -366,10 +374,10 @@ fn collapsed_untracked_ancestor_declines_and_forwards() {
     assert!(shim.stdout.is_empty(), "decline leaked partial output");
 }
 
-#[test]
-fn collapsed_ignored_ancestor_is_rendered_locally() {
+#[apply(common::formats)]
+fn collapsed_ignored_ancestor_is_rendered_locally(ref_format: RefFormat) {
     let tmp = TempDir::new().unwrap();
-    init_repo(tmp.path());
+    init_repo(tmp.path(), ref_format);
     std::fs::write(tmp.path().join(".gitignore"), "/ignored/\n").unwrap();
     let selected = tmp.path().join("ignored/sub");
     std::fs::create_dir_all(&selected).unwrap();
@@ -452,10 +460,11 @@ fn status_on_non_utf8_branch_name_does_not_panic() {
 
 /// A non-`status` subcommand has to forward to real git verbatim
 /// regardless of any shim logic.
-#[test]
-fn unknown_subcommand_forwards_to_git() {
+#[apply(common::formats)]
+fn unknown_subcommand_forwards_to_git(ref_format: RefFormat) {
     let tmp = TempDir::new().unwrap();
     run("git", tmp.path(), &["init", "-q", "-b", "master"]);
+    Repo::new(tmp.path()).migrate_refs(ref_format);
 
     assert_outputs_match(tmp.path(), &["--version"]);
 }

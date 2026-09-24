@@ -1,11 +1,15 @@
 mod common;
 
+use common::RefFormat;
 use rstest_reuse::apply;
 use subspy::StatusSummary;
 
 #[apply(common::repeat)]
-fn submodule_git_clean(_run: u32) {
-    let harness = common::HarnessBuilder::new().submodule("sub_a").build();
+fn submodule_git_clean(ref_format: RefFormat, _run: u32) {
+    let harness = common::HarnessBuilder::new()
+        .ref_format(ref_format)
+        .submodule("sub_a")
+        .build();
     harness.assert_all_clean();
 
     // Write an untracked file inside the submodule

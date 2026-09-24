@@ -1,5 +1,6 @@
 mod common;
 
+use common::RefFormat;
 use rstest_reuse::apply;
 use subspy::StatusSummary;
 
@@ -13,8 +14,9 @@ use subspy::StatusSummary;
 // ---------------------------------------------------------------------------
 
 #[apply(common::repeat)]
-fn nested_path_clean_repo(_run: u32) {
+fn nested_path_clean_repo(ref_format: RefFormat, _run: u32) {
     let harness = common::HarnessBuilder::new()
+        .ref_format(ref_format)
         .submodule("libs/core")
         .submodule("vendor/thirdparty")
         .build();
@@ -22,8 +24,9 @@ fn nested_path_clean_repo(_run: u32) {
 }
 
 #[apply(common::repeat)]
-fn nested_path_modified_content(_run: u32) {
+fn nested_path_modified_content(ref_format: RefFormat, _run: u32) {
     let harness = common::HarnessBuilder::new()
+        .ref_format(ref_format)
         .submodule("libs/core")
         .submodule("libs/utils")
         .build();
@@ -37,8 +40,9 @@ fn nested_path_modified_content(_run: u32) {
 }
 
 #[apply(common::repeat)]
-fn nested_path_untracked_content(_run: u32) {
+fn nested_path_untracked_content(ref_format: RefFormat, _run: u32) {
     let harness = common::HarnessBuilder::new()
+        .ref_format(ref_format)
         .submodule("vendor/thirdparty")
         .build();
     harness.assert_all_clean();
@@ -50,8 +54,11 @@ fn nested_path_untracked_content(_run: u32) {
 }
 
 #[apply(common::repeat)]
-fn nested_path_commit_shows_new_commits(_run: u32) {
-    let harness = common::HarnessBuilder::new().submodule("libs/core").build();
+fn nested_path_commit_shows_new_commits(ref_format: RefFormat, _run: u32) {
+    let harness = common::HarnessBuilder::new()
+        .ref_format(ref_format)
+        .submodule("libs/core")
+        .build();
     harness.assert_all_clean();
 
     harness.submodule("libs/core").write("feature.txt", "new\n");
@@ -65,8 +72,11 @@ fn nested_path_commit_shows_new_commits(_run: u32) {
 }
 
 #[apply(common::repeat)]
-fn nested_path_full_stage_commit_cycle(_run: u32) {
-    let harness = common::HarnessBuilder::new().submodule("libs/core").build();
+fn nested_path_full_stage_commit_cycle(ref_format: RefFormat, _run: u32) {
+    let harness = common::HarnessBuilder::new()
+        .ref_format(ref_format)
+        .submodule("libs/core")
+        .build();
     harness.assert_all_clean();
 
     harness.submodule("libs/core").write("feature.txt", "new\n");
@@ -88,8 +98,9 @@ fn nested_path_full_stage_commit_cycle(_run: u32) {
 }
 
 #[apply(common::repeat)]
-fn nested_path_independent_statuses(_run: u32) {
+fn nested_path_independent_statuses(ref_format: RefFormat, _run: u32) {
     let harness = common::HarnessBuilder::new()
+        .ref_format(ref_format)
         .submodule("libs/core")
         .submodule("libs/utils")
         .submodule("vendor/thirdparty")
@@ -121,8 +132,11 @@ fn nested_path_independent_statuses(_run: u32) {
 // ---------------------------------------------------------------------------
 
 #[apply(common::repeat)]
-fn submodule_commit_clears_modified_content(_run: u32) {
-    let harness = common::HarnessBuilder::new().submodule("sub_a").build();
+fn submodule_commit_clears_modified_content(ref_format: RefFormat, _run: u32) {
+    let harness = common::HarnessBuilder::new()
+        .ref_format(ref_format)
+        .submodule("sub_a")
+        .build();
     harness.assert_all_clean();
 
     // Modify a tracked file -> MODIFIED_CONTENT
@@ -135,8 +149,11 @@ fn submodule_commit_clears_modified_content(_run: u32) {
 }
 
 #[apply(common::repeat)]
-fn submodule_commit_clears_staged_files(_run: u32) {
-    let harness = common::HarnessBuilder::new().submodule("sub_a").build();
+fn submodule_commit_clears_staged_files(ref_format: RefFormat, _run: u32) {
+    let harness = common::HarnessBuilder::new()
+        .ref_format(ref_format)
+        .submodule("sub_a")
+        .build();
     harness.assert_all_clean();
 
     // Create and stage a file inside the submodule
@@ -151,8 +168,11 @@ fn submodule_commit_clears_staged_files(_run: u32) {
 }
 
 #[apply(common::repeat)]
-fn submodule_commit_with_remaining_dirty_files(_run: u32) {
-    let harness = common::HarnessBuilder::new().submodule("sub_a").build();
+fn submodule_commit_with_remaining_dirty_files(ref_format: RefFormat, _run: u32) {
+    let harness = common::HarnessBuilder::new()
+        .ref_format(ref_format)
+        .submodule("sub_a")
+        .build();
     harness.assert_all_clean();
 
     // Create two files
@@ -178,8 +198,11 @@ fn submodule_commit_with_remaining_dirty_files(_run: u32) {
 }
 
 #[apply(common::repeat)]
-fn submodule_commit_then_dirty_worktree(_run: u32) {
-    let harness = common::HarnessBuilder::new().submodule("sub_a").build();
+fn submodule_commit_then_dirty_worktree(ref_format: RefFormat, _run: u32) {
+    let harness = common::HarnessBuilder::new()
+        .ref_format(ref_format)
+        .submodule("sub_a")
+        .build();
     harness.assert_all_clean();
 
     // Commit a new file
@@ -197,8 +220,11 @@ fn submodule_commit_then_dirty_worktree(_run: u32) {
 }
 
 #[apply(common::repeat)]
-fn nested_path_submodule_commit_clears_modified_content(_run: u32) {
-    let harness = common::HarnessBuilder::new().submodule("libs/core").build();
+fn nested_path_submodule_commit_clears_modified_content(ref_format: RefFormat, _run: u32) {
+    let harness = common::HarnessBuilder::new()
+        .ref_format(ref_format)
+        .submodule("libs/core")
+        .build();
     harness.assert_all_clean();
 
     // Modify a tracked file in a nested-path submodule
@@ -216,8 +242,9 @@ fn nested_path_submodule_commit_clears_modified_content(_run: u32) {
 }
 
 #[apply(common::repeat)]
-fn nested_path_stage_and_unstage_file(_run: u32) {
+fn nested_path_stage_and_unstage_file(ref_format: RefFormat, _run: u32) {
     let harness = common::HarnessBuilder::new()
+        .ref_format(ref_format)
         .submodule("vendor/thirdparty")
         .build();
     harness.assert_all_clean();
@@ -237,14 +264,18 @@ fn nested_path_stage_and_unstage_file(_run: u32) {
 }
 
 #[apply(common::repeat)]
-fn clean_repo_shows_no_dirty_submodules(_run: u32) {
-    let harness = common::HarnessBuilder::new().submodules(3).build();
+fn clean_repo_shows_no_dirty_submodules(ref_format: RefFormat, _run: u32) {
+    let harness = common::HarnessBuilder::new()
+        .ref_format(ref_format)
+        .submodules(3)
+        .build();
     harness.assert_all_clean();
 }
 
 #[apply(common::repeat)]
-fn modified_file_shows_modified_content(_run: u32) {
+fn modified_file_shows_modified_content(ref_format: RefFormat, _run: u32) {
     let harness = common::HarnessBuilder::new()
+        .ref_format(ref_format)
         .submodule("lib_a")
         .submodule("lib_b")
         .build();
@@ -255,8 +286,11 @@ fn modified_file_shows_modified_content(_run: u32) {
 }
 
 #[apply(common::repeat)]
-fn new_file_shows_untracked_content(_run: u32) {
-    let harness = common::HarnessBuilder::new().submodule("sub_a").build();
+fn new_file_shows_untracked_content(ref_format: RefFormat, _run: u32) {
+    let harness = common::HarnessBuilder::new()
+        .ref_format(ref_format)
+        .submodule("sub_a")
+        .build();
     harness.assert_all_clean();
 
     harness.submodule("sub_a").write("new_file.txt", "hello\n");
@@ -264,8 +298,11 @@ fn new_file_shows_untracked_content(_run: u32) {
 }
 
 #[apply(common::repeat)]
-fn commit_in_submodule_shows_new_commits(_run: u32) {
-    let harness = common::HarnessBuilder::new().submodule("sub_a").build();
+fn commit_in_submodule_shows_new_commits(ref_format: RefFormat, _run: u32) {
+    let harness = common::HarnessBuilder::new()
+        .ref_format(ref_format)
+        .submodule("sub_a")
+        .build();
     harness.assert_all_clean();
 
     harness
@@ -280,8 +317,11 @@ fn commit_in_submodule_shows_new_commits(_run: u32) {
 }
 
 #[apply(common::repeat)]
-fn status_returns_to_clean_after_reverting(_run: u32) {
-    let harness = common::HarnessBuilder::new().submodule("sub_a").build();
+fn status_returns_to_clean_after_reverting(ref_format: RefFormat, _run: u32) {
+    let harness = common::HarnessBuilder::new()
+        .ref_format(ref_format)
+        .submodule("sub_a")
+        .build();
     harness.assert_all_clean();
 
     harness.submodule("sub_a").write("scratch.txt", "temp\n");
@@ -292,8 +332,9 @@ fn status_returns_to_clean_after_reverting(_run: u32) {
 }
 
 #[apply(common::repeat)]
-fn multiple_submodules_independent_statuses(_run: u32) {
+fn multiple_submodules_independent_statuses(ref_format: RefFormat, _run: u32) {
     let harness = common::HarnessBuilder::new()
+        .ref_format(ref_format)
         .submodule("sub_a")
         .submodule("sub_b")
         .submodule("sub_c")
@@ -310,8 +351,11 @@ fn multiple_submodules_independent_statuses(_run: u32) {
 }
 
 #[apply(common::repeat)]
-fn combined_modified_and_untracked_content(_run: u32) {
-    let harness = common::HarnessBuilder::new().submodule("sub_a").build();
+fn combined_modified_and_untracked_content(ref_format: RefFormat, _run: u32) {
+    let harness = common::HarnessBuilder::new()
+        .ref_format(ref_format)
+        .submodule("sub_a")
+        .build();
     harness.assert_all_clean();
 
     // Modify an existing tracked file
@@ -327,8 +371,11 @@ fn combined_modified_and_untracked_content(_run: u32) {
 }
 
 #[apply(common::repeat)]
-fn commit_then_stage_gitlink(_run: u32) {
-    let harness = common::HarnessBuilder::new().submodule("sub_a").build();
+fn commit_then_stage_gitlink(ref_format: RefFormat, _run: u32) {
+    let harness = common::HarnessBuilder::new()
+        .ref_format(ref_format)
+        .submodule("sub_a")
+        .build();
     harness.assert_all_clean();
 
     // Create an untracked file
@@ -349,8 +396,11 @@ fn commit_then_stage_gitlink(_run: u32) {
 }
 
 #[apply(common::repeat)]
-fn parent_commit_clears_staged(_run: u32) {
-    let harness = common::HarnessBuilder::new().submodule("sub_a").build();
+fn parent_commit_clears_staged(ref_format: RefFormat, _run: u32) {
+    let harness = common::HarnessBuilder::new()
+        .ref_format(ref_format)
+        .submodule("sub_a")
+        .build();
     harness.assert_all_clean();
 
     // Commit in submodule so the gitlink diverges from parent's index
@@ -371,8 +421,11 @@ fn parent_commit_clears_staged(_run: u32) {
 }
 
 #[apply(common::repeat)]
-fn parent_commit_clears_staged_with_dirty_worktree(_run: u32) {
-    let harness = common::HarnessBuilder::new().submodule("sub_a").build();
+fn parent_commit_clears_staged_with_dirty_worktree(ref_format: RefFormat, _run: u32) {
+    let harness = common::HarnessBuilder::new()
+        .ref_format(ref_format)
+        .submodule("sub_a")
+        .build();
     harness.assert_all_clean();
 
     // Commit in submodule
@@ -403,8 +456,11 @@ fn parent_commit_clears_staged_with_dirty_worktree(_run: u32) {
 }
 
 #[apply(common::repeat)]
-fn parent_commit_clears_staged_with_staged_submodule_files(_run: u32) {
-    let harness = common::HarnessBuilder::new().submodule("sub_a").build();
+fn parent_commit_clears_staged_with_staged_submodule_files(ref_format: RefFormat, _run: u32) {
+    let harness = common::HarnessBuilder::new()
+        .ref_format(ref_format)
+        .submodule("sub_a")
+        .build();
     harness.assert_all_clean();
 
     // Commit in submodule
@@ -447,8 +503,11 @@ fn parent_commit_clears_staged_with_staged_submodule_files(_run: u32) {
 }
 
 #[apply(common::repeat)]
-fn stage_and_unstage_file(_run: u32) {
-    let harness = common::HarnessBuilder::new().submodule("sub_a").build();
+fn stage_and_unstage_file(ref_format: RefFormat, _run: u32) {
+    let harness = common::HarnessBuilder::new()
+        .ref_format(ref_format)
+        .submodule("sub_a")
+        .build();
     harness.assert_all_clean();
 
     // Create a new file and wait for the watcher to process before staging

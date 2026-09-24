@@ -1,11 +1,15 @@
 mod common;
 
+use common::RefFormat;
 use rstest_reuse::apply;
 use subspy::StatusSummary;
 
 #[apply(common::repeat)]
-fn submodule_reset_soft(_run: u32) {
-    let harness = common::HarnessBuilder::new().submodule("sub_a").build();
+fn submodule_reset_soft(ref_format: RefFormat, _run: u32) {
+    let harness = common::HarnessBuilder::new()
+        .ref_format(ref_format)
+        .submodule("sub_a")
+        .build();
     harness.assert_all_clean();
 
     // Commit a new file in the submodule
@@ -23,8 +27,11 @@ fn submodule_reset_soft(_run: u32) {
 }
 
 #[apply(common::repeat)]
-fn submodule_reset_mixed(_run: u32) {
-    let harness = common::HarnessBuilder::new().submodule("sub_a").build();
+fn submodule_reset_mixed(ref_format: RefFormat, _run: u32) {
+    let harness = common::HarnessBuilder::new()
+        .ref_format(ref_format)
+        .submodule("sub_a")
+        .build();
     harness.assert_all_clean();
 
     // Commit a new file in the submodule
@@ -40,8 +47,11 @@ fn submodule_reset_mixed(_run: u32) {
 }
 
 #[apply(common::repeat)]
-fn submodule_reset_hard(_run: u32) {
-    let harness = common::HarnessBuilder::new().submodule("sub_a").build();
+fn submodule_reset_hard(ref_format: RefFormat, _run: u32) {
+    let harness = common::HarnessBuilder::new()
+        .ref_format(ref_format)
+        .submodule("sub_a")
+        .build();
     harness.assert_all_clean();
 
     // Commit a new file in the submodule
@@ -59,8 +69,11 @@ fn submodule_reset_hard(_run: u32) {
 }
 
 #[apply(common::repeat)]
-fn root_reset_staged_gitlink(_run: u32) {
-    let harness = common::HarnessBuilder::new().submodule("sub_a").build();
+fn root_reset_staged_gitlink(ref_format: RefFormat, _run: u32) {
+    let harness = common::HarnessBuilder::new()
+        .ref_format(ref_format)
+        .submodule("sub_a")
+        .build();
     harness.assert_all_clean();
 
     // Commit in submodule-> creates NEW_COMMITS

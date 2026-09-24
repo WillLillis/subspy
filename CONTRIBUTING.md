@@ -124,7 +124,7 @@ each with its own renderer. Long stands alone; short + porcelain v1 share an
 | Path | Purpose |
 |---|---|
 | `testutil/` | Shared test harness crate (`HarnessBuilder`, `TestHarness`, git helpers) |
-| `tests/common/mod.rs` | Re-exports testutil, defines `repeat` template (runs each test 10x) |
+| `tests/common/mod.rs` | Re-exports testutil, defines the `formats` template (runs each test once per ref format) and `repeat` (once per ref format, 10x each) |
 | `tests/*.rs` | Integration tests organized by git operation (basic, rebase, merge, etc.) |
 | `xtask/` | Maintenance tasks: `rename-score-corpus` generates the clean-room Git rename-score observation corpus |
 
@@ -399,6 +399,14 @@ surface race conditions between filesystem events, watcher notifications, and st
 computation. This is important because the server processes events asynchronously --
 a test that passes once might fail on the 8th run due to timing.
 
+**Ref formats**: Tests that build repositories take a `ref_format` case from the
+`formats` or `repeat` template and pass it to `HarnessBuilder::ref_format` or
+`Repo::with_ref_format`, so each runs once with files refs and once with reftable.
+The reftable case converts each fixture with `git refs migrate`, which needs Git 2.46
+or newer. It is ignored until git2 can read reftable repositories (git2-rs#1259), and
+`cargo test -- --ignored` runs it anyway. `.cargo/config.toml` pins Git's default ref
+format and hash for test runs, so fixtures don't follow the machine's defaults.
+
 **Test harness** (`testutil/`): `HarnessBuilder` creates a temp directory, initializes
 a root repo with submodules (using local source repos, no network), and optionally starts
 the watch server. `TestHarness` provides helpers for file operations, git commands, and
@@ -615,8 +623,9 @@ placement, and each submodule status re-read:
 ```sh
 # <file>:   an integration test under tests/ (e.g. amend, basic, ...)
 # <filter>: a libtest name filter -- a function or a single rstest case
-#           (e.g. some_test::_run_01_1) keeps the single-process trace
-#           readable, which is also why RUST_TEST_THREADS=1.
+#           (e.g. some_test::case_1_files::_run_01_1) keeps the
+#           single-process trace readable, which is also why
+#           RUST_TEST_THREADS=1.
 RUSTFLAGS='--cfg trace_events' RUST_TEST_THREADS=1 \
   cargo test --test <file> -- --nocapture <filter>
 ```

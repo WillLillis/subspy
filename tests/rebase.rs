@@ -1,11 +1,13 @@
 mod common;
 
+use common::RefFormat;
 use rstest_reuse::apply;
 use subspy::StatusSummary;
 
 #[apply(common::repeat)]
-fn root_rebase_without_conflict(_run: u32) {
+fn root_rebase_without_conflict(ref_format: RefFormat, _run: u32) {
     let mut harness = common::HarnessBuilder::new()
+        .ref_format(ref_format)
         .submodule("sub_a")
         .no_server()
         .build();
@@ -34,8 +36,9 @@ fn root_rebase_without_conflict(_run: u32) {
 }
 
 #[apply(common::repeat)]
-fn root_rebase_with_conflict(_run: u32) {
+fn root_rebase_with_conflict(ref_format: RefFormat, _run: u32) {
     let mut harness = common::HarnessBuilder::new()
+        .ref_format(ref_format)
         .submodule("sub_a")
         .no_server()
         .build();
@@ -72,8 +75,9 @@ fn root_rebase_with_conflict(_run: u32) {
 }
 
 #[apply(common::repeat)]
-fn submodule_rebase_without_conflict(_run: u32) {
+fn submodule_rebase_without_conflict(ref_format: RefFormat, _run: u32) {
     let mut harness = common::HarnessBuilder::new()
+        .ref_format(ref_format)
         .submodule("sub_a")
         .no_server()
         .build();
@@ -113,8 +117,9 @@ fn submodule_rebase_without_conflict(_run: u32) {
 }
 
 #[apply(common::repeat)]
-fn submodule_rebase_with_conflict(_run: u32) {
+fn submodule_rebase_with_conflict(ref_format: RefFormat, _run: u32) {
     let mut harness = common::HarnessBuilder::new()
+        .ref_format(ref_format)
         .submodule("sub_a")
         .no_server()
         .build();
@@ -165,8 +170,9 @@ fn submodule_rebase_with_conflict(_run: u32) {
 // A root index update during a paused rebase must refresh cached
 // submodule status.
 #[apply(common::repeat)]
-fn root_rebase_paused_status_updates_after_add(_run: u32) {
+fn root_rebase_paused_status_updates_after_add(ref_format: RefFormat, _run: u32) {
     let mut harness = common::HarnessBuilder::new()
+        .ref_format(ref_format)
         .submodule("sub_a")
         .no_server()
         .build();
@@ -239,8 +245,9 @@ fn root_rebase_paused_status_updates_after_add(_run: u32) {
 }
 
 #[apply(common::repeat)]
-fn root_rebase_preserves_submodule_watch_after_topology_change(_run: u32) {
+fn root_rebase_preserves_submodule_watch_after_topology_change(ref_format: RefFormat, _run: u32) {
     let mut harness = common::HarnessBuilder::new()
+        .ref_format(ref_format)
         .submodule("sub_a")
         .no_server()
         .build();
@@ -285,8 +292,9 @@ fn root_rebase_preserves_submodule_watch_after_topology_change(_run: u32) {
 
 // Exercise watcher churn across a multi-commit root rebase.
 #[apply(common::repeat)]
-fn root_rebase_many_commits_completes(_run: u32) {
+fn root_rebase_many_commits_completes(ref_format: RefFormat, _run: u32) {
     let mut harness = common::HarnessBuilder::new()
+        .ref_format(ref_format)
         .submodule("sub_a")
         .submodule("sub_b")
         .no_server()

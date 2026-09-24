@@ -1,11 +1,13 @@
 mod common;
 
+use common::RefFormat;
 use rstest_reuse::apply;
 use subspy::StatusSummary;
 
 #[apply(common::repeat)]
-fn root_merge_without_conflict(_run: u32) {
+fn root_merge_without_conflict(ref_format: RefFormat, _run: u32) {
     let mut harness = common::HarnessBuilder::new()
+        .ref_format(ref_format)
         .submodule("sub_a")
         .no_server()
         .build();
@@ -33,8 +35,9 @@ fn root_merge_without_conflict(_run: u32) {
 }
 
 #[apply(common::repeat)]
-fn root_merge_with_conflict(_run: u32) {
+fn root_merge_with_conflict(ref_format: RefFormat, _run: u32) {
     let mut harness = common::HarnessBuilder::new()
+        .ref_format(ref_format)
         .submodule("sub_a")
         .no_server()
         .build();
@@ -71,8 +74,9 @@ fn root_merge_with_conflict(_run: u32) {
 }
 
 #[apply(common::repeat)]
-fn submodule_merge_without_conflict(_run: u32) {
+fn submodule_merge_without_conflict(ref_format: RefFormat, _run: u32) {
     let mut harness = common::HarnessBuilder::new()
+        .ref_format(ref_format)
         .submodule("sub_a")
         .no_server()
         .build();
@@ -112,8 +116,9 @@ fn submodule_merge_without_conflict(_run: u32) {
 }
 
 #[apply(common::repeat)]
-fn submodule_merge_with_conflict(_run: u32) {
+fn submodule_merge_with_conflict(ref_format: RefFormat, _run: u32) {
     let mut harness = common::HarnessBuilder::new()
+        .ref_format(ref_format)
         .submodule("sub_a")
         .no_server()
         .build();
