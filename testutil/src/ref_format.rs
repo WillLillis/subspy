@@ -133,4 +133,31 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn submodule_ref_format_reaches_added_submodules_and_skips_the_root() {
+        for (root_format, submodule_format) in [
+            (RefFormat::Files, RefFormat::Reftable),
+            (RefFormat::Reftable, RefFormat::Files),
+        ] {
+            let mut harness = HarnessBuilder::new()
+                .no_server()
+                .ref_format(root_format)
+                .submodule_ref_format(submodule_format)
+                .submodule("sub_a")
+                .build();
+            // git clones a new submodule in the default ref format, so it follows
+            // `submodule_ref_format` as well.
+            harness.add_submodule("sub_b");
+
+            assert_eq!(get_ref_format(harness.root()), root_format.to_string());
+            for name in ["sub_a", "sub_b"] {
+                assert_eq!(
+                    get_ref_format(harness.submodule(name)),
+                    submodule_format.to_string(),
+                    "{name} under a {root_format} root"
+                );
+            }
+        }
+    }
 }

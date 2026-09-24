@@ -383,6 +383,7 @@ Each test file exercises a specific category of git operation against a real wat
 | `lifecycle.rs` | Server shutdown, reindex, IPC version mismatch, stale socket recovery |
 | `worktree.rs` | Linked worktrees, whose `.git` is a file pointing at `<main>/.git/worktrees/<name>/`: status, external ref updates, reindex, and gitlink-moving checkouts |
 | `shim.rs` | End-to-end `subspy-git` interception, forwarding, and byte-for-byte status parity against real Git |
+| `mixed_ref_formats.rs` | Trees whose root and submodules use different ref formats, in both directions |
 
 Tests aim to be deterministic: each test sets up a specific git state, performs an
 operation, and asserts the expected `StatusSummary` flags. The watch server runs
@@ -407,7 +408,10 @@ files refs and once with reftable.
 The reftable case converts each fixture with `git refs migrate`, which needs Git 2.46
 or newer. It is ignored until git2 can read reftable repositories (git2-rs#1259), and
 `cargo test -- --ignored` runs it anyway. `.cargo/config.toml` pins Git's default ref
-format and hash for test runs, so fixtures don't follow the machine's defaults.
+format and hash for test runs, so fixtures don't follow the machine's defaults. Mixed
+trees, a files root with reftable submodules or the reverse, come from
+`HarnessBuilder::submodule_ref_format` and have hand-written tests that carry the same
+ignore reason.
 
 **Test harness** (`testutil/`): `HarnessBuilder` creates a temp directory, initializes
 a root repo with submodules (using local source repos, no network), and optionally starts
