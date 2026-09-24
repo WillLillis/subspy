@@ -1,6 +1,10 @@
-# Too many parallel inotify instances cause tests to fail.
 [env]
+# Too many parallel inotify instances cause tests to fail.
 RUST_TEST_THREADS = "4"
+# Repositories the tests create use files refs and SHA-1 even where git defaults
+# to reftable or SHA-256.
+GIT_DEFAULT_REF_FORMAT = { value = "files", force = true }
+GIT_DEFAULT_HASH = { value = "sha1", force = true }
 
 [alias]
 xtask = "run --package xtask --"
