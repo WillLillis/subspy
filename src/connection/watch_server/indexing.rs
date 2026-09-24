@@ -12,7 +12,7 @@ use crate::{
         watch_server::WatchServer,
     },
     create_progress_bar,
-    git::{submodule_modules_subpath, substatus},
+    git::{path_from_bytes, submodule_modules_subpath, substatus},
     watch::{WatchError, WatchResult},
 };
 
@@ -200,21 +200,11 @@ impl WatchServer {
             return Err(WatchError::NotSubmoduleGitlink(dot_git_path));
         };
 
-        // `modules_subpath` is raw gitfile data, while `Path::join` needs an
-        // `OsStr`. Unix can construct it from those bytes verbatim. Other targets
-        // have no lossless conversion from arbitrary bytes, so require UTF-8.
-        #[cfg(unix)]
-        let suffix = {
-            use std::os::unix::ffi::OsStrExt as _;
-            std::ffi::OsStr::from_bytes(modules_subpath)
-        };
-        #[cfg(not(unix))]
-        let suffix = std::str::from_utf8(modules_subpath).map_err(|error| {
-            WatchError::NonUtf8SubmoduleName {
+        let suffix =
+            path_from_bytes(modules_subpath).map_err(|error| WatchError::NonUtf8SubmoduleName {
                 path: dot_git_path,
                 error,
-            }
-        })?;
+            })?;
 
         Ok(Some(self.root_modules_path.join(suffix)))
     }
