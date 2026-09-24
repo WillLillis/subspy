@@ -215,8 +215,13 @@ changes on disk again. SubSpy never modifies your repository, so the remedy is a
 `subspy reindex`.
 - Not every git configuration option is modeled. When `subspy status` encounters one it cannot honor, it prints a warning
 and reports what it can. The `subspy-git` shim forwards to the git on your path when it can't fully service a request.
+- Reftable repositories are not currently supported
+([`git2-rs`][git2-reftable], [`libgit2`][libgit2-reftable]).
 - On Linux, each watch server consumes inotify watch descriptors (one per watched directory). For very large
 repositories or many concurrent servers, you may need to increase the system limit
 (e.g. `sudo sysctl fs.inotify.max_user_watches=<value>`).
 - On Windows, AF_UNIX sockets are used for IPC, which requires Windows 10 version 1809 (October 2018 Update) or Windows
 Server 2019 or later.
+
+[git2-reftable]: https://github.com/rust-lang/git2-rs/issues/1259
+[libgit2-reftable]: https://github.com/libgit2/libgit2/issues/5352
