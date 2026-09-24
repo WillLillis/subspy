@@ -2,6 +2,7 @@ mod common;
 
 use std::io::BufReader;
 
+use common::RefFormat;
 use pretty_assertions::assert_eq;
 use rstest_reuse::apply;
 
@@ -14,9 +15,12 @@ use subspy::{
     },
 };
 
-#[test]
-fn running_server_is_discoverable_at_derived_endpoint() {
-    let harness = common::HarnessBuilder::new().submodule("sub_a").build();
+#[apply(common::formats)]
+fn running_server_is_discoverable_at_derived_endpoint(ref_format: RefFormat) {
+    let harness = common::HarnessBuilder::new()
+        .ref_format(ref_format)
+        .submodule("sub_a")
+        .build();
     let expected = ipc_socket_path(harness.root().path());
     let endpoints = discover_ipc_endpoints().unwrap();
 
@@ -43,8 +47,11 @@ fn create_stale_socket(path: &std::ffi::OsStr) {
 }
 
 #[apply(common::repeat)]
-fn shutdown_completes_cleanly(_run: u32) {
-    let mut harness = common::HarnessBuilder::new().submodules(2).build();
+fn shutdown_completes_cleanly(ref_format: RefFormat, _run: u32) {
+    let mut harness = common::HarnessBuilder::new()
+        .ref_format(ref_format)
+        .submodules(2)
+        .build();
     harness.assert_all_clean();
     // shutdown() sends the request, waits for ack, and joins the server thread.
     // If any of that fails, it panics.
@@ -52,8 +59,11 @@ fn shutdown_completes_cleanly(_run: u32) {
 }
 
 #[apply(common::repeat)]
-fn reindex_preserves_status(_run: u32) {
-    let harness = common::HarnessBuilder::new().submodule("sub_a").build();
+fn reindex_preserves_status(ref_format: RefFormat, _run: u32) {
+    let harness = common::HarnessBuilder::new()
+        .ref_format(ref_format)
+        .submodule("sub_a")
+        .build();
     harness.assert_all_clean();
 
     harness.submodule("sub_a").write("dirty.txt", "dirty\n");
@@ -73,8 +83,11 @@ fn reindex_preserves_status(_run: u32) {
 }
 
 #[apply(common::repeat)]
-fn version_mismatch_returns_error_and_server_stays_alive(_run: u32) {
-    let harness = common::HarnessBuilder::new().submodule("sub_a").build();
+fn version_mismatch_returns_error_and_server_stays_alive(ref_format: RefFormat, _run: u32) {
+    let harness = common::HarnessBuilder::new()
+        .ref_format(ref_format)
+        .submodule("sub_a")
+        .build();
     harness.assert_all_clean();
 
     // Send a request with a wrong version
@@ -106,11 +119,14 @@ fn version_mismatch_returns_error_and_server_stays_alive(_run: u32) {
 }
 
 #[apply(common::repeat)]
-fn socket_file_removed_after_shutdown(_run: u32) {
+fn socket_file_removed_after_shutdown(ref_format: RefFormat, _run: u32) {
     if !uses_filesystem_sockets() {
         return;
     }
-    let mut harness = common::HarnessBuilder::new().submodule("sub_a").build();
+    let mut harness = common::HarnessBuilder::new()
+        .ref_format(ref_format)
+        .submodule("sub_a")
+        .build();
     harness.assert_all_clean();
 
     let sock_path = ipc_socket_path(harness.root().path());
@@ -127,11 +143,12 @@ fn socket_file_removed_after_shutdown(_run: u32) {
 }
 
 #[apply(common::repeat)]
-fn stale_socket_file_recovered_on_start(_run: u32) {
+fn stale_socket_file_recovered_on_start(ref_format: RefFormat, _run: u32) {
     if !uses_filesystem_sockets() {
         return;
     }
     let mut harness = common::HarnessBuilder::new()
+        .ref_format(ref_format)
         .submodule("sub_a")
         .no_server()
         .build();
@@ -154,8 +171,9 @@ fn stale_socket_file_recovered_on_start(_run: u32) {
 }
 
 #[apply(common::repeat)]
-fn broken_gitmodules_does_not_degrade_statuses(_run: u32) {
+fn broken_gitmodules_does_not_degrade_statuses(ref_format: RefFormat, _run: u32) {
     let harness = common::HarnessBuilder::new()
+        .ref_format(ref_format)
         .submodule("sub_a")
         .submodule("sub_b")
         .build();
@@ -185,8 +203,9 @@ fn broken_gitmodules_does_not_degrade_statuses(_run: u32) {
 /// A server must start and serve real statuses while `.gitmodules` sits in a
 /// genuine merge conflict
 #[apply(common::repeat)]
-fn server_starts_and_serves_with_conflicted_gitmodules(_run: u32) {
+fn server_starts_and_serves_with_conflicted_gitmodules(ref_format: RefFormat, _run: u32) {
     let mut harness = common::HarnessBuilder::new()
+        .ref_format(ref_format)
         .submodule("sub_a")
         .no_server()
         .build();
@@ -236,14 +255,18 @@ fn server_starts_and_serves_with_conflicted_gitmodules(_run: u32) {
 /// gitlink but produces no `.gitmodules` event, so the gitlink drift check
 /// is what must slot and watch it.
 #[apply(common::repeat)]
-fn bare_gitlink_add_detected_by_server(_run: u32) {
-    let harness = common::HarnessBuilder::new().submodule("sub_a").build();
+fn bare_gitlink_add_detected_by_server(ref_format: RefFormat, _run: u32) {
+    let harness = common::HarnessBuilder::new()
+        .ref_format(ref_format)
+        .submodule("sub_a")
+        .build();
     harness.assert_all_clean();
 
     let inner_path = harness.root().path().join("inner");
     std::fs::create_dir(&inner_path).unwrap();
     let inner = common::Repo::init(&inner_path);
     inner.write("f.txt", "x\n").add_all().commit("init");
+    inner.migrate_refs(ref_format);
     harness.root().run_git(&["add", "inner"]);
 
     harness.assert_submodule_status("inner", StatusSummary::STAGED_NEW);

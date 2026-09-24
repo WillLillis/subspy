@@ -1,11 +1,15 @@
 mod common;
 
+use common::RefFormat;
 use rstest_reuse::apply;
 use subspy::StatusSummary;
 
 #[apply(common::repeat)]
-fn add_submodule_detected_by_server(_run: u32) {
-    let mut harness = common::HarnessBuilder::new().submodule("sub_a").build();
+fn add_submodule_detected_by_server(ref_format: RefFormat, _run: u32) {
+    let mut harness = common::HarnessBuilder::new()
+        .ref_format(ref_format)
+        .submodule("sub_a")
+        .build();
     harness.assert_all_clean();
 
     // Dirty sub_a so we can verify it's unaffected by the add operation
@@ -31,8 +35,11 @@ fn add_submodule_detected_by_server(_run: u32) {
 }
 
 #[apply(common::repeat)]
-fn add_submodule_without_commit_detected_by_server(_run: u32) {
-    let mut harness = common::HarnessBuilder::new().submodule("sub_a").build();
+fn add_submodule_without_commit_detected_by_server(ref_format: RefFormat, _run: u32) {
+    let mut harness = common::HarnessBuilder::new()
+        .ref_format(ref_format)
+        .submodule("sub_a")
+        .build();
     harness.assert_all_clean();
 
     // Stage sub_b without committing -- no follow-up git command produces a
@@ -57,8 +64,11 @@ fn add_submodule_without_commit_detected_by_server(_run: u32) {
 // submodule as untracked, not staged. The server must drop the STAGED_NEW flag
 // it cached when the gitlink was first staged.
 #[apply(common::repeat)]
-fn unstage_new_submodule_clears_staged_new(_run: u32) {
-    let mut harness = common::HarnessBuilder::new().submodule("sub_a").build();
+fn unstage_new_submodule_clears_staged_new(ref_format: RefFormat, _run: u32) {
+    let mut harness = common::HarnessBuilder::new()
+        .ref_format(ref_format)
+        .submodule("sub_a")
+        .build();
     harness.assert_all_clean();
 
     harness.add_submodule_no_commit("temporary/some_submod");
@@ -72,8 +82,9 @@ fn unstage_new_submodule_clears_staged_new(_run: u32) {
 }
 
 #[apply(common::repeat)]
-fn remove_submodule_without_commit_detected_by_server(_run: u32) {
+fn remove_submodule_without_commit_detected_by_server(ref_format: RefFormat, _run: u32) {
     let harness = common::HarnessBuilder::new()
+        .ref_format(ref_format)
         .submodule("sub_a")
         .submodule("sub_b")
         .build();
@@ -96,8 +107,9 @@ fn remove_submodule_without_commit_detected_by_server(_run: u32) {
 }
 
 #[apply(common::repeat)]
-fn remove_submodule_without_commit_shows_deleted_path(_run: u32) {
+fn remove_submodule_without_commit_shows_deleted_path(ref_format: RefFormat, _run: u32) {
     let harness = common::HarnessBuilder::new()
+        .ref_format(ref_format)
         .submodule("sub_a")
         .submodule("sub_b")
         .submodule("sub_c")
@@ -118,8 +130,9 @@ fn remove_submodule_without_commit_shows_deleted_path(_run: u32) {
 }
 
 #[apply(common::repeat)]
-fn rm_rf_submodule_workdir_reported_as_deleted(_run: u32) {
+fn rm_rf_submodule_workdir_reported_as_deleted(ref_format: RefFormat, _run: u32) {
     let harness = common::HarnessBuilder::new()
+        .ref_format(ref_format)
         .submodule("sub_a")
         .submodule("sub_b")
         .build();
@@ -147,8 +160,9 @@ fn rm_rf_submodule_workdir_reported_as_deleted(_run: u32) {
 /// `write` is the deterministic part: without a re-armed watch, the server
 /// never sees the new file and the assertion times out.
 #[apply(common::repeat)]
-fn restored_submodule_workdir_is_rewatched(_run: u32) {
+fn restored_submodule_workdir_is_rewatched(ref_format: RefFormat, _run: u32) {
     let harness = common::HarnessBuilder::new()
+        .ref_format(ref_format)
         .submodule("sub_a")
         .submodule("sub_b")
         .build();
@@ -191,8 +205,9 @@ fn restored_submodule_workdir_is_rewatched(_run: u32) {
 /// Without the fix the submodule is dropped from the rebuilt map and the
 /// assertion times out.
 #[apply(common::repeat)]
-fn reindex_over_deleted_workdir_still_reports_deleted(_run: u32) {
+fn reindex_over_deleted_workdir_still_reports_deleted(ref_format: RefFormat, _run: u32) {
     let harness = common::HarnessBuilder::new()
+        .ref_format(ref_format)
         .submodule("sub_a")
         .submodule("sub_b")
         .build();
@@ -210,8 +225,9 @@ fn reindex_over_deleted_workdir_still_reports_deleted(_run: u32) {
 }
 
 #[apply(common::repeat)]
-fn remove_submodule_detected_by_server(_run: u32) {
+fn remove_submodule_detected_by_server(ref_format: RefFormat, _run: u32) {
     let mut harness = common::HarnessBuilder::new()
+        .ref_format(ref_format)
         .submodule("sub_a")
         .submodule("sub_b")
         .build();
@@ -241,8 +257,11 @@ fn remove_submodule_detected_by_server(_run: u32) {
 /// slots don't describe. Whichever side wins the race, `sub_b` must end up slotted
 /// and watched.
 #[apply(common::repeat)]
-fn reindex_against_changed_gitmodules_converges(_run: u32) {
-    let mut harness = common::HarnessBuilder::new().submodule("sub_a").build();
+fn reindex_against_changed_gitmodules_converges(ref_format: RefFormat, _run: u32) {
+    let mut harness = common::HarnessBuilder::new()
+        .ref_format(ref_format)
+        .submodule("sub_a")
+        .build();
     harness.assert_all_clean();
 
     harness.add_submodule_no_commit("sub_b");

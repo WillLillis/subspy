@@ -1,5 +1,6 @@
 mod common;
 
+use common::RefFormat;
 use rstest_reuse::apply;
 use subspy::StatusSummary;
 
@@ -12,8 +13,9 @@ use subspy::StatusSummary;
 // that submodule status is tracked correctly through the resolved git dir.
 
 #[apply(common::repeat)]
-fn worktree_clean(_run: u32) {
+fn worktree_clean(ref_format: RefFormat, _run: u32) {
     let harness = common::HarnessBuilder::new()
+        .ref_format(ref_format)
         .submodule("sub")
         .worktree()
         .build();
@@ -21,8 +23,9 @@ fn worktree_clean(_run: u32) {
 }
 
 #[apply(common::repeat)]
-fn worktree_untracked_content(_run: u32) {
+fn worktree_untracked_content(ref_format: RefFormat, _run: u32) {
     let harness = common::HarnessBuilder::new()
+        .ref_format(ref_format)
         .submodule("sub")
         .worktree()
         .build();
@@ -33,8 +36,9 @@ fn worktree_untracked_content(_run: u32) {
 }
 
 #[apply(common::repeat)]
-fn worktree_modified_content(_run: u32) {
+fn worktree_modified_content(ref_format: RefFormat, _run: u32) {
     let harness = common::HarnessBuilder::new()
+        .ref_format(ref_format)
         .submodule("sub")
         .worktree()
         .build();
@@ -46,8 +50,9 @@ fn worktree_modified_content(_run: u32) {
 }
 
 #[apply(common::repeat)]
-fn worktree_clean_after_revert(_run: u32) {
+fn worktree_clean_after_revert(ref_format: RefFormat, _run: u32) {
     let harness = common::HarnessBuilder::new()
+        .ref_format(ref_format)
         .submodule("sub")
         .worktree()
         .build();
@@ -61,8 +66,9 @@ fn worktree_clean_after_revert(_run: u32) {
 }
 
 #[apply(common::repeat)]
-fn worktree_stage_commit_cycle(_run: u32) {
+fn worktree_stage_commit_cycle(ref_format: RefFormat, _run: u32) {
     let harness = common::HarnessBuilder::new()
+        .ref_format(ref_format)
         .submodule("sub")
         .worktree()
         .build();
@@ -82,13 +88,14 @@ fn worktree_stage_commit_cycle(_run: u32) {
 }
 
 #[apply(common::repeat)]
-fn worktree_external_ref_update_is_seen(_run: u32) {
+fn worktree_external_ref_update_is_seen(ref_format: RefFormat, _run: u32) {
     // A direct ref update (a fetch moving the worktree's branch, a tool, or a
     // raw `git update-ref`) changes only a ref in the shared common dir, with no
     // event in the per-worktree git dir -- so unlike an ordinary commit (which
     // rewrites the index and touches the lock files), only the common-dir refs
     // watch can catch it.
     let harness = common::HarnessBuilder::new()
+        .ref_format(ref_format)
         .submodule("sub")
         .worktree()
         .build();
@@ -113,10 +120,11 @@ fn worktree_external_ref_update_is_seen(_run: u32) {
 }
 
 #[apply(common::repeat)]
-fn worktree_reindex_preserves_status(_run: u32) {
+fn worktree_reindex_preserves_status(ref_format: RefFormat, _run: u32) {
     // Reindex must re-resolve the worktree's git dir and re-place watchers
     // there, not at `<root>/.git`; status survives both reindex modes.
     let harness = common::HarnessBuilder::new()
+        .ref_format(ref_format)
         .submodule("sub")
         .worktree()
         .build();
@@ -128,11 +136,12 @@ fn worktree_reindex_preserves_status(_run: u32) {
 }
 
 #[apply(common::repeat)]
-fn worktree_uninitialized_submodule_is_clean(_run: u32) {
+fn worktree_uninitialized_submodule_is_clean(ref_format: RefFormat, _run: u32) {
     // `git worktree add` does not check out submodules, so the worktree's
     // submodule working tree is absent (no gitlink, empty dir). The server must
     // treat it as clean rather than erroring on the missing `.git`.
     let harness = common::HarnessBuilder::new()
+        .ref_format(ref_format)
         .submodule("sub")
         .worktree_without_submodule_checkout()
         .build();
@@ -145,8 +154,9 @@ fn worktree_uninitialized_submodule_is_clean(_run: u32) {
 // normal repo and a linked worktree.
 
 #[apply(common::repeat)]
-fn worktree_checkout_moving_gitlink(_run: u32) {
+fn worktree_checkout_moving_gitlink(ref_format: RefFormat, _run: u32) {
     let mut harness = common::HarnessBuilder::new()
+        .ref_format(ref_format)
         .submodule("sub")
         .worktree()
         .no_server()
@@ -177,8 +187,9 @@ fn worktree_checkout_moving_gitlink(_run: u32) {
 }
 
 #[apply(common::repeat)]
-fn worktree_root_rebase_completes_clean(_run: u32) {
+fn worktree_root_rebase_completes_clean(ref_format: RefFormat, _run: u32) {
     let mut harness = common::HarnessBuilder::new()
+        .ref_format(ref_format)
         .submodule("sub")
         .worktree()
         .no_server()
@@ -206,8 +217,9 @@ fn worktree_root_rebase_completes_clean(_run: u32) {
 }
 
 #[apply(common::repeat)]
-fn worktree_multiple_submodules(_run: u32) {
+fn worktree_multiple_submodules(ref_format: RefFormat, _run: u32) {
     let harness = common::HarnessBuilder::new()
+        .ref_format(ref_format)
         .submodule("libs/core")
         .submodule("vendor/dep")
         .worktree()

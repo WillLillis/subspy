@@ -1,11 +1,13 @@
 mod common;
 
+use common::RefFormat;
 use rstest_reuse::apply;
 use subspy::StatusSummary;
 
 #[apply(common::repeat)]
-fn checkout_branch_with_different_submodule_commits(_run: u32) {
+fn checkout_branch_with_different_submodule_commits(ref_format: RefFormat, _run: u32) {
     let mut harness = common::HarnessBuilder::new()
+        .ref_format(ref_format)
         .submodule("sub_a")
         .no_server()
         .build();
@@ -51,8 +53,9 @@ fn checkout_branch_with_different_submodule_commits(_run: u32) {
 }
 
 #[apply(common::repeat)]
-fn submodule_update_after_checkout(_run: u32) {
+fn submodule_update_after_checkout(ref_format: RefFormat, _run: u32) {
     let mut harness = common::HarnessBuilder::new()
+        .ref_format(ref_format)
         .submodule("sub_a")
         .no_server()
         .build();
@@ -88,8 +91,9 @@ fn submodule_update_after_checkout(_run: u32) {
 }
 
 #[apply(common::repeat)]
-fn checkout_with_recurse_submodules(_run: u32) {
+fn checkout_with_recurse_submodules(ref_format: RefFormat, _run: u32) {
     let mut harness = common::HarnessBuilder::new()
+        .ref_format(ref_format)
         .submodule("sub_a")
         .no_server()
         .build();
@@ -126,10 +130,11 @@ fn checkout_with_recurse_submodules(_run: u32) {
 /// Same scenario with many submodules to widen the race window between
 /// git's index rename and HEAD update during checkout.
 #[apply(common::repeat)]
-fn checkout_branch_many_submodules(_run: u32) {
+fn checkout_branch_many_submodules(ref_format: RefFormat, _run: u32) {
     const N: usize = 50;
 
     let mut harness = common::HarnessBuilder::new()
+        .ref_format(ref_format)
         .submodules(N)
         .no_server()
         .build();

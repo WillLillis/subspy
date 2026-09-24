@@ -1,11 +1,15 @@
 mod common;
 
+use common::RefFormat;
 use rstest_reuse::apply;
 use subspy::StatusSummary;
 
 #[apply(common::repeat)]
-fn submodule_stash_saves_and_restores_modified(_run: u32) {
-    let harness = common::HarnessBuilder::new().submodule("sub_a").build();
+fn submodule_stash_saves_and_restores_modified(ref_format: RefFormat, _run: u32) {
+    let harness = common::HarnessBuilder::new()
+        .ref_format(ref_format)
+        .submodule("sub_a")
+        .build();
     harness.assert_all_clean();
 
     // Modify a tracked file inside the submodule
@@ -22,8 +26,11 @@ fn submodule_stash_saves_and_restores_modified(_run: u32) {
 }
 
 #[apply(common::repeat)]
-fn submodule_stash_saves_and_restores_untracked(_run: u32) {
-    let harness = common::HarnessBuilder::new().submodule("sub_a").build();
+fn submodule_stash_saves_and_restores_untracked(ref_format: RefFormat, _run: u32) {
+    let harness = common::HarnessBuilder::new()
+        .ref_format(ref_format)
+        .submodule("sub_a")
+        .build();
     harness.assert_all_clean();
 
     // Modify a tracked file AND create an untracked file
