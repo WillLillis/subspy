@@ -10,6 +10,8 @@
 use git2::Repository;
 use rustc_hash::FxHashSet;
 
+use crate::git::path_from_bytes;
+
 /// Paths of reported directory entries git renders nothing for.
 ///
 /// Only entries whose path ends in `/` are considered, so a repository with no
@@ -25,9 +27,9 @@ pub fn phantom_directories(
         let Some(name) = path.strip_suffix(b"/") else {
             continue;
         };
-        let shadows_index_entry = index
-            .as_ref()
-            .is_some_and(|index| index.get_path(bytes_to_path(name), 0).is_some());
+        let shadows_index_entry = index.as_ref().is_some_and(|index| {
+            path_from_bytes(name).is_ok_and(|name| index.get_path(name, 0).is_some())
+        });
         if shadows_index_entry || is_empty_dir(repo, path) {
             phantom.insert(path.to_vec());
         }
@@ -40,21 +42,11 @@ fn is_empty_dir(repo: &Repository, path: &[u8]) -> bool {
     let Some(workdir) = repo.workdir() else {
         return false;
     };
-    let Ok(mut dir) = std::fs::read_dir(workdir.join(bytes_to_path(path))) else {
+    let Ok(path) = path_from_bytes(path) else {
+        return false;
+    };
+    let Ok(mut dir) = std::fs::read_dir(workdir.join(path)) else {
         return false;
     };
     dir.next().is_none()
-}
-
-#[cfg(unix)]
-fn bytes_to_path(bytes: &[u8]) -> &std::path::Path {
-    use std::os::unix::ffi::OsStrExt as _;
-    std::path::Path::new(std::ffi::OsStr::from_bytes(bytes))
-}
-
-#[cfg(windows)]
-fn bytes_to_path(bytes: &[u8]) -> &std::path::Path {
-    // Index paths are UTF-8 on Windows, so a lossy conversion cannot lose
-    // anything a lookup would have matched.
-    std::path::Path::new(std::str::from_utf8(bytes).unwrap_or(""))
 }

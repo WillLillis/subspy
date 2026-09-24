@@ -38,6 +38,25 @@ pub fn gitlink_target(dot_git_bytes: &[u8]) -> Option<&[u8]> {
     dot_git_bytes.trim_ascii().strip_prefix(b"gitdir: ")
 }
 
+/// The path git recorded as raw `bytes`. Unix paths are arbitrary bytes, so
+/// the conversion is a noop.
+///
+/// # Errors
+///
+/// On non-Unix platforms, git records paths as UTF-8, and bytes that are not
+/// UTF-8 return [`std::str::Utf8Error`].
+pub fn path_from_bytes(bytes: &[u8]) -> Result<&Path, std::str::Utf8Error> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt as _;
+        Ok(Path::new(std::ffi::OsStr::from_bytes(bytes)))
+    }
+    #[cfg(not(unix))]
+    {
+        std::str::from_utf8(bytes).map(Path::new)
+    }
+}
+
 /// The submodule "modules subpath" (the path *within* a `.git/modules/`
 /// directory).
 ///
@@ -83,24 +102,10 @@ pub fn gitlink_points_at_worktree(dot_git_bytes: &[u8], repo_root: &Path) -> boo
 }
 
 /// Whether the gitdir named by `target` (raw path bytes, resolved against
-/// `repo_root`) contains git's `commondir` marker. Unix paths are arbitrary
-/// bytes, so the target is used verbatim.
-#[cfg(unix)]
+/// `repo_root`) contains git's `commondir` marker. A target the platform cannot
+/// represent returns `false`.
 fn gitdir_has_commondir(repo_root: &Path, target: &[u8]) -> bool {
-    use std::os::unix::ffi::OsStrExt as _;
-    let gitdir = repo_root.join(std::ffi::OsStr::from_bytes(target));
-    gitdir.join("commondir").exists()
-}
-
-/// Whether the gitdir named by `target` contains Git’s `commondir` marker.
-/// Off Unix, gitdir paths must be valid Unicode, so invalid UTF-8 yields
-/// `false`.
-#[cfg(not(unix))]
-fn gitdir_has_commondir(repo_root: &Path, target: &[u8]) -> bool {
-    let Ok(target) = std::str::from_utf8(target) else {
-        return false;
-    };
-    repo_root.join(target).join("commondir").exists()
+    path_from_bytes(target).is_ok_and(|gitdir| repo_root.join(gitdir).join("commondir").exists())
 }
 
 /// Resolves the `.git` directory for a submodule. Handles both `.git`
@@ -118,15 +123,7 @@ fn resolve_git_dir(submod_path: &Path) -> Option<PathBuf> {
     // and reuse `gitlink_target` rather than re-parsing the `gitdir: ` prefix.
     let bytes = std::fs::read(&dot_git).ok()?;
     let target = gitlink_target(&bytes)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::ffi::OsStrExt as _;
-        Some(submod_path.join(std::ffi::OsStr::from_bytes(target)))
-    }
-    #[cfg(not(unix))]
-    {
-        Some(submod_path.join(std::str::from_utf8(target).ok()?))
-    }
+    Some(submod_path.join(path_from_bytes(target).ok()?))
 }
 
 /// Resolves a direct git ref to an OID by checking loose refs before `packed-refs`.
