@@ -661,6 +661,12 @@ impl Repo {
         self
     }
 
+    /// Declares an invalid repository extension.
+    pub fn declare_unsupported_extension(&self) {
+        self.run_git(&["config", "core.repositoryformatversion", "1"]);
+        self.run_git(&["config", "extensions.subspyUnsupported", "true"]);
+    }
+
     /// Run a git command relative to this repo's root via [`git`], asserting success.
     pub fn run_git(&self, args: &[&str]) {
         let output = self.try_git(args);
