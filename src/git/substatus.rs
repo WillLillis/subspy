@@ -78,9 +78,9 @@ pub fn gitlink_paths(repo: &Repository) -> Result<Vec<String>, git2::Error> {
 ///
 /// # Errors
 ///
-/// Returns [`SubstatusError::Git`] if the superproject index cannot be read or
-/// the submodule's status walk fails, and [`SubstatusError::BareRepository`] when
-/// `repo` has no worktree.
+/// Returns [`SubstatusError::Git`] if the superproject index cannot be read, the
+/// submodule has a `.git` that cannot be opened, or the submodule's status walk
+/// fails, and [`SubstatusError::BareRepository`] when `repo` has no worktree.
 pub fn submodule_status(repo: &Repository, rel: &str) -> Result<StatusSummary, SubstatusError> {
     let commit_file_mode = u32::from(FileMode::Commit);
 
@@ -122,16 +122,17 @@ pub fn submodule_status(repo: &Repository, rel: &str) -> Result<StatusSummary, S
         return Ok(summary | StatusSummary::DELETED_WORKDIR);
     }
 
-    // NO_SEARCH keeps an uninitialized (empty or repo-less) workdir from
-    // resolving upward to the superproject itself. Failing to open is the
-    // uninitialized state.
-    let Ok(sub) = Repository::open_ext(
+    // A workdir without `.git` is an uninitialized submodule, which git skips.
+    // git refuses any other workdir it cannot open, so that is an error here.
+    // `NO_SEARCH` keeps the open from resolving upward to the superproject.
+    if matches!(sub_workdir.join(".git").try_exists(), Ok(false)) {
+        return Ok(summary);
+    }
+    let sub = Repository::open_ext(
         &sub_workdir,
         RepositoryOpenFlags::NO_SEARCH,
         &[] as &[&std::ffi::OsStr],
-    ) else {
-        return Ok(summary);
-    };
+    )?;
 
     // NEW_COMMITS: the submodule's checked-out HEAD differs from the gitlink
     // recorded in the superproject index.
@@ -201,5 +202,72 @@ fn head_tree(repo: &Repository) -> Option<git2::Tree<'_>> {
             log::warn!("failed to read superproject HEAD: {error}");
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rstest_reuse::apply;
+    use testutil::{HarnessBuilder, RefFormat, TestHarness};
+
+    use super::*;
+    use crate::test_support::formats;
+
+    fn harness(ref_format: RefFormat) -> TestHarness {
+        HarnessBuilder::new()
+            .no_server()
+            .ref_format(ref_format)
+            .submodule("sub_a")
+            .build()
+    }
+
+    fn status(harness: &TestHarness) -> Result<StatusSummary, SubstatusError> {
+        let repo = Repository::open(harness.root().path()).unwrap();
+        submodule_status(&repo, "sub_a")
+    }
+
+    #[apply(formats)]
+    fn uninitialized_submodule_is_clean(ref_format: RefFormat) {
+        let harness = harness(ref_format);
+        harness.submodule("sub_a").write("untracked.txt", "x\n");
+        assert_eq!(status(&harness).unwrap(), StatusSummary::UNTRACKED_CONTENT);
+
+        harness
+            .root()
+            .run_git(&["submodule", "deinit", "-q", "-f", "sub_a"]);
+        assert_eq!(status(&harness).unwrap(), StatusSummary::clean());
+    }
+
+    #[apply(formats)]
+    fn gitfile_to_a_missing_gitdir_is_an_error(ref_format: RefFormat) {
+        let harness = harness(ref_format);
+        assert_eq!(status(&harness).unwrap(), StatusSummary::clean());
+
+        let gitdir = harness.root().path().join(".git/modules/sub_a");
+        std::fs::rename(&gitdir, gitdir.with_extension("moved")).unwrap();
+        let result = status(&harness);
+        assert!(matches!(result, Err(SubstatusError::Git(_))), "{result:?}");
+    }
+
+    #[apply(formats)]
+    fn non_repository_git_directory_is_an_error(ref_format: RefFormat) {
+        let harness = harness(ref_format);
+        assert_eq!(status(&harness).unwrap(), StatusSummary::clean());
+
+        let dot_git = harness.submodule("sub_a").path().join(".git");
+        std::fs::remove_file(&dot_git).unwrap();
+        std::fs::create_dir(&dot_git).unwrap();
+        let result = status(&harness);
+        assert!(matches!(result, Err(SubstatusError::Git(_))), "{result:?}");
+    }
+
+    #[apply(formats)]
+    fn unsupported_extension_is_an_error(ref_format: RefFormat) {
+        let harness = harness(ref_format);
+        assert_eq!(status(&harness).unwrap(), StatusSummary::clean());
+
+        harness.submodule("sub_a").declare_unsupported_extension();
+        let result = status(&harness);
+        assert!(matches!(result, Err(SubstatusError::Git(_))), "{result:?}");
     }
 }

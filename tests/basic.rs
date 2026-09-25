@@ -522,3 +522,30 @@ fn stage_and_unstage_file(ref_format: RefFormat, _run: u32) {
     harness.submodule("sub_a").restore_staged("new.txt");
     harness.assert_submodule_status("sub_a", StatusSummary::UNTRACKED_CONTENT);
 }
+
+#[apply(common::repeat)]
+fn unopenable_submodule_is_unreadable_at_startup(ref_format: RefFormat, _run: u32) {
+    let mut harness = common::HarnessBuilder::new()
+        .ref_format(ref_format)
+        .submodule("sub_a")
+        .no_server()
+        .build();
+    harness.submodule("sub_a").declare_unsupported_extension();
+
+    harness.start_server();
+    harness.assert_submodule_status("sub_a", StatusSummary::UNREADABLE);
+}
+
+#[apply(common::repeat)]
+fn submodule_turning_unopenable_is_unreadable(ref_format: RefFormat, _run: u32) {
+    let harness = common::HarnessBuilder::new()
+        .ref_format(ref_format)
+        .submodule("sub_a")
+        .build();
+    harness.assert_all_clean();
+
+    // The workdir write makes the server re-read the submodule.
+    harness.submodule("sub_a").declare_unsupported_extension();
+    harness.submodule("sub_a").write("untracked.txt", "x\n");
+    harness.assert_submodule_status("sub_a", StatusSummary::UNREADABLE);
+}

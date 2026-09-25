@@ -191,7 +191,10 @@ fn gather_info(
                 ),
                 None if need_local_status => {
                     let repo = tl_repo.get_or_try(|| Repository::open(root_path))?;
-                    Some(substatus::submodule_status(repo, &path_str)?)
+                    Some(
+                        substatus::submodule_status(repo, &path_str)
+                            .unwrap_or(StatusSummary::UNREADABLE),
+                    )
                 }
                 None => None,
             };
@@ -313,6 +316,45 @@ mod tests {
     use super::*;
 
     use pretty_assertions::assert_eq;
+    use rstest_reuse::apply;
+    use testutil::{HarnessBuilder, RefFormat};
+
+    use crate::test_support::formats;
+
+    // -- gather_info --
+
+    #[apply(formats)]
+    fn local_status_of_an_unopenable_submodule_is_unreadable(ref_format: RefFormat) {
+        let harness = HarnessBuilder::new()
+            .no_server()
+            .ref_format(ref_format)
+            .submodule("sub_a")
+            .submodule("sub_b")
+            .build();
+        let statuses = || -> Vec<(String, Option<StatusSummary>)> {
+            gather_info(harness.root().path(), None, false, true)
+                .unwrap()
+                .into_iter()
+                .map(|info| (info.name, info.status))
+                .collect()
+        };
+        assert_eq!(
+            statuses(),
+            [
+                ("sub_a".to_owned(), Some(StatusSummary::clean())),
+                ("sub_b".to_owned(), Some(StatusSummary::clean())),
+            ]
+        );
+
+        harness.submodule("sub_a").declare_unsupported_extension();
+        assert_eq!(
+            statuses(),
+            [
+                ("sub_a".to_owned(), Some(StatusSummary::UNREADABLE)),
+                ("sub_b".to_owned(), Some(StatusSummary::clean())),
+            ]
+        );
+    }
 
     // -- short_oid / long_oid --
 
