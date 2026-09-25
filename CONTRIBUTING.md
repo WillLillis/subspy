@@ -155,8 +155,10 @@ bump `IPC_VERSION` and update the expected bytes.
 **`StatusSummary` bitflags over structured types.** Submodule status is a compact `u8`
 bitmask (`MODIFIED_CONTENT`, `UNTRACKED_CONTENT`, `NEW_COMMITS`, `STAGED`, `STAGED_NEW`,
 `DELETED_WORKDIR`, `UNREADABLE`). This keeps IPC payloads small and comparisons cheap.
-`UNREADABLE` is the one pseudo-status: it means the server could not read that submodule,
-not that git reports anything about it.
+`UNREADABLE` is the one pseudo-status: it means the server could not read that submodule.
+The long format lists these submodules in a section of their own. Short and porcelain
+output have no way to mark one, so `subspy status` refuses those formats while any
+submodule is unreadable, and the shim forwards the request to git.
 
 **Rename detection runs in SubSpy, not libgit2.** `build_status_options` leaves
 libgit2's rename detection off; `status/tracked.rs` reconciles renames from the raw

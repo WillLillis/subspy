@@ -4,15 +4,6 @@ use common::RefFormat;
 use rstest_reuse::apply;
 use subspy::StatusSummary;
 
-// ---------------------------------------------------------------------------
-// Multi-component submodule paths
-//
-// Submodule names can contain path separators (e.g. `libs/foo`). These tests
-// ensure the server correctly handles the resulting `.git/modules/libs/foo/`
-// directory structure, including event classification and `refs/heads/`
-// detection.
-// ---------------------------------------------------------------------------
-
 #[apply(common::repeat)]
 fn nested_path_clean_repo(ref_format: RefFormat, _run: u32) {
     let harness = common::HarnessBuilder::new()
