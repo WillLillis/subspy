@@ -97,6 +97,8 @@ pub enum DeclineReason {
     CopyDetectionConfigured,
     /// A config setting subspy cannot honor for this request.
     UnmodeledConfig(config::UnmodeledConfig),
+    /// A submodule's status could not be read.
+    UnreadableSubmodule,
 }
 
 /// Result of a successfully evaluated shim status request.
@@ -114,6 +116,11 @@ pub enum StatusError {
     Git(#[from] git2::Error),
     #[error(transparent)]
     IO(#[from] io::Error),
+    #[error(
+        "Short and porcelain output cannot report unreadable submodules: {}",
+        .0.join(", ")
+    )]
+    UnreadableSubmodules(Vec<String>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -387,6 +394,28 @@ fn unsupported_config(
     None
 }
 
+/// Short and porcelain output have no way to mark a submodule whose status
+/// could not be read, so a request in those formats fails.
+fn reject_unreadable_submodules(
+    format: OutputFormat,
+    submods: &[(String, StatusSummary)],
+) -> StatusResult<()> {
+    match format {
+        OutputFormat::Long => return Ok(()),
+        OutputFormat::Short | OutputFormat::Porcelain(_) => {}
+    }
+    let unreadable: Vec<String> = submods
+        .iter()
+        .filter(|(_, status)| status.contains(StatusSummary::UNREADABLE))
+        .map(|(path, _)| path.clone())
+        .collect();
+    if unreadable.is_empty() {
+        Ok(())
+    } else {
+        Err(StatusError::UnreadableSubmodules(unreadable))
+    }
+}
+
 fn assemble_status_scoped<R>(
     project: &ProjectPath,
     opts: OutputOpts,
@@ -397,8 +426,7 @@ fn assemble_status_scoped<R>(
 ) -> StatusResult<AssembleOutcome<R>> {
     let repo = Repository::open(&project.repo_root)?;
 
-    // The shim declines so git renders the `C` rows itself. `subspy status` has
-    // nothing to forward to, so it warns and reports renames only.
+    // The shim declines so git renders the `C` rows itself.
     let rename_detection = tracked::rename_detection(&repo);
     if let Some(reason) = unsupported_config(&repo, opts.format, rename_detection, can_decline) {
         return Ok(AssembleOutcome::Declined(reason));
@@ -413,9 +441,7 @@ fn assemble_status_scoped<R>(
         cwd_rel_slash.push(b'/');
     }
 
-    // Conflicted submodules need special handling (see below). Both pieces are
-    // gated on this cheap check over the already-computed status set, so a
-    // conflict-free repo never re-reads the index or touches submodule HEADs.
+    // Conflicted submodules need special handling (see below).
     let has_conflicts = non_submod
         .iter()
         .any(|e| e.status().contains(git2::Status::CONFLICTED));
@@ -465,14 +491,21 @@ fn assemble_status_scoped<R>(
     } else {
         submodule_changes(&repo)?
     };
-    // Gitlink renames are paired by `submodule_changes`, not by
-    // `normalized_tracked_rows`, so detection has to be switched off here too.
     if rename_detection == tracked::RenameDetection::Off {
         let unpaired = submod_changes.renamed.drain(..).map(|r| r.old);
         submod_changes.deleted.extend(unpaired);
     }
 
     let raw_submods = submodule_statuses()?;
+    if can_decline
+        && raw_submods
+            .iter()
+            .any(|(_, status)| status.contains(StatusSummary::UNREADABLE))
+    {
+        return Ok(AssembleOutcome::Declined(
+            DeclineReason::UnreadableSubmodule,
+        ));
+    }
     // Per-submodule `submodule.<name>.ignore` only matters when the global
     // flag is unset (or `--ignore-submodules=none`). Any other global value
     // overrides everything, so skip the config scan.
@@ -501,12 +534,7 @@ fn assemble_status_scoped<R>(
         FxHashMap::default()
     };
 
-    if matches!(
-        opts.format,
-        OutputFormat::Short | OutputFormat::Porcelain(_)
-    ) {
-        submods.retain(|(_, status)| !status.contains(StatusSummary::UNREADABLE));
-    }
+    reject_unreadable_submodules(opts.format, &submods)?;
 
     // Path-formatting policy by output mode:
     // - Porcelain v1: repo-root-relative regardless of cwd.
