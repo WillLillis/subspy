@@ -12,7 +12,7 @@ fn main() {
     println!("cargo::rustc-env=SUBSPY_VERSION={version}");
 
     // Keep the recorded commit fresh.
-    for name in ["HEAD", "refs/heads"] {
+    for name in ["HEAD", "refs/heads", "reftable/tables.list"] {
         let Some(path) = git(&["rev-parse", "--git-path", name]) else {
             continue;
         };
