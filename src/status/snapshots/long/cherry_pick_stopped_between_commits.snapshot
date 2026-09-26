@@ -1,0 +1,7 @@
+On branch master
+Cherry-pick currently in progress.
+  (run "git cherry-pick --continue" to continue)
+  (use "git cherry-pick --skip" to skip this patch)
+  (use "git cherry-pick --abort" to cancel the cherry-pick operation)
+
+nothing to commit, working tree clean

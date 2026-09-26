@@ -1,0 +1,7 @@
+On branch master
+Revert currently in progress.
+  (run "git revert --continue" to continue)
+  (use "git revert --skip" to skip this patch)
+  (use "git revert --abort" to cancel the revert operation)
+
+nothing to commit, working tree clean

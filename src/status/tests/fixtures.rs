@@ -815,6 +815,35 @@ pub fn setup_cherry_pick_with_conflict(root: &Path) {
     repo.try_git(&["cherry-pick", "feature"]);
 }
 
+/// A two-commit cherry-pick whose first pick conflicts and is concluded by a
+/// plain `git commit`. That drops `CHERRY_PICK_HEAD` and leaves the second pick
+/// in `sequencer/todo`, so git reports the cherry-pick without naming a commit.
+pub fn setup_cherry_pick_stopped_between_commits(root: &Path) {
+    let repo = Repo::init(root);
+    repo.write("file.txt", "base\n")
+        .add_all()
+        .commit("base")
+        .branch("feature")
+        .write("file.txt", "from feature\n")
+        .add_all()
+        .commit("feature commit")
+        .write("other.txt", "other\n")
+        .add_all()
+        .commit("clean commit")
+        .checkout("master")
+        .write("file.txt", "from master\n")
+        .add_all()
+        .commit("master commit");
+    let output = repo.try_git(&["cherry-pick", "master..feature"]);
+    assert!(
+        !output.status.success(),
+        "expected the first pick to conflict"
+    );
+    repo.write("file.txt", "resolved\n")
+        .add("file.txt")
+        .commit("resolved pick");
+}
+
 /// A merge that conflicts on one path deleted by the other side and on one
 /// added by both, plus a staged file. Two hints turn on this shape: the mixed
 /// delete/modify picks git's "add/rm as appropriate" resolution wording, and the
@@ -866,6 +895,32 @@ pub fn setup_revert_with_conflict(root: &Path) {
         .commit("third");
     let output = repo.try_git(&["revert", "--no-edit", "HEAD~1"]);
     assert!(!output.status.success(), "expected the revert to conflict");
+}
+
+/// The revert counterpart of [`setup_cherry_pick_stopped_between_commits`]:
+/// reverts `second`, which conflicts with `third`, then `clean commit`.
+pub fn setup_revert_stopped_between_commits(root: &Path) {
+    let repo = Repo::init(root);
+    repo.write("file.txt", "base\n")
+        .add_all()
+        .commit("base")
+        .write("other.txt", "other\n")
+        .add_all()
+        .commit("clean commit")
+        .write("file.txt", "second\n")
+        .add_all()
+        .commit("second")
+        .write("file.txt", "third\n")
+        .add_all()
+        .commit("third");
+    let output = repo.try_git(&["revert", "--no-edit", "HEAD~3..HEAD~1"]);
+    assert!(
+        !output.status.success(),
+        "expected the first revert to conflict"
+    );
+    repo.write("file.txt", "resolved\n")
+        .add("file.txt")
+        .commit("resolved revert");
 }
 
 /// Builds a repo whose `master` and `feature` edit the same line, and formats
