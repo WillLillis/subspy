@@ -82,12 +82,14 @@ impl WatchServer {
                     (p.starts_with(&self.root_modules_path)
                         && (p.file_name().is_some_and(|n| {
                             n == "index" || n == "index.lock" || n == "HEAD" || n == "HEAD.lock"
-                        }) || self.is_submod_refs_heads(p)))
+                        }) || self.is_submod_refs_heads(p)
+                            || Self::is_tables_list_update(p, event)))
                         || p.eq(&self.root_index_path)
                         || p.eq(&self.root_lock_path)
                         || p.eq(&self.root_head_path)
                         || p.eq(&self.root_head_lock_path)
                         || p.starts_with(&self.root_refs_heads_path)
+                        || self.is_root_tables_list_update(p, event)
                 });
             if !is_git_dir_rename {
                 return None;
@@ -111,6 +113,7 @@ impl WatchServer {
                     || (event_is_rename(event)
                         && p.file_name()
                             .is_some_and(|n| n == "index.lock" || n == "HEAD.lock"))
+                    || Self::is_tables_list_update(p, event)
             }) || Self::is_rebase_marker_event(event, &self.root_modules_path)
             {
                 Some(EventType::SubmoduleGitOperation)
@@ -140,6 +143,7 @@ impl WatchServer {
                 // submodule branch above.
                 || (event_is_rename(event)
                     && (p.eq(&self.root_lock_path) || p.eq(&self.root_head_lock_path)))
+                || self.is_root_tables_list_update(p, event)
         }) {
             // Git's atomic update pattern for `index`, `HEAD`, and branch
             // refs: write to the `.lock` file, delete the original, rename
@@ -287,6 +291,24 @@ impl WatchServer {
     fn is_index_or_head_path(p: &Path) -> bool {
         p.file_name()
             .is_some_and(|name| name.eq("index") || name.eq("HEAD"))
+    }
+
+    /// Whether `p` is a reftable stack's `tables.list`, which git rewrites on
+    /// every ref update, or its lock file in a rename. The watcher may deliver
+    /// git's `tables.list.lock` -> `tables.list` rename as only the source half.
+    fn is_tables_list_update(p: &Path, event: &notify::Event) -> bool {
+        p.file_name().is_some_and(|n| {
+            n == "tables.list" || (n == "tables.list.lock" && event_is_rename(event))
+        })
+    }
+
+    /// Whether `p` updates the root's reftable stack, this working tree's own or
+    /// the shared one holding branches.
+    fn is_root_tables_list_update(&self, p: &Path, event: &notify::Event) -> bool {
+        Self::is_tables_list_update(p, event)
+            && p.parent().is_some_and(|dir| {
+                dir == self.root_reftable_path || dir == self.root_common_reftable_path
+            })
     }
 
     /// Returns `true` if `p` is a branch ref path under a known submodule's

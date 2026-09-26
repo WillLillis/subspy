@@ -90,6 +90,22 @@ impl WatchServer {
             return Err(e);
         }
 
+        // A reftable repository keeps its shared branches in the `reftable`
+        // stack beside `refs`, which needs the same second watch.
+        let common_reftable = &self.root_common_reftable_path;
+        if !common_reftable.starts_with(&self.root_git_path)
+            && common_reftable.is_dir()
+            && let Err(e) = watch
+                .watcher
+                .watch(common_reftable, notify::RecursiveMode::NonRecursive)
+        {
+            error!(
+                "Failed to watch common-dir reftable stack at `{}`: {e}",
+                common_reftable.display()
+            );
+            return Err(e);
+        }
+
         self.git_watch = Some(watch);
         Ok(())
     }
