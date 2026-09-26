@@ -170,6 +170,10 @@ const CASES: &[Case] = &[
         setup: Setup::Plain(setup_cherry_pick_with_conflict),
     },
     Case {
+        name: "cherry_pick_stopped_between_commits",
+        setup: Setup::Plain(setup_cherry_pick_stopped_between_commits),
+    },
+    Case {
         name: "delete_modify_conflict",
         setup: Setup::Plain(setup_delete_modify_conflict),
     },
@@ -186,6 +190,10 @@ const CASES: &[Case] = &[
     Case {
         name: "revert_with_conflict",
         setup: Setup::Plain(setup_revert_with_conflict),
+    },
+    Case {
+        name: "revert_stopped_between_commits",
+        setup: Setup::Plain(setup_revert_stopped_between_commits),
     },
     Case {
         name: "am_with_conflict",

@@ -466,14 +466,14 @@ struct HeaderState {
 enum HeaderBody {
     Rebase(RebaseInfo),
     CherryPick {
-        short_oid: String,
+        short_oid: Option<String>,
         has_conflicts: bool,
     },
     Merge {
         has_conflicts: bool,
     },
     Revert {
-        short_oid: String,
+        short_oid: Option<String>,
         has_conflicts: bool,
     },
     Bisect {
@@ -536,12 +536,32 @@ fn read_bisect_start(repo: &Repository, abbrev: &Abbrev<'_>) -> String {
     trimmed.to_string()
 }
 
-/// Reads a ref such as `CHERRY_PICK_HEAD` and returns its abbreviated OID, or an
-/// empty string when the ref does not resolve.
-fn read_short_oid(repo: &Repository, refname: &str, abbrev: &Abbrev<'_>) -> String {
+/// Reads a ref such as `CHERRY_PICK_HEAD` and returns its abbreviated OID, or `None`
+/// when the ref does not resolve.
+fn read_short_oid(repo: &Repository, refname: &str, abbrev: &Abbrev<'_>) -> Option<String> {
     repo.refname_to_id(refname)
+        .ok()
         .map(|oid| abbrev.shorten(&oid.to_string()))
-        .unwrap_or_default()
+}
+
+/// The header for a cherry-pick or revert sequence stopped between commits,
+/// which git knows only from the first command in `sequencer/todo`.
+fn stopped_sequence(repo: &Repository, has_conflicts: bool) -> Option<HeaderBody> {
+    let todo = fs::read(repo.path().join("sequencer").join("todo")).ok()?;
+    let command = todo
+        .split(u8::is_ascii_whitespace)
+        .find(|word| !word.is_empty())?;
+    match command {
+        b"pick" | b"p" => Some(HeaderBody::CherryPick {
+            short_oid: None,
+            has_conflicts,
+        }),
+        b"revert" => Some(HeaderBody::Revert {
+            short_oid: None,
+            has_conflicts,
+        }),
+        _ => None,
+    }
 }
 
 /// Determines the repository's current operation state (rebase, merge, cherry-pick,
@@ -630,8 +650,11 @@ fn get_header_state(repo: &Repository, ahead_behind: bool) -> StatusResult<Heade
                 }
             }
         }
-        _ => HeaderBody::Normal {
-            upstream: get_upstream_status(repo, &head_ref, ahead_behind)?,
+        _ => match stopped_sequence(repo, has_conflicts) {
+            Some(body) => body,
+            None => HeaderBody::Normal {
+                upstream: get_upstream_status(repo, &head_ref, ahead_behind)?,
+            },
         },
     };
 
@@ -700,16 +723,21 @@ fn print_header_state(
             short_oid,
             has_conflicts,
         } => {
-            writeln!(
-                stdout,
-                "You are currently cherry-picking commit {short_oid}."
-            )?;
+            match short_oid {
+                Some(short_oid) => writeln!(
+                    stdout,
+                    "You are currently cherry-picking commit {short_oid}."
+                )?,
+                None => writeln!(stdout, "Cherry-pick currently in progress.")?,
+            }
             if status_hints {
                 if *has_conflicts {
                     writeln!(
                         stdout,
                         "  (fix conflicts and run \"git cherry-pick --continue\")"
                     )?;
+                } else if short_oid.is_none() {
+                    writeln!(stdout, "  (run \"git cherry-pick --continue\" to continue)")?;
                 } else {
                     writeln!(
                         stdout,
@@ -746,13 +774,20 @@ fn print_header_state(
             short_oid,
             has_conflicts,
         } => {
-            writeln!(stdout, "You are currently reverting commit {short_oid}.")?;
+            match short_oid {
+                Some(short_oid) => {
+                    writeln!(stdout, "You are currently reverting commit {short_oid}.")?;
+                }
+                None => writeln!(stdout, "Revert currently in progress.")?,
+            }
             if status_hints {
                 if *has_conflicts {
                     writeln!(
                         stdout,
                         "  (fix conflicts and run \"git revert --continue\")"
                     )?;
+                } else if short_oid.is_none() {
+                    writeln!(stdout, "  (run \"git revert --continue\" to continue)")?;
                 } else {
                     writeln!(
                         stdout,
@@ -1121,7 +1156,7 @@ mod tests {
             "expected CherryPick with conflicts, got {state:?}"
         );
         if let HeaderBody::CherryPick { short_oid, .. } = &state.body {
-            assert_eq!(short_oid.len(), FALLBACK_ABBREV);
+            assert_eq!(short_oid.as_deref().map(str::len), Some(FALLBACK_ABBREV));
         }
     }
 
@@ -1176,7 +1211,7 @@ mod tests {
             "expected Revert with conflicts, got {state:?}"
         );
         if let HeaderBody::Revert { short_oid, .. } = &state.body {
-            assert_eq!(short_oid.len(), FALLBACK_ABBREV);
+            assert_eq!(short_oid.as_deref().map(str::len), Some(FALLBACK_ABBREV));
         }
     }
 
@@ -1203,6 +1238,131 @@ mod tests {
                 }
             ),
             "expected CherryPick without conflicts, got {state:?}"
+        );
+    }
+
+    /// git's own abbreviation of `rev`.
+    fn git_short_oid(repo: &Repo, rev: &str) -> String {
+        let output = repo.try_git(&["rev-parse", "--short", rev]);
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    }
+
+    /// The header body for the repository at `root`, opened fresh so libgit2
+    /// reads the index git just wrote.
+    fn header_body(root: &Path) -> HeaderBody {
+        let repo = Repository::open(root).unwrap();
+        get_header_state(&repo, true).unwrap().body
+    }
+
+    /// Concluding the first pick of a two-commit cherry-pick with a plain
+    /// `git commit` drops `CHERRY_PICK_HEAD` and leaves the second pick in
+    /// `sequencer/todo`.
+    #[apply(formats)]
+    fn header_state_cherry_pick_stopped_between_commits(ref_format: RefFormat) {
+        let (tmp, _repo) = init_repo(ref_format);
+        let root = tmp.path().display().to_string();
+        create_conflicting_branch(&root, tmp.path(), "pick-me");
+        let repo = Repo::new(tmp.path());
+        repo.checkout("pick-me")
+            .write("other.txt", "other\n")
+            .add_all()
+            .commit("clean pick")
+            .checkout("master");
+        let picked = git_short_oid(&repo, "pick-me~1");
+
+        let output = repo.try_git(&["cherry-pick", "master..pick-me"]);
+        assert!(
+            !output.status.success(),
+            "expected the first pick to conflict"
+        );
+        let conflicted = HeaderBody::CherryPick {
+            short_oid: Some(picked.clone()),
+            has_conflicts: true,
+        };
+        assert_eq!(header_body(tmp.path()), conflicted);
+
+        repo.write("file.txt", "resolved\n");
+        assert_eq!(header_body(tmp.path()), conflicted);
+
+        repo.add("file.txt");
+        assert_eq!(
+            header_body(tmp.path()),
+            HeaderBody::CherryPick {
+                short_oid: Some(picked),
+                has_conflicts: false,
+            }
+        );
+
+        repo.commit("resolved pick");
+        assert_eq!(
+            header_body(tmp.path()),
+            HeaderBody::CherryPick {
+                short_oid: None,
+                has_conflicts: false,
+            }
+        );
+
+        repo.run_git(&["cherry-pick", "--continue"]);
+        assert_eq!(
+            header_body(tmp.path()),
+            HeaderBody::Normal { upstream: None }
+        );
+    }
+
+    /// The revert counterpart of
+    /// [`header_state_cherry_pick_stopped_between_commits`].
+    #[apply(formats)]
+    fn header_state_revert_stopped_between_commits(ref_format: RefFormat) {
+        let (tmp, _repo) = init_repo(ref_format);
+        let repo = Repo::new(tmp.path());
+        repo.write("other.txt", "other\n")
+            .add_all()
+            .commit("clean revert")
+            .write("file.txt", "second\n")
+            .add_all()
+            .commit("second")
+            .write("file.txt", "third\n")
+            .add_all()
+            .commit("third");
+        let reverted = git_short_oid(&repo, "HEAD~1");
+
+        // Reverts `second`, which conflicts with `third`, then `clean revert`.
+        let output = repo.try_git(&["revert", "--no-edit", "HEAD~3..HEAD~1"]);
+        assert!(
+            !output.status.success(),
+            "expected the first revert to conflict"
+        );
+        let conflicted = HeaderBody::Revert {
+            short_oid: Some(reverted.clone()),
+            has_conflicts: true,
+        };
+        assert_eq!(header_body(tmp.path()), conflicted);
+
+        repo.write("file.txt", "resolved\n");
+        assert_eq!(header_body(tmp.path()), conflicted);
+
+        repo.add("file.txt");
+        assert_eq!(
+            header_body(tmp.path()),
+            HeaderBody::Revert {
+                short_oid: Some(reverted),
+                has_conflicts: false,
+            }
+        );
+
+        repo.commit("resolved revert");
+        assert_eq!(
+            header_body(tmp.path()),
+            HeaderBody::Revert {
+                short_oid: None,
+                has_conflicts: false,
+            }
+        );
+
+        repo.run_git(&["revert", "--continue"]);
+        assert_eq!(
+            header_body(tmp.path()),
+            HeaderBody::Normal { upstream: None }
         );
     }
 
