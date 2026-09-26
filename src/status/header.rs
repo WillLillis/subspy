@@ -536,13 +536,12 @@ fn read_bisect_start(repo: &Repository, abbrev: &Abbrev<'_>) -> String {
     trimmed.to_string()
 }
 
-/// Reads a `*_HEAD` file (e.g. `CHERRY_PICK_HEAD`, `REVERT_HEAD`) and returns
-/// the abbreviated OID, or the full content if it is already shorter.
-fn read_short_oid(repo: &Repository, filename: &str, abbrev: &Abbrev<'_>) -> String {
-    let path = repo.path().join(filename);
-    let oid = fs::read_to_string(path).unwrap_or_default();
-    let trimmed = oid.trim();
-    abbrev.shorten(trimmed)
+/// Reads a ref such as `CHERRY_PICK_HEAD` and returns its abbreviated OID, or an
+/// empty string when the ref does not resolve.
+fn read_short_oid(repo: &Repository, refname: &str, abbrev: &Abbrev<'_>) -> String {
+    repo.refname_to_id(refname)
+        .map(|oid| abbrev.shorten(&oid.to_string()))
+        .unwrap_or_default()
 }
 
 /// Determines the repository's current operation state (rebase, merge, cherry-pick,
