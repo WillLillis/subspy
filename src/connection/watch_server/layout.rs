@@ -83,6 +83,19 @@ impl GitLayout {
     pub(super) fn refs_heads(&self) -> PathBuf {
         self.common_dir.join("refs").join("heads")
     }
+
+    /// `<git_dir>/reftable`: a reftable repository's ref stack for this working
+    /// tree. A linked worktree keeps only its own refs, such as its HEAD, here.
+    pub(super) fn reftable(&self) -> PathBuf {
+        self.git_dir.join("reftable")
+    }
+
+    /// `<common_dir>/reftable`: a reftable repository's stack holding the branches,
+    /// shared across worktrees. The same as [`Self::reftable`] for the main working
+    /// tree.
+    pub(super) fn common_reftable(&self) -> PathBuf {
+        self.common_dir.join("reftable")
+    }
 }
 
 #[cfg(test)]

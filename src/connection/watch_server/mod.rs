@@ -148,6 +148,11 @@ struct WatchServer {
     root_head_lock_path: PathBuf,
     /// `<common_dir>/refs/heads`, containing branch refs shared by linked worktrees
     root_refs_heads_path: PathBuf,
+    /// `<git_dir>/reftable`, a reftable repository's ref stack for this working tree
+    root_reftable_path: PathBuf,
+    /// `<common_dir>/reftable`, the reftable stack holding branches shared by linked
+    /// worktrees
+    root_common_reftable_path: PathBuf,
 
     /// Receiver for control messages from the listener thread
     control_rx: crossbeam_channel::Receiver<ControlMessage>,
@@ -187,6 +192,8 @@ impl WatchServer {
         let root_lock_path = layout.index_lock();
         let root_head_lock_path = layout.head_lock();
         let root_refs_heads_path = layout.refs_heads();
+        let root_reftable_path = layout.reftable();
+        let root_common_reftable_path = layout.common_reftable();
 
         Self {
             git_watch: None,
@@ -206,6 +213,8 @@ impl WatchServer {
             root_lock_path,
             root_head_lock_path,
             root_refs_heads_path,
+            root_reftable_path,
+            root_common_reftable_path,
             control_rx,
             submod_statuses: Arc::new(Mutex::new(BTreeMap::new())),
             progress_subscribers: Arc::new(Mutex::new(FxHashMap::default())),
