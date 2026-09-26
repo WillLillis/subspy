@@ -21,7 +21,7 @@ use crate::{
     cli::ProjectPath,
     status::{
         IgnoreSubmodules, IgnoredFiles, OutputFormat, OutputOpts, PorcelainOpts, PorcelainVersion,
-        UntrackedFiles, assemble_status, compute_local_statuses,
+        StatusError, UntrackedFiles, assemble_status, compute_local_statuses,
         porcelain_v1::display_porcelain_v1, porcelain_v2::display_porcelain_v2,
     },
     test_support::formats,
@@ -389,6 +389,13 @@ const CASES: &[Case] = &[
         "submodule gitlink conflict dirty",
         &["sub"],
         setup_submodule_gitlink_conflict_dirty,
+    ),
+    // git never opens a submodule that `ignore=all` hides, so an unreadable
+    // one leaves the output as if it were clean.
+    submodule_case(
+        "submodule unreadable but ignored",
+        &["sub"],
+        setup_submodule_unreadable_ignored,
     ),
     // Upstream tracking. Only `--branch` output diverges per upstream
     // state, so these exist primarily to exercise the `v1_branch` /
@@ -1292,4 +1299,56 @@ fn v2_z_from_inside_untracked_dir(ref_format: RefFormat) {
         IgnoredFiles::No,
     );
     assert_outputs_match(&project, "v2 -z from inside untracked dir", opts);
+}
+
+/// git refuses a submodule it cannot open, and porcelain output refuses one
+/// whose status could not be read, also when its gitlink is conflicted or
+/// renamed.
+#[apply(formats)]
+fn unreadable_submodule_refuses_like_git(ref_format: RefFormat) {
+    for (setup, unreadable) in [
+        (setup_submodule_unreadable as fn(&TestHarness), "sub"),
+        (setup_submodule_gitlink_conflict_unreadable, "sub"),
+        (setup_submodule_renamed_unreadable, "renamed_sub"),
+    ] {
+        let harness = HarnessBuilder::new()
+            .ref_format(ref_format)
+            .no_server()
+            .submodule("sub")
+            .build();
+        setup(&harness);
+        let root = harness.root().path();
+        let project = ProjectPath {
+            repo_root: root.to_path_buf(),
+            effective_cwd: root.to_path_buf(),
+            kind: RepoKind::WithSubmodules,
+        };
+        for version in [PorcelainVersion::V1, PorcelainVersion::V2] {
+            let opts = opts_with(
+                version,
+                false,
+                false,
+                UntrackedFiles::Normal,
+                IgnoredFiles::No,
+            );
+            let git = Command::new("git")
+                .arg("-C")
+                .arg(root)
+                .args(git_status_args(opts))
+                .output()
+                .unwrap();
+            assert!(!git.status.success(), "git accepted {version:?}");
+
+            let result = assemble_status(
+                &project,
+                opts,
+                || Ok(compute_local_statuses(root)?),
+                |_, _, _| Ok(()),
+            );
+            assert!(
+                matches!(&result, Err(StatusError::UnreadableSubmodules(paths)) if paths == &[unreadable]),
+                "{version:?}: {result:?}"
+            );
+        }
+    }
 }

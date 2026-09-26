@@ -1105,6 +1105,33 @@ pub fn setup_submodule_gitlink_conflict_dirty(h: &TestHarness) {
         .write("untracked.txt", "x\n");
 }
 
+/// `sub`'s repository declares an extension neither git nor libgit2 knows, so
+/// both refuse to open it.
+pub fn setup_submodule_unreadable(h: &TestHarness) {
+    h.submodule("sub").declare_unsupported_extension();
+}
+
+/// Like [`setup_submodule_gitlink_conflict`], but `sub` is unreadable as in
+/// [`setup_submodule_unreadable`].
+pub fn setup_submodule_gitlink_conflict_unreadable(h: &TestHarness) {
+    setup_submodule_gitlink_conflict(h);
+    setup_submodule_unreadable(h);
+}
+
+/// Like [`setup_submodule_renamed`], but the moved submodule is unreadable as
+/// in [`setup_submodule_unreadable`].
+pub fn setup_submodule_renamed_unreadable(h: &TestHarness) {
+    setup_submodule_renamed(h);
+    Repo::new(&h.root().path().join("renamed_sub")).declare_unsupported_extension();
+}
+
+/// Like [`setup_submodule_unreadable`], but `submodule.sub.ignore=all` hides
+/// `sub`, so git never opens it.
+pub fn setup_submodule_unreadable_ignored(h: &TestHarness) {
+    h.root().run_git(&["config", "submodule.sub.ignore", "all"]);
+    setup_submodule_unreadable(h);
+}
+
 // -- Upstream-tracking setups --
 //
 // We fake an upstream without a real remote: `update-ref` positions

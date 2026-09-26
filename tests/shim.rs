@@ -422,8 +422,9 @@ fn collapsed_untracked_ancestor_declines_and_forwards(ref_format: RefFormat) {
     assert!(shim.stdout.is_empty(), "decline leaked partial output");
 }
 
-/// git refuses a submodule it cannot open, so the shim declines on an
-/// unreadable one and git's refusal comes through unchanged.
+/// git refuses a submodule it cannot open, and still warns about one that
+/// `ignore=all` hides, so the shim declines on an unreadable one either way and
+/// git's output comes through unchanged.
 #[apply(common::formats)]
 fn unreadable_submodule_declines_and_forwards(ref_format: RefFormat) {
     let mut harness = HarnessBuilder::new()
@@ -436,21 +437,29 @@ fn unreadable_submodule_declines_and_forwards(ref_format: RefFormat) {
     harness.assert_submodule_status("sub_a", StatusSummary::UNREADABLE);
 
     let root = harness.root().path();
-    for args in [
-        &["status"][..],
-        &["status", "--short"][..],
-        &["status", "--porcelain"][..],
-        &["status", "--porcelain=2"][..],
-    ] {
-        assert_outputs_match(root, args);
+    let assert_declines = || {
+        for args in [
+            &["status"][..],
+            &["status", "--short"][..],
+            &["status", "--porcelain"][..],
+            &["status", "--porcelain=2"][..],
+        ] {
+            assert_outputs_match(root, args);
 
-        let shim = run_without_git(root, args);
-        assert!(
-            !shim.status.success(),
-            "{args:?} should have been forwarded"
-        );
-        assert!(shim.stdout.is_empty(), "{args:?} leaked partial output");
-    }
+            let shim = run_without_git(root, args);
+            assert!(
+                !shim.status.success(),
+                "{args:?} should have been forwarded"
+            );
+            assert!(shim.stdout.is_empty(), "{args:?} leaked partial output");
+        }
+    };
+    assert_declines();
+
+    harness
+        .root()
+        .run_git(&["config", "submodule.sub_a.ignore", "all"]);
+    assert_declines();
 }
 
 #[apply(common::formats)]

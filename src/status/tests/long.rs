@@ -11,7 +11,7 @@ use tempfile::TempDir;
 use testutil::{HarnessBuilder, RefFormat, Repo};
 
 use crate::{
-    RepoKind,
+    RepoKind, StatusSummary,
     cli::ProjectPath,
     status::{
         IgnoreSubmodules, IgnoredFiles, LongOpts, OutputFormat, OutputOpts, UntrackedFiles,
@@ -629,5 +629,36 @@ fn long_no_ahead_behind_snapshots(ref_format: RefFormat) {
     };
     for case in CASES {
         run_case(case, opts, ref_format);
+    }
+}
+
+/// The long format lists unreadable submodules in a section of their own, so
+/// each one reaches the renderer, a conflicted one included.
+#[apply(formats)]
+fn unreadable_submodules_reach_the_renderer(ref_format: RefFormat) {
+    for setup in [
+        setup_submodule_unreadable,
+        setup_submodule_gitlink_conflict_unreadable,
+    ] {
+        let harness = HarnessBuilder::new()
+            .ref_format(ref_format)
+            .no_server()
+            .submodule("sub")
+            .build();
+        setup(&harness);
+        let root = harness.root().path();
+        let project = ProjectPath {
+            repo_root: root.to_path_buf(),
+            effective_cwd: root.to_path_buf(),
+            kind: RepoKind::WithSubmodules,
+        };
+        let submodules = assemble_status(
+            &project,
+            default_opts(),
+            || Ok(compute_local_statuses(root)?),
+            |_, entries, _| Ok(entries.submodules.to_vec()),
+        )
+        .unwrap();
+        assert_eq!(submodules, [("sub".to_owned(), StatusSummary::UNREADABLE)]);
     }
 }

@@ -520,21 +520,21 @@ fn assemble_status_scoped<R>(
         opts.untracked_files,
         &per_submodule_ignore,
     );
+    reject_unreadable_submodules(opts.format, &submods)?;
 
     apply_path_filter_to_submodules(&mut submods, &mut submod_changes, path_filter);
     submodule::filter_rename_new_paths(&mut submods, &submod_changes.renamed);
 
     // the conflict machinery owns each unmerged submodule's output. Fold its status
-    // into the conflict entry and remove it from the normal submodule rows.
+    // into the conflict entry and remove it from the normal submodule rows. An
+    // unreadable one keeps its row, so the long format still lists it.
     let conflicted_submodules = if has_conflicts {
         let folded = submodule::conflicted_submodule_statuses(&repo, &project.repo_root, &submods)?;
-        submods.retain(|(path, _)| !folded.contains_key(path));
+        submods.retain(|(p, s)| s.contains(StatusSummary::UNREADABLE) || !folded.contains_key(p));
         folded
     } else {
         FxHashMap::default()
     };
-
-    reject_unreadable_submodules(opts.format, &submods)?;
 
     // Path-formatting policy by output mode:
     // - Porcelain v1: repo-root-relative regardless of cwd.
