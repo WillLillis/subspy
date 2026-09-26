@@ -1267,3 +1267,42 @@ pub fn setup_upstream_diverged(root: &Path) {
         .add_all()
         .commit("local commit");
 }
+
+/// Points `origin/master` one commit behind `master` and wires `master` to track
+/// it, for the operation setups below. git prints the tracking block under the
+/// branch line whatever operation is in progress.
+fn track_origin_one_behind(root: &Path) {
+    let repo = Repo::new(root);
+    repo.run_git(&["update-ref", "refs/remotes/origin/master", "master~1"]);
+    configure_master_tracks_origin(&repo);
+}
+
+pub fn setup_merge_with_conflict_ahead_of_upstream(root: &Path) {
+    setup_merge_with_conflict(root);
+    track_origin_one_behind(root);
+}
+
+pub fn setup_cherry_pick_with_conflict_ahead_of_upstream(root: &Path) {
+    setup_cherry_pick_with_conflict(root);
+    track_origin_one_behind(root);
+}
+
+pub fn setup_revert_with_conflict_ahead_of_upstream(root: &Path) {
+    setup_revert_with_conflict(root);
+    track_origin_one_behind(root);
+}
+
+pub fn setup_am_with_conflict_ahead_of_upstream(root: &Path) {
+    setup_am_with_conflict(root);
+    track_origin_one_behind(root);
+}
+
+/// `git bisect start` alone leaves HEAD on the branch, so git still prints the
+/// tracking block. Marking a commit good or bad detaches it.
+pub fn setup_bisect_started_ahead_of_upstream(root: &Path) {
+    let repo = Repo::init(root);
+    repo.write("a.txt", "one\n").add_all().commit("one");
+    repo.write("b.txt", "two\n").add_all().commit("two");
+    repo.run_git(&["bisect", "start"]);
+    track_origin_one_behind(root);
+}

@@ -311,6 +311,26 @@ const CASES: &[Case] = &[
         name: "upstream_diverged",
         setup: Setup::Plain(setup_upstream_diverged),
     },
+    Case {
+        name: "merge_with_conflict_ahead_of_upstream",
+        setup: Setup::Plain(setup_merge_with_conflict_ahead_of_upstream),
+    },
+    Case {
+        name: "cherry_pick_with_conflict_ahead_of_upstream",
+        setup: Setup::Plain(setup_cherry_pick_with_conflict_ahead_of_upstream),
+    },
+    Case {
+        name: "revert_with_conflict_ahead_of_upstream",
+        setup: Setup::Plain(setup_revert_with_conflict_ahead_of_upstream),
+    },
+    Case {
+        name: "am_with_conflict_ahead_of_upstream",
+        setup: Setup::Plain(setup_am_with_conflict_ahead_of_upstream),
+    },
+    Case {
+        name: "bisect_started_ahead_of_upstream",
+        setup: Setup::Plain(setup_bisect_started_ahead_of_upstream),
+    },
 ];
 
 // -- Harness wiring --

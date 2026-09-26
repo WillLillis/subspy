@@ -4,7 +4,7 @@
 //! Detects in-progress operations (rebase, merge, cherry-pick, revert,
 //! bisect, am, apply-backend rebase) and renders the same hint blocks
 //! git uses, plus the `On branch X` / `HEAD detached at Y` line and
-//! upstream tracking summary for the normal case.
+//! the upstream tracking summary.
 
 use git2::{Oid, Repository};
 
@@ -254,7 +254,7 @@ fn get_rebase_info(repo: &Repository, abbrev: &Abbrev<'_>) -> StatusResult<Optio
 fn print_rebase_header(
     info: &RebaseInfo,
     status_hints: bool,
-    stdout: &mut impl Write,
+    out: &mut impl Write,
 ) -> Result<(), io::Error> {
     let label = if info.is_interactive {
         "interactive rebase"
@@ -262,7 +262,7 @@ fn print_rebase_header(
         "rebase"
     };
     writeln!(
-        stdout,
+        out,
         "{} {}",
         Paint::new(RED, format_args!("{label} in progress; onto")),
         info.onto_short
@@ -270,32 +270,32 @@ fn print_rebase_header(
 
     if info.total_done > 0 {
         if info.total_done == 1 {
-            writeln!(stdout, "Last command done (1 command done):")?;
+            writeln!(out, "Last command done (1 command done):")?;
         } else {
             writeln!(
-                stdout,
+                out,
                 "Last commands done ({} commands done):",
                 info.total_done
             )?;
         }
         for cmd in &info.done_ops {
-            writeln!(stdout, "   {cmd}")?;
+            writeln!(out, "   {cmd}")?;
         }
         // Only the last two ops are listed. When more were completed, git points
         // to the full file relative to the worktree root.
         if status_hints && info.total_done > info.done_ops.len() {
-            writeln!(stdout, "  (see more in file {})", info.done_file)?;
+            writeln!(out, "  (see more in file {})", info.done_file)?;
         }
     }
 
     if info.total_remaining == 0 {
-        writeln!(stdout, "No commands remaining.")?;
+        writeln!(out, "No commands remaining.")?;
     } else {
         if info.total_remaining == 1 {
-            writeln!(stdout, "Next command to do (1 remaining command):")?;
+            writeln!(out, "Next command to do (1 remaining command):")?;
         } else {
             writeln!(
-                stdout,
+                out,
                 "Next commands to do ({} remaining commands):",
                 info.total_remaining
             )?;
@@ -303,51 +303,48 @@ fn print_rebase_header(
         // git lists only the next two ops here and, unlike the done list,
         // emits no "see more" pointer (the edit-todo hint covers the rest).
         for cmd in &info.remaining_ops {
-            writeln!(stdout, "   {cmd}")?;
+            writeln!(out, "   {cmd}")?;
         }
         if status_hints {
-            writeln!(
-                stdout,
-                "  (use \"git rebase --edit-todo\" to view and edit)"
-            )?;
+            writeln!(out, "  (use \"git rebase --edit-todo\" to view and edit)")?;
         }
     }
 
     if info.is_editing {
         writeln!(
-            stdout,
+            out,
             "You are currently editing a commit while rebasing branch '{}' on '{}'.",
             info.head_name, info.onto_short
         )?;
         if status_hints {
             writeln!(
-                stdout,
+                out,
                 "  (use \"git commit --amend\" to amend the current commit)"
             )?;
             writeln!(
-                stdout,
+                out,
                 "  (use \"git rebase --continue\" once you are satisfied with your changes)"
             )?;
         }
     } else {
         writeln!(
-            stdout,
+            out,
             "You are currently rebasing branch '{}' on '{}'.",
             info.head_name, info.onto_short
         )?;
         if status_hints {
             writeln!(
-                stdout,
+                out,
                 "  (fix conflicts and then run \"git rebase --continue\")"
             )?;
-            writeln!(stdout, "  (use \"git rebase --skip\" to skip this patch)")?;
+            writeln!(out, "  (use \"git rebase --skip\" to skip this patch)")?;
             writeln!(
-                stdout,
+                out,
                 "  (use \"git rebase --abort\" to check out the original branch)"
             )?;
         }
     }
-    writeln!(stdout)?;
+    writeln!(out)?;
 
     Ok(())
 }
@@ -395,7 +392,7 @@ pub fn print_unmerged_paths(
     rel: &Relativizer<'_>,
     status_hints: bool,
     is_unborn: bool,
-    stdout: &mut impl Write,
+    out: &mut impl Write,
 ) -> StatusResult<bool> {
     let index = repo.index()?;
     if !index.has_conflicts() {
@@ -427,30 +424,27 @@ pub fn print_unmerged_paths(
         return Ok(false);
     }
 
-    writeln!(stdout, "Unmerged paths:")?;
+    writeln!(out, "Unmerged paths:")?;
     if status_hints {
         if shows_unstage_hint(repo) {
             if is_unborn {
-                writeln!(stdout, "  (use \"git rm --cached <file>...\" to unstage)")?;
+                writeln!(out, "  (use \"git rm --cached <file>...\" to unstage)")?;
             } else {
-                writeln!(
-                    stdout,
-                    "  (use \"git restore --staged <file>...\" to unstage)"
-                )?;
+                writeln!(out, "  (use \"git restore --staged <file>...\" to unstage)")?;
             }
         }
         let kinds = listed.iter().map(|(_, kind)| *kind);
-        writeln!(stdout, "{}", resolution_hint(kinds))?;
+        writeln!(out, "{}", resolution_hint(kinds))?;
     }
     for (path, kind) in &listed {
         let type_str = kind.label();
-        paint_into(stdout, RED, |out| {
+        paint_into(out, RED, |out| {
             write!(out, "\t{type_str}")?;
             rel.write_to(out, path)
         })?;
-        writeln!(stdout)?;
+        writeln!(out)?;
     }
-    writeln!(stdout)?;
+    writeln!(out)?;
     Ok(true)
 }
 
@@ -459,6 +453,9 @@ pub fn print_unmerged_paths(
 #[derive(Debug, PartialEq, Eq)]
 struct HeaderState {
     branch_display: Option<String>,
+    /// The tracking summary and its hint, which git prints under the branch
+    /// line alongside any body, such as an in-progress merge or cherry-pick.
+    upstream: Option<(String, &'static str)>,
     body: HeaderBody,
 }
 
@@ -493,9 +490,7 @@ enum HeaderBody {
         head_name: String,
         has_conflicts: bool,
     },
-    Normal {
-        upstream: Option<(String, &'static str)>,
-    },
+    Normal,
     /// HEAD points at a branch that has no commits yet (fresh `git init`).
     Unborn,
 }
@@ -571,6 +566,7 @@ fn get_header_state(repo: &Repository, ahead_behind: bool) -> StatusResult<Heade
     if let Some(info) = get_rebase_info(repo, &abbrev)? {
         return Ok(HeaderState {
             branch_display: None,
+            upstream: None,
             body: HeaderBody::Rebase(info),
         });
     }
@@ -585,6 +581,7 @@ fn get_header_state(repo: &Repository, ahead_behind: bool) -> StatusResult<Heade
         let has_conflicts = repo.index()?.has_conflicts();
         return Ok(HeaderState {
             branch_display: None,
+            upstream: None,
             body: HeaderBody::RebaseWithApplyBackend {
                 onto_short,
                 head_name,
@@ -605,12 +602,14 @@ fn get_header_state(repo: &Repository, ahead_behind: bool) -> StatusResult<Heade
                 .unwrap_or("(unknown)");
             return Ok(HeaderState {
                 branch_display: Some(format!("On branch {branch}")),
+                upstream: None,
                 body: HeaderBody::Unborn,
             });
         }
         Err(e) => return Err(e.into()),
     };
     let branch_display = current_branch_display(repo, &head_ref, &abbrev);
+    let upstream = get_upstream_status(repo, &head_ref, ahead_behind)?;
     let has_conflicts = repo.index()?.has_conflicts();
 
     let body = match repo.state() {
@@ -650,16 +649,12 @@ fn get_header_state(repo: &Repository, ahead_behind: bool) -> StatusResult<Heade
                 }
             }
         }
-        _ => match stopped_sequence(repo, has_conflicts) {
-            Some(body) => body,
-            None => HeaderBody::Normal {
-                upstream: get_upstream_status(repo, &head_ref, ahead_behind)?,
-            },
-        },
+        _ => stopped_sequence(repo, has_conflicts).unwrap_or(HeaderBody::Normal),
     };
 
     Ok(HeaderState {
         branch_display: Some(branch_display),
+        upstream,
         body,
     })
 }
@@ -668,19 +663,19 @@ fn get_header_state(repo: &Repository, ahead_behind: bool) -> StatusResult<Heade
 /// in-progress operation (rebase, merge, cherry-pick, etc.).
 pub fn print_header(
     repo: &Repository,
-    stdout: &mut impl Write,
+    out: &mut impl Write,
     ahead_behind: bool,
     status_hints: bool,
 ) -> StatusResult<()> {
     let state = get_header_state(repo, ahead_behind)?;
-    print_header_state(&state, status_hints, stdout)?;
-    print_sparse_checkout_notice(repo, stdout)?;
+    print_header_state(&state, status_hints, out)?;
+    print_sparse_checkout_notice(repo, out)?;
     Ok(())
 }
 
 /// Prints git's `You are in a sparse checkout with N% of tracked files
 /// present.` notice, followed by the blank line git puts after it.
-fn print_sparse_checkout_notice(repo: &Repository, stdout: &mut impl Write) -> StatusResult<()> {
+fn print_sparse_checkout_notice(repo: &Repository, out: &mut impl Write) -> StatusResult<()> {
     let sparse = repo
         .config()
         .and_then(|c| c.get_bool("core.sparseCheckout"))
@@ -700,10 +695,10 @@ fn print_sparse_checkout_notice(repo: &Repository, stdout: &mut impl Write) -> S
     let skipped = index.iter().filter(is_skip_worktree).count();
     let present = 100 - (100 * skipped) / total;
     writeln!(
-        stdout,
+        out,
         "You are in a sparse checkout with {present}% of tracked files present."
     )?;
-    writeln!(stdout)?;
+    writeln!(out)?;
     Ok(())
 }
 
@@ -712,63 +707,66 @@ fn print_sparse_checkout_notice(repo: &Repository, stdout: &mut impl Write) -> S
 fn print_header_state(
     state: &HeaderState,
     status_hints: bool,
-    stdout: &mut impl Write,
+    out: &mut impl Write,
 ) -> Result<(), io::Error> {
     if let Some(branch) = &state.branch_display {
-        writeln!(stdout, "{branch}")?;
+        writeln!(out, "{branch}")?;
+    }
+    if let Some((status_line, hint)) = &state.upstream {
+        writeln!(out, "{status_line}")?;
+        if status_hints && !hint.is_empty() {
+            writeln!(out, "  {hint}")?;
+        }
+        writeln!(out)?;
     }
     match &state.body {
-        HeaderBody::Rebase(info) => print_rebase_header(info, status_hints, stdout)?,
+        HeaderBody::Rebase(info) => print_rebase_header(info, status_hints, out)?,
         HeaderBody::CherryPick {
             short_oid,
             has_conflicts,
         } => {
             match short_oid {
-                Some(short_oid) => writeln!(
-                    stdout,
-                    "You are currently cherry-picking commit {short_oid}."
-                )?,
-                None => writeln!(stdout, "Cherry-pick currently in progress.")?,
+                Some(short_oid) => {
+                    writeln!(out, "You are currently cherry-picking commit {short_oid}.")?;
+                }
+                None => writeln!(out, "Cherry-pick currently in progress.")?,
             }
             if status_hints {
                 if *has_conflicts {
                     writeln!(
-                        stdout,
+                        out,
                         "  (fix conflicts and run \"git cherry-pick --continue\")"
                     )?;
                 } else if short_oid.is_none() {
-                    writeln!(stdout, "  (run \"git cherry-pick --continue\" to continue)")?;
+                    writeln!(out, "  (run \"git cherry-pick --continue\" to continue)")?;
                 } else {
                     writeln!(
-                        stdout,
+                        out,
                         "  (all conflicts fixed: run \"git cherry-pick --continue\")"
                     )?;
                 }
+                writeln!(out, "  (use \"git cherry-pick --skip\" to skip this patch)")?;
                 writeln!(
-                    stdout,
-                    "  (use \"git cherry-pick --skip\" to skip this patch)"
-                )?;
-                writeln!(
-                    stdout,
+                    out,
                     "  (use \"git cherry-pick --abort\" to cancel the cherry-pick operation)"
                 )?;
             }
-            writeln!(stdout)?;
+            writeln!(out)?;
         }
         HeaderBody::Merge { has_conflicts } => {
             if *has_conflicts {
-                writeln!(stdout, "You have unmerged paths.")?;
+                writeln!(out, "You have unmerged paths.")?;
                 if status_hints {
-                    writeln!(stdout, "  (fix conflicts and run \"git commit\")")?;
-                    writeln!(stdout, "  (use \"git merge --abort\" to abort the merge)")?;
+                    writeln!(out, "  (fix conflicts and run \"git commit\")")?;
+                    writeln!(out, "  (use \"git merge --abort\" to abort the merge)")?;
                 }
             } else {
-                writeln!(stdout, "All conflicts fixed but you are still merging.")?;
+                writeln!(out, "All conflicts fixed but you are still merging.")?;
                 if status_hints {
-                    writeln!(stdout, "  (use \"git commit\" to conclude merge)")?;
+                    writeln!(out, "  (use \"git commit\" to conclude merge)")?;
                 }
             }
-            writeln!(stdout)?;
+            writeln!(out)?;
         }
         HeaderBody::Revert {
             short_oid,
@@ -776,77 +774,71 @@ fn print_header_state(
         } => {
             match short_oid {
                 Some(short_oid) => {
-                    writeln!(stdout, "You are currently reverting commit {short_oid}.")?;
+                    writeln!(out, "You are currently reverting commit {short_oid}.")?;
                 }
-                None => writeln!(stdout, "Revert currently in progress.")?,
+                None => writeln!(out, "Revert currently in progress.")?,
             }
             if status_hints {
                 if *has_conflicts {
-                    writeln!(
-                        stdout,
-                        "  (fix conflicts and run \"git revert --continue\")"
-                    )?;
+                    writeln!(out, "  (fix conflicts and run \"git revert --continue\")")?;
                 } else if short_oid.is_none() {
-                    writeln!(stdout, "  (run \"git revert --continue\" to continue)")?;
+                    writeln!(out, "  (run \"git revert --continue\" to continue)")?;
                 } else {
                     writeln!(
-                        stdout,
+                        out,
                         "  (all conflicts fixed: run \"git revert --continue\")"
                     )?;
                 }
-                writeln!(stdout, "  (use \"git revert --skip\" to skip this patch)")?;
+                writeln!(out, "  (use \"git revert --skip\" to skip this patch)")?;
                 writeln!(
-                    stdout,
+                    out,
                     "  (use \"git revert --abort\" to cancel the revert operation)"
                 )?;
             }
-            writeln!(stdout)?;
+            writeln!(out)?;
         }
         HeaderBody::Bisect { started_from } => {
             if started_from.is_empty() {
-                writeln!(stdout, "You are currently bisecting.")?;
+                writeln!(out, "You are currently bisecting.")?;
             } else {
                 // Upstream git always says "branch 'X'" here even when X is
                 // an OID (bisect started from detached HEAD). Reproduced
                 // verbatim for byte-for-byte parity.
                 writeln!(
-                    stdout,
+                    out,
                     "You are currently bisecting, started from branch '{started_from}'."
                 )?;
             }
             if status_hints {
                 writeln!(
-                    stdout,
+                    out,
                     "  (use \"git bisect reset\" to get back to the original branch)"
                 )?;
             }
-            writeln!(stdout)?;
+            writeln!(out)?;
         }
         HeaderBody::ApplyMailbox { empty_patch } => {
-            writeln!(stdout, "You are in the middle of an am session.")?;
+            writeln!(out, "You are in the middle of an am session.")?;
             if *empty_patch {
-                writeln!(stdout, "The current patch is empty.")?;
+                writeln!(out, "The current patch is empty.")?;
             }
             if status_hints {
                 if !*empty_patch {
-                    writeln!(
-                        stdout,
-                        "  (fix conflicts and then run \"git am --continue\")"
-                    )?;
+                    writeln!(out, "  (fix conflicts and then run \"git am --continue\")")?;
                 }
-                writeln!(stdout, "  (use \"git am --skip\" to skip this patch)")?;
+                writeln!(out, "  (use \"git am --skip\" to skip this patch)")?;
                 if *empty_patch {
                     writeln!(
-                        stdout,
+                        out,
                         "  (use \"git am --allow-empty\" to record this patch as an empty commit)"
                     )?;
                 }
                 writeln!(
-                    stdout,
+                    out,
                     "  (use \"git am --abort\" to restore the original branch)"
                 )?;
             }
-            writeln!(stdout)?;
+            writeln!(out)?;
         }
         HeaderBody::RebaseWithApplyBackend {
             onto_short,
@@ -854,44 +846,36 @@ fn print_header_state(
             has_conflicts,
         } => {
             writeln!(
-                stdout,
+                out,
                 "{}",
                 Paint::new(RED, format_args!("rebase in progress; onto {onto_short}"))
             )?;
             writeln!(
-                stdout,
+                out,
                 "You are currently rebasing branch '{head_name}' on '{onto_short}'."
             )?;
             if status_hints {
                 if *has_conflicts {
                     writeln!(
-                        stdout,
+                        out,
                         "  (fix conflicts and then run \"git rebase --continue\")"
                     )?;
                 } else {
                     writeln!(
-                        stdout,
+                        out,
                         "  (all conflicts fixed: run \"git rebase --continue\")"
                     )?;
                 }
-                writeln!(stdout, "  (use \"git rebase --skip\" to skip this patch)")?;
+                writeln!(out, "  (use \"git rebase --skip\" to skip this patch)")?;
                 writeln!(
-                    stdout,
+                    out,
                     "  (use \"git rebase --abort\" to check out the original branch)"
                 )?;
             }
-            writeln!(stdout)?;
+            writeln!(out)?;
         }
-        HeaderBody::Normal { upstream } => {
-            if let Some((status_line, hint)) = upstream {
-                writeln!(stdout, "{status_line}")?;
-                if status_hints && !hint.is_empty() {
-                    writeln!(stdout, "  {hint}")?;
-                }
-                writeln!(stdout)?;
-            }
-        }
-        HeaderBody::Unborn => writeln!(stdout, "\nNo commits yet\n")?,
+        HeaderBody::Normal => {}
+        HeaderBody::Unborn => writeln!(out, "\nNo commits yet\n")?,
     }
 
     Ok(())
@@ -1109,7 +1093,7 @@ mod tests {
         let (_tmp, repo) = init_repo(ref_format);
         let state = get_header_state(&repo, true).unwrap();
         assert!(
-            matches!(state.body, HeaderBody::Normal { .. }),
+            matches!(state.body, HeaderBody::Normal),
             "expected Normal, got {state:?}"
         );
     }
@@ -1303,10 +1287,7 @@ mod tests {
         );
 
         repo.run_git(&["cherry-pick", "--continue"]);
-        assert_eq!(
-            header_body(tmp.path()),
-            HeaderBody::Normal { upstream: None }
-        );
+        assert_eq!(header_body(tmp.path()), HeaderBody::Normal);
     }
 
     /// The revert counterpart of
@@ -1360,10 +1341,7 @@ mod tests {
         );
 
         repo.run_git(&["revert", "--continue"]);
-        assert_eq!(
-            header_body(tmp.path()),
-            HeaderBody::Normal { upstream: None }
-        );
+        assert_eq!(header_body(tmp.path()), HeaderBody::Normal);
     }
 
     #[apply(formats)]
