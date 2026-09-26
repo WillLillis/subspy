@@ -109,10 +109,15 @@ impl WatchServer {
                     };
 
                 let count = completed.fetch_add(1, Ordering::Relaxed) + 1;
-                broadcast_progress(
-                    progress_subscribers,
-                    ProgressUpdate::new(count, n_submodules),
-                );
+                // Workers can broadcast out of order, and each subscriber keeps only
+                // the latest update, so the final count is published below, once
+                // every worker is done.
+                if count < n_submodules {
+                    broadcast_progress(
+                        progress_subscribers,
+                        ProgressUpdate::new(count, n_submodules),
+                    );
+                }
                 if let Some(pb) = &progress_bar {
                     pb.inc(1);
                 }
@@ -120,6 +125,10 @@ impl WatchServer {
                 (relative_path, full_path, modules_path, status)
             })
             .collect();
+        broadcast_progress(
+            &self.progress_subscribers,
+            ProgressUpdate::new(n_submodules, n_submodules),
+        );
 
         status_guard.clear();
         self.pending_rescan.clear_and_resize(results.len());
