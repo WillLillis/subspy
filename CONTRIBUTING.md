@@ -441,10 +441,6 @@ harness.assert_submodule_status("sub_b", StatusSummary::clean());
 // server is shut down and temp dir cleaned up on drop
 ```
 
-**Thread count**: Limited to 4 in `.cargo/config.toml` because each test spins up a
-real watch server with filesystem watchers. Too many concurrent servers exhaust
-OS watcher limits (e.g. inotify watch descriptors on Linux).
-
 ### Tracing watch-server failures (`--cfg trace_events`)
 
 The hardest failures are rare, load-dependent races in the watch server that don't
