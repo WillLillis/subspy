@@ -3,11 +3,12 @@
 
 use std::{
     borrow::Cow,
-    io::BufReader,
+    io::{BufReader, Write as _},
     path::Path,
     time::{Duration, Instant},
 };
 
+use git2::Repository;
 use thiserror::Error;
 
 use crate::{
@@ -16,7 +17,7 @@ use crate::{
         BINCODE_CFG, ClientMessage, ClientRequest, ServerMessage, ipc_connect, ipc_socket_path,
         read_full_message, server_not_started, set_recv_timeout, write_full_message_fixed,
     },
-    git::parse_gitmodules,
+    git::{path::GitPath, substatus::gitlink_paths},
     status::compute_local_statuses,
     template::{Template, TemplateError},
     watch::spawn_daemon,
@@ -60,14 +61,13 @@ pub fn prompt(
         };
         (statuses, total as usize)
     } else {
-        let Ok(gitmodule_entries) = parse_gitmodules(root_path) else {
+        let Ok(gitlinks) = Repository::open(root_path).and_then(|repo| gitlink_paths(&repo)) else {
             return Ok(());
         };
-        let total = gitmodule_entries.len();
         let Ok(statuses) = compute_local_statuses(root_path) else {
             return Ok(());
         };
-        (statuses, total)
+        (statuses, gitlinks.len())
     };
 
     let mut dirty = 0u32;
@@ -100,11 +100,11 @@ pub fn prompt(
                 "total" => total as u32,
                 _ => unreachable!("validated by Template::parse"),
             };
-            Cow::Owned(value.to_string())
+            Cow::Owned(value.to_string().into_bytes())
         },
         &no_widths,
     );
-    print!("{output}");
+    let _ = std::io::stdout().write_all(&output);
     Ok(())
 }
 
@@ -114,7 +114,7 @@ pub fn prompt(
 fn try_get_statuses(
     root_path: &Path,
     timeout: Duration,
-) -> Option<(Vec<(String, StatusSummary)>, u32)> {
+) -> Option<(Vec<(GitPath, StatusSummary)>, u32)> {
     let deadline = Instant::now() + timeout;
     let sock_path = ipc_socket_path(root_path);
 

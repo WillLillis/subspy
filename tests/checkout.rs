@@ -165,6 +165,6 @@ fn checkout_branch_many_submodules(ref_format: RefFormat, _run: u32) {
 
     // Every submodule should show NEW_COMMITS, not STAGED | NEW_COMMITS.
     for i in 0..N {
-        harness.assert_submodule_status(&format!("sub_{i}"), StatusSummary::NEW_COMMITS);
+        harness.assert_submodule_status(format!("sub_{i}"), StatusSummary::NEW_COMMITS);
     }
 }

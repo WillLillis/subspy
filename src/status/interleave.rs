@@ -11,7 +11,7 @@
 
 use git2::StatusEntry;
 
-use crate::StatusSummary;
+use crate::{StatusSummary, git::path::GitPath};
 
 use super::SubmoduleRename;
 
@@ -19,9 +19,9 @@ use super::SubmoduleRename;
 /// `Vec<SubRow>` is exactly the set of rows to interleave.
 pub(super) enum SubRow<'a> {
     /// A submodule with working-tree/index changes (path, summary).
-    Modified(&'a str, StatusSummary),
+    Modified(&'a GitPath, StatusSummary),
     /// A submodule whose gitlink was removed from the index.
-    Deleted(&'a str),
+    Deleted(&'a GitPath),
     /// A staged submodule rename.
     Renamed(&'a SubmoduleRename),
 }

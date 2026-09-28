@@ -12,10 +12,9 @@ use rustc_hash::FxHashMap;
 use std::{
     borrow::Cow,
     io::{self, Write},
-    path::Path,
 };
 
-use crate::StatusSummary;
+use crate::{StatusSummary, git::path::GitPath};
 
 use super::{
     Divergence, PorcelainOpts, StatusEntries, StatusResult, UpstreamStatus,
@@ -106,24 +105,21 @@ pub fn display_porcelain_v2(
             .iter()
             .map(|(path, st)| SubRow::Modified(path, *st)),
     );
-    submods.extend(
-        entries
-            .deleted_submodules
-            .iter()
-            .map(|path| SubRow::Deleted(path)),
-    );
+    submods.extend(entries.deleted_submodules.iter().map(SubRow::Deleted));
     submods.extend(entries.renamed_submodules.iter().map(SubRow::Renamed));
 
     // Gitlink OIDs come from HEAD's tree and the index, keyed by submodule path.
-    let head_oid = |path: &str| {
+    let head_oid = |path: &GitPath| {
         head_tree
             .as_ref()
-            .and_then(|t| t.get_path(Path::new(path)).ok())
+            .zip(path.to_path().ok())
+            .and_then(|(t, path)| t.get_path(path).ok())
             .map_or(git2::Oid::ZERO_SHA1, |e| e.id())
     };
-    let index_oid = |path: &str| {
-        index
-            .get_path(Path::new(path), 0)
+    let index_oid = |path: &GitPath| {
+        path.to_path()
+            .ok()
+            .and_then(|path| index.get_path(path, 0))
             .map_or(git2::Oid::ZERO_SHA1, |e| e.id)
     };
 
@@ -525,12 +521,12 @@ fn write_synthetic_rename(
 /// because without a stage-0 gitlink it no longer sees the path as a submodule.)
 fn write_conflict(
     entry: &git2::StatusEntry<'_>,
-    conflicts: &FxHashMap<String, ConflictEntry>,
-    conflicted_submodules: &FxHashMap<String, StatusSummary>,
+    conflicts: &FxHashMap<GitPath, ConflictEntry>,
+    conflicted_submodules: &FxHashMap<GitPath, StatusSummary>,
     out: &mut impl Write,
     render_opts: &RenderOpts<'_>,
 ) -> Result<(), io::Error> {
-    let path = entry.path().unwrap_or("");
+    let path = entry.path_bytes();
     let (xy, m1, m2, m3, h1, h2, h3) = conflicts.get(path).map_or(
         (
             "UU",
@@ -596,7 +592,7 @@ fn write_conflict(
 /// (no head entry yet).
 #[expect(clippy::many_single_char_names)]
 fn write_submodule(
-    path: &str,
+    path: &GitPath,
     st: StatusSummary,
     h_head: git2::Oid,
     h_index: git2::Oid,
@@ -636,7 +632,7 @@ fn write_submodule(
 /// workdir side is zeroed since the entry no longer exists in the
 /// index either.
 fn write_deleted_submodule(
-    path: &str,
+    path: &GitPath,
     h_head: git2::Oid,
     out: &mut impl Write,
     render_opts: &RenderOpts<'_>,

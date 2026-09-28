@@ -1352,3 +1352,119 @@ fn unreadable_submodule_refuses_like_git(ref_format: RefFormat) {
         }
     }
 }
+
+/// Compares porcelain v1 and v2, with and without `-z`, against git.
+#[cfg_attr(
+    not(target_os = "linux"),
+    expect(dead_code, reason = "linux-only test helper")
+)]
+fn assert_porcelain_matches_git(project: &ProjectPath, step: &str) {
+    for version in [PorcelainVersion::V1, PorcelainVersion::V2] {
+        for null_terminate in [false, true] {
+            let opts = opts_with(
+                version,
+                null_terminate,
+                false,
+                UntrackedFiles::Normal,
+                IgnoredFiles::No,
+            );
+            assert_outputs_match(project, step, opts);
+        }
+    }
+}
+
+/// A submodule whose path is not UTF-8, compared against git after each step
+/// through the rows that name it: a staged rename, modified and untracked
+/// content, new commits, and a staged deletion.
+///
+/// Linux-only: Windows (NTFS is UTF-16) and macOS (EILSEQ) refuse the name.
+#[cfg(target_os = "linux")]
+#[apply(formats)]
+fn non_utf8_submodule_path_matches_git(ref_format: RefFormat) {
+    use std::{ffi::OsStr, os::unix::ffi::OsStrExt as _};
+
+    let harness = HarnessBuilder::new()
+        .ref_format(ref_format)
+        .no_server()
+        .submodule(b"sub\xff")
+        .submodule("plain")
+        .build();
+    let root = harness.root().path();
+    let project = ProjectPath {
+        repo_root: root.to_path_buf(),
+        effective_cwd: root.to_path_buf(),
+        kind: RepoKind::WithSubmodules,
+    };
+    let matches_git = |step: &str| assert_porcelain_matches_git(&project, step);
+    // `run_git` takes `&str` arguments, and these name the submodule by its bytes.
+    let git = |args: &[&[u8]]| {
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args.iter().map(|arg| OsStr::from_bytes(arg)))
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?} failed");
+    };
+    matches_git("clean");
+
+    git(&[b"mv", b"sub\xff", b"moved\xfe"]);
+    matches_git("staged rename");
+
+    harness.root().commit("move the submodule");
+    matches_git("committed rename");
+
+    let sub = Repo::new(&root.join(OsStr::from_bytes(b"moved\xfe")));
+    sub.write("README.md", "changed\n");
+    matches_git("modified content");
+
+    sub.write("untracked.txt", "x\n");
+    matches_git("modified and untracked content");
+
+    sub.add_all();
+    matches_git("content staged in the submodule");
+
+    sub.commit("advance");
+    matches_git("new commits");
+
+    git(&[b"rm", b"-q", b"-f", b"moved\xfe"]);
+    matches_git("staged deletion");
+}
+
+/// A conflicted file whose name is not UTF-8 gets its conflict codes, modes,
+/// and object IDs in the `u` line, compared against git while conflicted and
+/// once resolved.
+///
+/// Linux-only: Windows (NTFS is UTF-16) and macOS (EILSEQ) refuse the name.
+#[cfg(target_os = "linux")]
+#[apply(formats)]
+fn non_utf8_conflicted_file_matches_git(ref_format: RefFormat) {
+    use std::{ffi::OsStr, os::unix::ffi::OsStrExt as _};
+
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    let file = root.join(OsStr::from_bytes(b"f\xff"));
+    let repo = Repo::init(root);
+    std::fs::write(&file, "base\n").unwrap();
+    repo.add_all().commit("base").branch("feature");
+    std::fs::write(&file, "feature\n").unwrap();
+    repo.add_all().commit("feature").checkout("master");
+    std::fs::write(&file, "master\n").unwrap();
+    repo.add_all().commit("master");
+    repo.migrate_refs(ref_format);
+    let project = ProjectPath {
+        repo_root: root.to_path_buf(),
+        effective_cwd: root.to_path_buf(),
+        kind: RepoKind::Normal,
+    };
+
+    let output = repo.try_git(&["merge", "feature", "--no-edit"]);
+    assert!(!output.status.success(), "expected the merge to conflict");
+    assert_porcelain_matches_git(&project, "conflicted");
+
+    std::fs::write(&file, "resolved\n").unwrap();
+    assert_porcelain_matches_git(&project, "conflict edited");
+
+    repo.add_all();
+    assert_porcelain_matches_git(&project, "resolved");
+}

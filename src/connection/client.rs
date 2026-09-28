@@ -21,6 +21,7 @@ use crate::{
         write_full_message_fixed,
     },
     create_progress_bar,
+    git::path::GitPath,
     watch::spawn_daemon,
 };
 
@@ -248,7 +249,7 @@ pub fn send_status_request(
 pub fn recv_status_response(
     conn: &mut BufReader<IpcStream>,
     display_progress: bool,
-) -> IpcResult<(Vec<(String, StatusSummary)>, u32)> {
+) -> IpcResult<(Vec<(GitPath, StatusSummary)>, u32)> {
     let progress_bar = display_progress.then(|| create_progress_bar(0, "Indexing in progress..."));
     let mut buffer = Vec::with_capacity(4096); // empirically ~2 KiB on a test repo
     // TODO: This would be better as a `try` block if that's ever stabilized

@@ -53,6 +53,7 @@ over IPC to retrieve or manipulate that cache.
 | `proc.rs` | Cross-platform `Command` flag helpers (`configure_detached_daemon`, `configure_hidden_console`); no-ops on non-Windows |
 | `bitset.rs` | Inline bitset for dense integer sets (watcher indices) |
 | `git/` | Lightweight Git helpers, `.gitmodules` parsing, and global libgit2 configuration |
+| `git/path.rs` | `GitPath`, a root-relative path as git records it: bytes, converted to a filesystem path only where one is opened |
 | `git/substatus.rs` | Manual submodule status engine and index-gitlink enumeration. Avoids libgit2's `.gitmodules`-dependent submodule API |
 | `watch.rs` | `spawn_daemon`, `build_daemon_command` |
 | `status/` | Status output (see below) |
@@ -227,6 +228,13 @@ come from the unique mode-`160000` paths in the root index, including unmerged
 index stages. A gitlink without a corresponding `.gitmodules` entry still receives
 a status slot and watcher coverage.
 
+**Submodule paths are bytes.** Git records paths as bytes, so `git::path::GitPath`
+carries a submodule's path unchanged from the index through the server, the IPC
+status message, and every renderer, which quote it the way git does. It becomes a
+filesystem path only where a file is opened or watched: verbatim on Unix, and as
+UTF-8 elsewhere, where a path that is not UTF-8 cannot exist and its submodule
+reports `UNREADABLE`.
+
 **Every reindex replaces the watcher slots.** Each pass re-reads the index
 gitlinks, clears the previous submodule watches and routing maps, and rebuilds
 them in index order. `.gitmodules` changes still schedule reconciliation, while
@@ -286,8 +294,8 @@ root-git-operation path.
 
 **`--no-server` fallback.** The `status`, `prompt`, and `list` commands support
 a `--no-server` flag that computes submodule status locally instead of connecting
-to the watch server. The direct path still uses `parse_gitmodules` to enumerate
-paths, but computes each path through the same manual `git::substatus` engine
+to the watch server. The direct path enumerates the same index gitlinks as the
+server and computes each path through the same manual `git::substatus` engine
 rather than `Repository::submodule_status`. It is slower than the cached server
 path but useful when no server is desired (e.g. CI or one-off checks).
 

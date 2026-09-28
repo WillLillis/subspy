@@ -169,6 +169,9 @@ pub struct List {
     /// Extra text inside braces is preserved and padded as a unit, e.g.
     /// {[name]} outputs [value] with alignment applied to the whole [value].
     /// Escape sequences: \n, \r, \t, \\, \{, \}.
+    ///
+    /// Names, paths, and branches are quoted the way git quotes paths,
+    /// following core.quotePath.
     #[arg(short, long, verbatim_doc_comment)]
     pub format: Option<String>,
     /// Omit the header row

@@ -1,4 +1,8 @@
-use std::{collections::BTreeMap, path::PathBuf, sync::MutexGuard};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+    sync::MutexGuard,
+};
 
 use git2::Repository;
 use log::{error, info};
@@ -12,7 +16,7 @@ use crate::{
         watch_server::WatchServer,
     },
     create_progress_bar,
-    git::{path_from_bytes, submodule_modules_subpath, substatus},
+    git::{path::GitPath, path_from_bytes, submodule_modules_subpath, substatus},
     watch::{WatchError, WatchResult},
 };
 
@@ -29,9 +33,9 @@ impl WatchServer {
     #[allow(clippy::too_many_lines)]
     pub(super) fn populate_status_map(
         &mut self,
-        submodule_paths: Vec<String>,
+        submodule_paths: Vec<GitPath>,
         display_progress: bool,
-        mut status_guard: MutexGuard<'_, BTreeMap<String, StatusSummary>>,
+        mut status_guard: MutexGuard<'_, BTreeMap<GitPath, StatusSummary>>,
     ) -> WatchResult<()> {
         use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -63,22 +67,26 @@ impl WatchServer {
         let results: Vec<_> = submodule_paths
             .into_par_iter()
             .map(|relative_path| {
-                let full_path = root_path.join(&relative_path);
-
                 // `get_modules_path` reads the submodule's `.git` gitlink to find
                 // its real `.git/modules/<name>` dir. It is resolved here, off the
                 // gitlink and independent of the repo/status read, and carried
                 // separately from the (fallible) status so that a transient
                 // status-read failure still leaves us the `modules_path_to_index`
                 // routing entry the `.git/modules` watcher needs. `Ok(None)` is a
-                // shape with no entry by design, and its status read proceeds.
+                // shape with no entry by design, and its status read proceeds. A
+                // path this platform cannot represent has no gitlink either, and
+                // its status read fails.
+                let modules_path = relative_path
+                    .to_path()
+                    .map_or(Ok(None), |rel| self.get_modules_path(&root_path.join(rel)));
                 let (modules_path, status): (Option<PathBuf>, WatchResult<StatusSummary>) =
-                    match self.get_modules_path(&relative_path) {
+                    match modules_path {
                         // A hard resolution error leaves no path to route with,
                         // so fail the slot and skip the read.
                         Err(e) => {
                             error!(
-                                "Failed to get modules path for submodule {relative_path}: {e}\nSkipping...",
+                                "Failed to get modules path for submodule {}: {e}\nSkipping...",
+                                relative_path.display(),
                             );
                             (None, Err(e))
                         }
@@ -86,7 +94,7 @@ impl WatchServer {
                             let status = (|| {
                                 let repo = tl_repo.get_or_try(|| Repository::open(root_path))
                                     .map_err(|e| {
-                                        error!("Failed to open repository while indexing {relative_path}: {e}");
+                                        error!("Failed to open repository while indexing {}: {e}", relative_path.display());
                                         e
                                     })?;
 
@@ -98,7 +106,7 @@ impl WatchServer {
                                 // relative path, which remains correct even under a rename.
                                 let status = substatus::submodule_status(repo, &relative_path)
                                     .map_err(|e| {
-                                        error!("Failed to read status for {relative_path} while populating status map: {e}");
+                                        error!("Failed to read status for {} while populating status map: {e}", relative_path.display());
                                         e
                                     })?;
 
@@ -122,7 +130,7 @@ impl WatchServer {
                     pb.inc(1);
                 }
 
-                (relative_path, full_path, modules_path, status)
+                (relative_path, modules_path, status)
             })
             .collect();
         broadcast_progress(
@@ -139,8 +147,7 @@ impl WatchServer {
         // its status read succeeded. This keeps slot `i` aligned with `results`
         // order across calls. `rayon` preserves order for indexed iterators,
         // and the paths arrive in index order.
-        for (i, (relative_path, full_path, modules_path, status)) in results.into_iter().enumerate()
-        {
+        for (i, (relative_path, modules_path, status)) in results.into_iter().enumerate() {
             if let Ok(status) = status {
                 status_guard.insert(relative_path.clone(), status);
             } else {
@@ -153,16 +160,20 @@ impl WatchServer {
             if let Some(modules_path) = modules_path {
                 self.modules_path_to_index.insert(modules_path, i);
             }
-            self.watch_submodule(&full_path)?;
-            wtrace!(|s| WatchSubmod {
-                index: i,
-                path: s.intern_path(&full_path),
-            });
-            // Record the (root-relative) workdir->slot mapping for every
-            // submodule, even ones whose status read failed. Path routing
-            // must still be able to find a submodule by prefix.
-            self.workdir_to_index
-                .insert(PathBuf::from(&relative_path), i);
+            // A path this platform cannot represent names nothing on disk, so
+            // its slot has no watch or route.
+            if let Ok(rel) = relative_path.to_path() {
+                let full_path = self.root_path.join(rel);
+                self.watch_submodule(&full_path)?;
+                wtrace!(|s| WatchSubmod {
+                    index: i,
+                    path: s.intern_path(&full_path),
+                });
+                // Record the (root-relative) workdir->slot mapping even when the
+                // status read failed. Path routing must still be able to find a
+                // submodule by prefix.
+                self.workdir_to_index.insert(rel.to_path_buf(), i);
+            }
             self.submodules.push(relative_path);
         }
         drop(status_guard);
@@ -178,12 +189,13 @@ impl WatchServer {
         Ok(())
     }
 
-    /// Returns the path to the submodule's `.git/modules/` entry (e.g.
-    /// `.git/modules/libs/foo` for a submodule at `libs/foo`), or `None` for the
-    /// shapes that have no such entry (e.g. deleted workdir or an embedded gitdir)
-    fn get_modules_path(&self, submod_rel_path: &str) -> WatchResult<Option<PathBuf>> {
+    /// Returns the path to the `.git/modules/` entry of the submodule whose
+    /// working tree is `workdir` (e.g. `.git/modules/libs/foo` for a submodule at
+    /// `libs/foo`), or `None` for the shapes that have no such entry (e.g. deleted
+    /// workdir or an embedded gitdir)
+    fn get_modules_path(&self, workdir: &Path) -> WatchResult<Option<PathBuf>> {
         // Read the submodule's `.git` file to find its actual modules path.
-        let dot_git_path = self.root_path.join(submod_rel_path).join(DOT_GIT);
+        let dot_git_path = workdir.join(DOT_GIT);
         let dot_git_bytes = match std::fs::read(&dot_git_path) {
             Ok(bytes) => bytes,
             // An absent gitlink (deleted workdir) and an embedded gitdir

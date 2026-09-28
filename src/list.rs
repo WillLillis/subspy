@@ -1,7 +1,11 @@
 //! The `list` subcommand: displays per-submodule metadata in a
 //! user-configurable template format with optional column alignment.
 
-use std::{borrow::Cow, io::IsTerminal as _, path::Path};
+use std::{
+    borrow::Cow,
+    io::{IsTerminal as _, Write as _},
+    path::Path,
+};
 
 use git2::Repository;
 use thiserror::Error;
@@ -12,8 +16,12 @@ use crate::{
         IpcError,
         client::{recv_status_response, send_status_request},
     },
-    git::{parse_gitmodules, read_submodule_head, substatus},
-    template::{Template, TemplateError},
+    git::{parse_gitmodules, path::GitPath, read_submodule_head, substatus},
+    status::{
+        ConfigDefaults,
+        quote::{QuoteMode, needs_quoting, write_escaped},
+    },
+    template::{Template, TemplateError, display_width},
 };
 
 pub type ListResult<T> = Result<T, ListError>;
@@ -28,23 +36,28 @@ pub enum ListError {
     Ipc(#[from] IpcError),
     #[error(transparent)]
     Template(#[from] TemplateError),
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
 }
 
 const DEFAULT_FORMAT: &str =
     "{(name)}  {(path)}  {(commit)}  {(head)}  {(branch)}  {(head_branch)}  {(status)}\n";
 
 struct SubmoduleInfo {
-    name: String,
-    path: String,
+    /// The name `.gitmodules` records for this path, if it has an entry.
+    name: Option<Vec<u8>>,
+    path: GitPath,
     commit: Option<git2::Oid>,
     head: Option<git2::Oid>,
-    branch: Option<String>,
+    branch: Option<Vec<u8>>,
     head_branch: Option<String>,
     status: Option<StatusSummary>,
 }
 
 impl SubmoduleInfo {
-    /// Maps a placeholder name to its value for this submodule.
+    /// Maps a placeholder name to its value for this submodule. Names, paths,
+    /// and branches are quoted as git quotes paths, honoring `quote_path`
+    /// (`core.quotePath`).
     ///
     /// Only called with names from [`PLACEHOLDERS`], guaranteed by
     /// [`Template::parse`].
@@ -52,20 +65,45 @@ impl SubmoduleInfo {
     /// # Panics
     ///
     /// Panics if `name` is not a recognized placeholder.
-    fn resolve_placeholder(&self, name: &str) -> Cow<'_, str> {
+    fn resolve_placeholder(&self, name: &str, quote_path: bool) -> Cow<'_, [u8]> {
         match name {
-            "name" => Cow::Borrowed(&self.name),
-            "path" => Cow::Borrowed(&self.path),
-            "commit" => Cow::Owned(short_oid(self.commit)),
-            "commit_long" => Cow::Owned(long_oid(self.commit)),
-            "head" => Cow::Owned(short_oid(self.head)),
-            "head_long" => Cow::Owned(long_oid(self.head)),
-            "branch" => Cow::Borrowed(self.branch.as_deref().unwrap_or("")),
-            "head_branch" => Cow::Borrowed(self.head_branch.as_deref().unwrap_or("")),
-            "status" => Cow::Owned(self.status.map_or_else(String::new, status_text)),
+            "name" => quoted(self.name.as_deref().unwrap_or_default(), quote_path),
+            "path" => quoted(self.path.as_bytes(), quote_path),
+            "commit" => Cow::Owned(short_oid(self.commit).into_bytes()),
+            "commit_long" => Cow::Owned(long_oid(self.commit).into_bytes()),
+            "head" => Cow::Owned(short_oid(self.head).into_bytes()),
+            "head_long" => Cow::Owned(long_oid(self.head).into_bytes()),
+            "branch" => quoted(self.branch.as_deref().unwrap_or_default(), quote_path),
+            "head_branch" => quoted(
+                self.head_branch.as_deref().unwrap_or_default().as_bytes(),
+                quote_path,
+            ),
+            "status" => Cow::Owned(
+                self.status
+                    .map_or_else(String::new, status_text)
+                    .into_bytes(),
+            ),
             _ => unreachable!("validate_template rejects unknown placeholders"),
         }
     }
+}
+
+/// `value` quoted the way git quotes a path: wrapped in `"..."` with C-style
+/// escapes when it holds a control character, `"`, `\`, or, under `quote_path`,
+/// a byte above 0x7f.
+fn quoted(value: &[u8], quote_path: bool) -> Cow<'_, [u8]> {
+    let mode = QuoteMode {
+        quote_space: false,
+        quote_path,
+    };
+    if !needs_quoting(value, mode) {
+        return Cow::Borrowed(value);
+    }
+    let mut out = Vec::with_capacity(value.len() + 2);
+    out.push(b'"');
+    write_escaped(&mut out, value, mode).unwrap();
+    out.push(b'"');
+    Cow::Owned(out)
 }
 
 fn short_oid(oid: Option<git2::Oid>) -> String {
@@ -133,19 +171,20 @@ const IDX_HEAD_LONG: usize = 5;
 const IDX_HEAD_BRANCH: usize = 7;
 const IDX_STATUS: usize = 8;
 
-/// Collects metadata for every submodule in the repository at `root_path`.
+/// Collects metadata for every gitlink in the index of the repository at
+/// `root_path`, in path order.
 ///
-/// Parses `.gitmodules` directly and reads the parent's `HEAD` tree for
-/// committed OIDs, bypassing `repo.submodules()` to avoid libgit2's
-/// per-submodule config snapshot overhead. Per-submodule I/O (reading the
-/// submodule's HEAD for workdir OID/branch, computing status) is
+/// Parses `.gitmodules` directly for names and branches and reads the parent's
+/// `HEAD` tree for committed OIDs, bypassing `repo.submodules()` to avoid
+/// libgit2's per-submodule config snapshot overhead. Per-submodule I/O (reading
+/// the submodule's HEAD for workdir OID/branch, computing status) is
 /// parallelized via rayon.
 ///
 /// `need_submod_head` and `need_local_status` select the expensive operations
 /// required by the template.
 fn gather_info(
     root_path: &Path,
-    server_statuses: Option<&[(String, StatusSummary)]>,
+    server_statuses: Option<&[(GitPath, StatusSummary)]>,
     need_submod_head: bool,
     need_local_status: bool,
 ) -> ListResult<Vec<SubmoduleInfo>> {
@@ -153,55 +192,55 @@ fn gather_info(
 
     use rayon::prelude::*;
 
-    let gitmodule_entries = parse_gitmodules(root_path)?;
+    let repo = Repository::open(root_path)?;
+    let mut gitmodules = parse_gitmodules(root_path)?;
 
     // Look up committed OIDs from the parent's HEAD tree
-    let repo = Repository::open(root_path)?;
     let head_tree = repo.head()?.peel_to_tree()?;
-    let partial: Vec<_> = gitmodule_entries
+    let partial: Vec<_> = substatus::gitlink_paths(&repo)?
         .into_iter()
-        .map(|(name, path_str, branch)| {
-            let commit = head_tree
-                .get_path(Path::new(&path_str))
+        .map(|path| {
+            let commit = path
+                .to_path()
                 .ok()
+                .and_then(|rel| head_tree.get_path(rel).ok())
                 .map(|e| e.id());
-            (name, path_str, commit, branch)
+            let gitmodule = gitmodules.remove(&path);
+            (path, commit, gitmodule)
         })
         .collect();
 
-    let status_map: Option<HashMap<&str, StatusSummary>> =
-        server_statuses.map(|statuses| statuses.iter().map(|(p, s)| (p.as_str(), *s)).collect());
+    let status_map: Option<HashMap<&GitPath, StatusSummary>> =
+        server_statuses.map(|statuses| statuses.iter().map(|(p, s)| (p, *s)).collect());
     let tl_repo = thread_local::ThreadLocal::new();
 
-    // Resolve per-submodule fields in parallel
-    let mut infos: Vec<SubmoduleInfo> = partial
+    // Resolve per-submodule fields in parallel. The gitlinks arrive in index
+    // (path) order, which `collect` preserves.
+    partial
         .into_par_iter()
-        .map(|(name, path_str, commit, branch)| {
-            let (head, head_branch) = if need_submod_head {
-                read_submodule_head(&root_path.join(&path_str))
-            } else {
-                (None, None)
+        .map(|(path, commit, gitmodule)| {
+            // A path this platform cannot represent has no workdir to read.
+            let (head, head_branch) = match path.to_path() {
+                Ok(rel) if need_submod_head => read_submodule_head(&root_path.join(rel)),
+                _ => (None, None),
             };
 
             let status = match &status_map {
-                Some(map) => Some(
-                    map.get(path_str.as_str())
-                        .copied()
-                        .unwrap_or(StatusSummary::clean()),
-                ),
+                Some(map) => Some(map.get(&path).copied().unwrap_or(StatusSummary::clean())),
                 None if need_local_status => {
                     let repo = tl_repo.get_or_try(|| Repository::open(root_path))?;
                     Some(
-                        substatus::submodule_status(repo, &path_str)
+                        substatus::submodule_status(repo, &path)
                             .unwrap_or(StatusSummary::UNREADABLE),
                     )
                 }
                 None => None,
             };
 
+            let (name, branch) = gitmodule.map_or((None, None), |g| (Some(g.name), g.branch));
             Ok(SubmoduleInfo {
                 name,
-                path: path_str,
+                path,
                 commit,
                 head,
                 branch,
@@ -209,10 +248,7 @@ fn gather_info(
                 status,
             })
         })
-        .collect::<ListResult<Vec<_>>>()?;
-
-    infos.sort_unstable_by(|a, b| a.name.cmp(&b.name));
-    Ok(infos)
+        .collect()
 }
 
 /// Computes the column width for each placeholder by taking the maximum of
@@ -222,6 +258,7 @@ fn gather_info(
 fn compute_placeholder_widths(
     template: &Template<'_, 9>,
     submod_info: &[SubmoduleInfo],
+    quote_path: bool,
 ) -> [usize; 9] {
     let mut widths = [0usize; 9];
     let used = template.used();
@@ -238,8 +275,8 @@ fn compute_placeholder_widths(
     for info in submod_info {
         for (idx, &placeholder) in PLACEHOLDERS.iter().enumerate() {
             if used[idx] {
-                widths[idx] = widths[idx]
-                    .max(info.resolve_placeholder(placeholder).chars().count() + overhead[idx]);
+                let value = info.resolve_placeholder(placeholder, quote_path);
+                widths[idx] = widths[idx].max(display_width(&value) + overhead[idx]);
             }
         }
     }
@@ -254,18 +291,22 @@ fn format_output(
     submod_info: &[SubmoduleInfo],
     template: &Template<'_, 9>,
     header: bool,
-) -> String {
-    let mut output = String::new();
+    quote_path: bool,
+) -> Vec<u8> {
+    let mut output = Vec::new();
     let widths = if header {
-        compute_placeholder_widths(template, submod_info)
+        compute_placeholder_widths(template, submod_info, quote_path)
     } else {
         [0; 9]
     };
     if header {
-        output.push_str(&template.expand(|name| Cow::Owned(name.to_ascii_uppercase()), &widths));
+        output.extend(template.expand(
+            |name| Cow::Owned(name.to_ascii_uppercase().into_bytes()),
+            &widths,
+        ));
     }
     for info in submod_info {
-        output.push_str(&template.expand(|name| info.resolve_placeholder(name), &widths));
+        output.extend(template.expand(|name| info.resolve_placeholder(name, quote_path), &widths));
     }
     output
 }
@@ -306,8 +347,9 @@ pub fn list(
         need_submod_head,
         need_local_status,
     )?;
-    let output = format_output(&infos, &template, header);
-    print!("{output}");
+    let quote_path = ConfigDefaults::read(root_path).quote_path;
+    let output = format_output(&infos, &template, header, quote_path);
+    std::io::stdout().write_all(&output)?;
     Ok(())
 }
 
@@ -331,18 +373,18 @@ mod tests {
             .submodule("sub_a")
             .submodule("sub_b")
             .build();
-        let statuses = || -> Vec<(String, Option<StatusSummary>)> {
+        let statuses = || -> Vec<(GitPath, Option<StatusSummary>)> {
             gather_info(harness.root().path(), None, false, true)
                 .unwrap()
                 .into_iter()
-                .map(|info| (info.name, info.status))
+                .map(|info| (info.path, info.status))
                 .collect()
         };
         assert_eq!(
             statuses(),
             [
-                ("sub_a".to_owned(), Some(StatusSummary::clean())),
-                ("sub_b".to_owned(), Some(StatusSummary::clean())),
+                (GitPath::from("sub_a"), Some(StatusSummary::clean())),
+                (GitPath::from("sub_b"), Some(StatusSummary::clean())),
             ]
         );
 
@@ -350,9 +392,59 @@ mod tests {
         assert_eq!(
             statuses(),
             [
-                ("sub_a".to_owned(), Some(StatusSummary::UNREADABLE)),
-                ("sub_b".to_owned(), Some(StatusSummary::clean())),
+                (GitPath::from("sub_a"), Some(StatusSummary::UNREADABLE)),
+                (GitPath::from("sub_b"), Some(StatusSummary::clean())),
             ]
+        );
+    }
+
+    /// Rows come from the index, so a gitlink without a `.gitmodules` entry
+    /// still lists, with an empty name.
+    #[apply(formats)]
+    fn gitlink_without_a_gitmodules_entry_lists_without_a_name(ref_format: RefFormat) {
+        let harness = HarnessBuilder::new()
+            .no_server()
+            .ref_format(ref_format)
+            .submodule("sub_a")
+            .submodule("sub_b")
+            .build();
+        let rows = || {
+            let infos = gather_info(harness.root().path(), None, false, false).unwrap();
+            String::from_utf8(format_output(&infos, &tmpl("{name} {path}\n"), false, true)).unwrap()
+        };
+        assert_eq!(rows(), "sub_a sub_a\nsub_b sub_b\n");
+
+        harness.root().run_git(&[
+            "config",
+            "-f",
+            ".gitmodules",
+            "--remove-section",
+            "submodule.sub_b",
+        ]);
+        assert_eq!(rows(), "sub_a sub_a\n sub_b\n");
+    }
+
+    /// A name and path that are not UTF-8 print quoted under `core.quotePath`
+    /// and verbatim without it.
+    ///
+    /// Linux-only: Windows (NTFS is UTF-16) and macOS (EILSEQ) refuse the name.
+    #[cfg(target_os = "linux")]
+    #[apply(formats)]
+    fn non_utf8_name_and_path_follow_quote_path(ref_format: RefFormat) {
+        let harness = HarnessBuilder::new()
+            .no_server()
+            .ref_format(ref_format)
+            .submodule(b"sub\xff")
+            .build();
+        let infos = gather_info(harness.root().path(), None, false, false).unwrap();
+        let template = tmpl("{name} {path}\n");
+        assert_eq!(
+            format_output(&infos, &template, false, true),
+            b"\"sub\\377\" \"sub\\377\"\n"
+        );
+        assert_eq!(
+            format_output(&infos, &template, false, false),
+            b"sub\xff sub\xff\n"
         );
     }
 
@@ -432,8 +524,8 @@ mod tests {
 
     fn make_info(name: &str, path: &str, status: Option<StatusSummary>) -> SubmoduleInfo {
         SubmoduleInfo {
-            name: name.to_string(),
-            path: path.to_string(),
+            name: Some(name.as_bytes().to_vec()),
+            path: GitPath::from(path),
             commit: None,
             head: None,
             branch: None,
@@ -458,14 +550,15 @@ mod tests {
             make_info("a", "libs/a", None),
             make_info("b", "libs/b", None),
         ];
-        let output = format_output(&infos, &tmpl("{name}\n"), false);
-        assert_eq!(output, "a\nb\n");
+        let output = format_output(&infos, &tmpl("{name}\n"), false, true);
+        assert_eq!(output, b"a\nb\n");
     }
 
     #[test]
     fn format_output_with_header() {
         let infos = vec![make_info("sub", "sub", None)];
-        let output = format_output(&infos, &tmpl("{name}\n"), true);
+        let output = format_output(&infos, &tmpl("{name}\n"), true, true);
+        let output = String::from_utf8(output).unwrap();
         let lines: Vec<&str> = output.lines().collect();
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[0].trim(), "NAME");
@@ -479,8 +572,8 @@ mod tests {
             "sub",
             Some(StatusSummary::MODIFIED_CONTENT),
         )];
-        let output = format_output(&infos, &tmpl("{name}: {status}\n"), false);
-        assert_eq!(output, "sub: modified content\n");
+        let output = format_output(&infos, &tmpl("{name}: {status}\n"), false, true);
+        assert_eq!(output, b"sub: modified content\n");
     }
 
     #[test]
@@ -489,7 +582,7 @@ mod tests {
             make_info("short", "short", None),
             make_info("much_longer_name", "much_longer_name", None),
         ];
-        let widths = compute_placeholder_widths(&tmpl("{name}\n"), &infos);
+        let widths = compute_placeholder_widths(&tmpl("{name}\n"), &infos, true);
         // "much_longer_name" is 16 chars, "NAME" header is 4; max is 16
         assert_eq!(widths[0], 16);
     }
@@ -497,7 +590,7 @@ mod tests {
     #[test]
     fn compute_widths_unused_placeholder_is_zero() {
         let infos = vec![make_info("sub", "sub", None)];
-        let widths = compute_placeholder_widths(&tmpl("{name}\n"), &infos);
+        let widths = compute_placeholder_widths(&tmpl("{name}\n"), &infos, true);
         // "path" (index 1) is not in the template
         assert_eq!(widths[1], 0);
     }

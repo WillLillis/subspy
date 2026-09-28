@@ -16,6 +16,7 @@ use subspy::{
         client::{recv_status_response, request_reindex, request_shutdown, send_status_request},
         ipc_connect, ipc_socket_path,
     },
+    git::path::GitPath,
 };
 use tempfile::TempDir;
 
@@ -66,7 +67,7 @@ pub const FIXTURE_TIME: i64 = 1_700_000_000;
 
 /// Builder for constructing a [`TestHarness`] with a specific repository layout.
 pub struct HarnessBuilder {
-    submodule_names: Vec<String>,
+    submodule_names: Vec<GitPath>,
     start_server: bool,
     as_worktree: bool,
     worktree_init_submodules: bool,
@@ -107,16 +108,18 @@ impl HarnessBuilder {
         self
     }
 
-    /// Add a submodule with the given relative path name.
-    pub fn submodule(mut self, name: &str) -> Self {
-        self.submodule_names.push(name.to_string());
+    /// Add a submodule with the given relative path name, which may be any bytes
+    /// the platform accepts in a path.
+    pub fn submodule(mut self, name: impl AsRef<[u8]>) -> Self {
+        self.submodule_names.push(GitPath::from(name.as_ref()));
         self
     }
 
     /// Add N submodules named `sub_0`, `sub_1`, ..., `sub_{n-1}`.
     pub fn submodules(mut self, count: usize) -> Self {
         for i in 0..count {
-            self.submodule_names.push(format!("sub_{i}"));
+            self.submodule_names
+                .push(GitPath::from(format!("sub_{i}").as_str()));
         }
         self
     }
@@ -177,7 +180,7 @@ impl HarnessBuilder {
             let wt_submods = self
                 .submodule_names
                 .iter()
-                .map(|name| (name.clone(), wt_path.join(name)))
+                .map(|name| (name.clone(), wt_path.join(name.to_path().unwrap())))
                 .collect();
             (wt_path, wt_submods)
         } else {
@@ -222,7 +225,7 @@ pub struct TestHarness {
     /// Background thread running `watch()`. `None` after shutdown.
     server_thread: Option<JoinHandle<()>>,
     /// Submodule relative name -> the submodule's working tree as a `Repo`.
-    submodules: HashMap<String, Repo>,
+    submodules: HashMap<GitPath, Repo>,
     /// Temp directory holding the entire test fixture. Must be the last field
     /// so it outlives the server thread during automatic field drops.
     _temp_dir: TempDir,
@@ -235,19 +238,20 @@ impl TestHarness {
     }
 
     /// Returns a submodule's working tree as a [`Repo`] for compositional ops.
-    pub fn submodule(&self, name: &str) -> &Repo {
+    pub fn submodule(&self, name: impl AsRef<[u8]>) -> &Repo {
+        let name = name.as_ref();
         self.submodules
             .get(name)
-            .unwrap_or_else(|| panic!("No submodule named '{name}'"))
+            .unwrap_or_else(|| panic!("No submodule named {:?}", GitPath::from(name)))
     }
 
     /// Returns the names of all registered submodules.
-    pub fn submodule_names(&self) -> impl Iterator<Item = &str> {
-        self.submodules.keys().map(String::as_str)
+    pub fn submodule_names(&self) -> impl Iterator<Item = &GitPath> {
+        self.submodules.keys()
     }
 
     /// Request the current status from the watch server.
-    pub fn status(&self) -> Vec<(String, StatusSummary)> {
+    pub fn status(&self) -> Vec<(GitPath, StatusSummary)> {
         let mut conn =
             send_status_request(self.root.path(), false).expect("send_status_request failed");
         recv_status_response(&mut conn, false)
@@ -258,7 +262,7 @@ impl TestHarness {
     /// Poll status until it matches the expected predicate, or panic on timeout.
     pub fn assert_status_eventually<F>(&self, description: &str, predicate: F)
     where
-        F: Fn(&[(String, StatusSummary)]) -> bool,
+        F: Fn(&[(GitPath, StatusSummary)]) -> bool,
     {
         self.assert_status_eventually_with(description, DEFAULT_TIMEOUT, POLL_INTERVAL, predicate);
     }
@@ -272,7 +276,7 @@ impl TestHarness {
         poll_interval: Duration,
         predicate: F,
     ) where
-        F: Fn(&[(String, StatusSummary)]) -> bool,
+        F: Fn(&[(GitPath, StatusSummary)]) -> bool,
     {
         let start = Instant::now();
         loop {
@@ -290,16 +294,17 @@ impl TestHarness {
     }
 
     /// Assert that a specific submodule has exactly the given flags.
-    pub fn assert_submodule_status(&self, submodule: &str, expected: StatusSummary) {
-        let description = format!("submodule '{submodule}' to have status {expected:?}");
+    pub fn assert_submodule_status(&self, submodule: impl AsRef<[u8]>, expected: StatusSummary) {
+        let submodule = GitPath::from(submodule.as_ref());
+        let description = format!("submodule {submodule:?} to have status {expected:?}");
         self.assert_status_eventually(&description, |statuses| {
             if expected == StatusSummary::clean() {
                 // CLEAN submodules are omitted from the response
-                !statuses.iter().any(|(name, _)| name == submodule)
+                !statuses.iter().any(|(name, _)| *name == submodule)
             } else {
                 statuses
                     .iter()
-                    .any(|(name, st)| name == submodule && *st == expected)
+                    .any(|(name, st)| *name == submodule && *st == expected)
             }
         });
     }
@@ -313,7 +318,7 @@ impl TestHarness {
     pub fn assert_deleted_submodule_paths(&self, expected: &[&str]) {
         let repo = Repository::open(self.root.path()).expect("Failed to open root repo");
         let changes = subspy::status::submodule_changes(&repo).expect("submodule_changes failed");
-        let expected: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
+        let expected: Vec<GitPath> = expected.iter().map(|s| GitPath::from(*s)).collect();
         assert_eq!(changes.deleted, expected, "deleted submodules mismatch");
     }
 
@@ -343,7 +348,7 @@ impl TestHarness {
 
         let submodule =
             Repo::new(&self.root.path().join(name)).with_ref_format(self.root.ref_format);
-        self.submodules.insert(name.to_string(), submodule);
+        self.submodules.insert(GitPath::from(name), submodule);
     }
 
     /// Add a new submodule to the root repo at runtime.
@@ -358,7 +363,7 @@ impl TestHarness {
     pub fn remove_submodule(&mut self, name: &str) {
         self.root.run_git(&["rm", "-f", name]);
         self.root.commit(&format!("Remove submodule {name}"));
-        self.submodules.remove(name);
+        self.submodules.remove(name.as_bytes());
     }
 
     /// Path to the `source_repos/` directory in the temp dir.
@@ -478,6 +483,27 @@ impl Drop for TestHarness {
 // -- Git setup helpers --
 // All repo creation is fully local: no network access, no remotes, no pushes.
 
+/// Where the source repository for the submodule `name` lives under
+/// `sources_dir`. libgit2 takes the clone URL as a string, so a name that is
+/// not UTF-8 gets a directory name with each byte above 0x7f written as `_xHH`.
+fn source_repo_path(sources_dir: &Path, name: &GitPath) -> PathBuf {
+    match std::str::from_utf8(name.as_bytes()) {
+        Ok(name) => sources_dir.join(name),
+        Err(_) => sources_dir.join(
+            name.as_bytes()
+                .iter()
+                .map(|&b| {
+                    if b.is_ascii() {
+                        char::from(b).to_string()
+                    } else {
+                        format!("_x{b:02x}")
+                    }
+                })
+                .collect::<String>(),
+        ),
+    }
+}
+
 /// Creates a non-bare repository at `path` with an initial commit containing
 /// a single `README.md` file. Used as the source for submodule additions.
 pub fn create_source_repo(path: &Path) {
@@ -507,8 +533,8 @@ fn fixture_signature() -> Signature<'static> {
 fn init_repo_with_submodules(
     temp_dir: &Path,
     root_path: &Path,
-    submodule_names: &[String],
-) -> HashMap<String, PathBuf> {
+    submodule_names: &[GitPath],
+) -> HashMap<GitPath, PathBuf> {
     let repo = Repository::init(root_path).expect("Failed to init root repo");
     let sig = fixture_signature();
 
@@ -526,19 +552,19 @@ fn init_repo_with_submodules(
     std::fs::create_dir_all(&sources_dir).unwrap();
 
     for name in submodule_names {
-        let source_path = sources_dir.join(name);
+        let source_path = source_repo_path(&sources_dir, name);
         create_source_repo(&source_path);
 
         let url = format!("{}", source_path.display());
         let mut submodule = repo
-            .submodule(&url, Path::new(name), true)
+            .submodule(&url, name.to_path().unwrap(), true)
             .expect("Failed to add submodule");
         submodule.clone(None).expect("Failed to clone submodule");
         submodule
             .add_finalize()
             .expect("Failed to finalize submodule");
 
-        submod_paths.insert(name.clone(), root_path.join(name));
+        submod_paths.insert(name.clone(), root_path.join(name.to_path().unwrap()));
     }
 
     // Commit the submodule additions
@@ -546,7 +572,7 @@ fn init_repo_with_submodules(
         let mut index = repo.index().unwrap();
         index.add_path(Path::new(".gitmodules")).unwrap();
         for name in submodule_names {
-            index.add_path(Path::new(name)).unwrap();
+            index.add_path(name.to_path().unwrap()).unwrap();
         }
         index.write().unwrap();
         let tree_oid = index.write_tree().unwrap();
@@ -683,10 +709,10 @@ impl Repo {
     /// returning the raw `Output` without asserting. Use for commands that
     /// are expected to fail (e.g. a merge that conflicts).
     pub fn try_git(&self, args: &[&str]) -> std::process::Output {
-        let r = self.root.display().to_string();
-        let mut full: Vec<&str> = vec!["-C", &r];
-        full.extend(args);
-        git_command(&full)
+        git_command()
+            .arg("-C")
+            .arg(&self.root)
+            .args(args)
             .env("GIT_DEFAULT_REF_FORMAT", self.ref_format.to_string())
             .output()
             .unwrap()
@@ -714,10 +740,10 @@ pub fn git(args: &[&str]) {
 /// hitting a conflict). Pins author/committer identity + date via env
 /// so fixture commit SHAs are deterministic.
 pub fn git_may_fail(args: &[&str]) -> std::process::Output {
-    git_command(args).output().unwrap()
+    git_command().args(args).output().unwrap()
 }
 
-fn git_command(args: &[&str]) -> std::process::Command {
+fn git_command() -> std::process::Command {
     let pinned_date = format!("{FIXTURE_TIME} +0000");
     let mut command = std::process::Command::new("git");
     command
@@ -740,8 +766,7 @@ fn git_command(args: &[&str]) -> std::process::Command {
         .env("GIT_AUTHOR_DATE", &pinned_date)
         .env("GIT_COMMITTER_NAME", FIXTURE_NAME)
         .env("GIT_COMMITTER_EMAIL", FIXTURE_EMAIL)
-        .env("GIT_COMMITTER_DATE", &pinned_date)
-        .args(args);
+        .env("GIT_COMMITTER_DATE", &pinned_date);
     command
 }
 
@@ -753,7 +778,7 @@ fn git_command(args: &[&str]) -> std::process::Command {
 fn setup_worktree(
     temp_dir: &Path,
     super_root: &Path,
-    submodule_names: &[String],
+    submodule_names: &[GitPath],
     init_submodules: bool,
     ref_format: RefFormat,
 ) -> PathBuf {

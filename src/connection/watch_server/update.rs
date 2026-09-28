@@ -131,7 +131,7 @@ impl WatchServer {
             let publish_status = |status| {
                 if !cancel.load(Ordering::Relaxed) {
                     let mut guard = statuses.lock().expect("StatusMap mutex poisoned");
-                    if let Some(entry) = guard.get_mut(relative_path.as_str()) {
+                    if let Some(entry) = guard.get_mut(&relative_path) {
                         *entry = status;
                     } else {
                         guard.insert(relative_path.clone(), status);
@@ -160,7 +160,7 @@ impl WatchServer {
                 let read_ok = match substatus::submodule_status(&repo, &relative_path) {
                     Ok(submod_status) => {
                         wtrace!(|s| ReReadOk {
-                            rel: s.intern_str(&relative_path),
+                            rel: s.intern_str(&relative_path.display()),
                             status: submod_status,
                         });
                         publish_status(submod_status);
@@ -169,7 +169,7 @@ impl WatchServer {
                     #[cfg_attr(not(trace_events), allow(unused_variables))]
                     Err(SubstatusError::Git(e)) => {
                         wtrace!(|s| ReReadFailed {
-                            rel: s.intern_str(&relative_path),
+                            rel: s.intern_str(&relative_path.display()),
                             code: e.code(),
                             class: e.class(),
                             msg: s.intern_str(e.message()),
@@ -177,10 +177,13 @@ impl WatchServer {
                         publish_status(StatusSummary::UNREADABLE);
                         false
                     }
-                    Err(SubstatusError::BareRepository) => {
+                    Err(
+                        error @ (SubstatusError::BareRepository
+                        | SubstatusError::UnrepresentablePath(_)),
+                    ) => {
                         error!(
-                            "Failed to read status for {relative_path}: {}",
-                            SubstatusError::BareRepository
+                            "Failed to read status for {}: {error}",
+                            relative_path.display()
                         );
                         publish_status(StatusSummary::UNREADABLE);
                         false

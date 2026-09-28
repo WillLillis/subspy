@@ -10,6 +10,7 @@ use std::{
 
 use crate::{
     StatusSummary,
+    git::path::GitPath,
     paint::{GREEN, RED, paint_into},
 };
 
@@ -134,8 +135,8 @@ const fn has_status_info(st: StatusSummary) -> bool {
 )]
 fn print_staged_changes(
     tracked_rows: Vec<TrackedRow<'_>>,
-    submodule_statuses: &[(String, StatusSummary)],
-    deleted_submodule_paths: &[String],
+    submodule_statuses: &[(GitPath, StatusSummary)],
+    deleted_submodule_paths: &[GitPath],
     renamed_submodules: &[super::SubmoduleRename],
     rel: &Relativizer<'_>,
     staged_header: &str,
@@ -149,11 +150,7 @@ fn print_staged_changes(
     // libgit2 excludes submodules from them, so interleave the submodule rows.
     // Non-staged (worktree-only) entries fall through the `istatus` match below.
     let mut submods: Vec<SubRow<'_>> = Vec::new();
-    submods.extend(
-        deleted_submodule_paths
-            .iter()
-            .map(|path| SubRow::Deleted(path)),
-    );
+    submods.extend(deleted_submodule_paths.iter().map(SubRow::Deleted));
     submods.extend(renamed_submodules.iter().map(SubRow::Renamed));
     submods.extend(
         submodule_statuses
@@ -282,7 +279,7 @@ fn print_unstaged_changes(
     non_submod: &Statuses<'_>,
     corrections: &Corrections,
     path_filter: PathFilter<'_>,
-    submodule_statuses: &[(String, StatusSummary)],
+    submodule_statuses: &[(GitPath, StatusSummary)],
     unstaged_header: &str,
     rel: &Relativizer<'_>,
     out: &mut impl Write,
@@ -471,7 +468,8 @@ fn print_ignored_files(
 
 /// Prints the section listing submodules whose status could not be read.
 fn print_unreadable_submodules(
-    submodules: &[(String, StatusSummary)],
+    submodules: &[(GitPath, StatusSummary)],
+    rel: &Relativizer<'_>,
     out: &mut impl Write,
 ) -> Result<bool, io::Error> {
     let mut header = false;
@@ -483,7 +481,9 @@ fn print_unreadable_submodules(
             writeln!(out, "{UNREADABLE_HEADER}")?;
             header = true;
         }
-        writeln!(out, "\t{path}")?;
+        out.write_all(b"\t")?;
+        rel.write_to(out, path.as_bytes())?;
+        out.write_all(b"\n")?;
     }
     if header {
         writeln!(out)?;
@@ -671,7 +671,7 @@ pub fn display_status(
             }
         )?;
     }
-    let has_unreadable = print_unreadable_submodules(submodules, out)?;
+    let has_unreadable = print_unreadable_submodules(submodules, rel, out)?;
 
     print_summary(
         &SummaryState {

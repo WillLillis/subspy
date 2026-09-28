@@ -5,12 +5,10 @@
 //! unparsable file fails every read even though no status fact lives in that
 //! file.
 
-use std::path::Path;
-
 use git2::{FileMode, Repository, RepositoryOpenFlags, StatusOptions};
 use thiserror::Error;
 
-use crate::StatusSummary;
+use crate::{StatusSummary, git::path::GitPath};
 
 /// Failure of a submodule status computation.
 #[derive(Error, Debug)]
@@ -19,6 +17,8 @@ pub enum SubstatusError {
     Git(#[from] git2::Error),
     #[error("cannot compute submodule status for a bare repository")]
     BareRepository,
+    #[error("submodule path {} is not UTF-8, which this platform requires", .0.display())]
+    UnrepresentablePath(GitPath),
 }
 
 /// Sub-repository status flags that count as modified content
@@ -44,21 +44,18 @@ const MODIFIED_FLAGS: git2::Status = git2::Status::INDEX_NEW
 /// # Errors
 ///
 /// Returns `git2::Error` if the index cannot be read.
-pub fn gitlink_paths(repo: &Repository) -> Result<Vec<String>, git2::Error> {
+pub fn gitlink_paths(repo: &Repository) -> Result<Vec<GitPath>, git2::Error> {
     let gitlink_mode = u32::from(FileMode::Commit);
     let index = repo.index()?;
-    let mut paths: Vec<String> = Vec::new();
+    let mut paths: Vec<GitPath> = Vec::new();
     for entry in index.iter() {
         if entry.mode != gitlink_mode {
             continue;
         }
-        let Ok(path) = std::str::from_utf8(&entry.path) else {
-            continue;
-        };
         // Conflict stages repeat a path consecutively (the index is
         // path-sorted), so adjacent deduplication suffices.
-        if paths.last().map(String::as_str) != Some(path) {
-            paths.push(path.to_owned());
+        if paths.last().map(GitPath::as_bytes) != Some(&entry.path[..]) {
+            paths.push(GitPath::from(entry.path));
         }
     }
 
@@ -80,19 +77,23 @@ pub fn gitlink_paths(repo: &Repository) -> Result<Vec<String>, git2::Error> {
 ///
 /// Returns [`SubstatusError::Git`] if the superproject index cannot be read, the
 /// submodule has a `.git` that cannot be opened, or the submodule's status walk
-/// fails, and [`SubstatusError::BareRepository`] when `repo` has no worktree.
-pub fn submodule_status(repo: &Repository, rel: &str) -> Result<StatusSummary, SubstatusError> {
+/// fails, [`SubstatusError::BareRepository`] when `repo` has no worktree, and
+/// [`SubstatusError::UnrepresentablePath`] when `rel` cannot exist on this
+/// platform's filesystem.
+pub fn submodule_status(repo: &Repository, rel: &GitPath) -> Result<StatusSummary, SubstatusError> {
     let commit_file_mode = u32::from(FileMode::Commit);
 
     let mut summary = StatusSummary::clean();
-    let rel_path = Path::new(rel);
+    let rel_path = rel
+        .to_path()
+        .map_err(|_| SubstatusError::UnrepresentablePath(rel.clone()))?;
 
     let index = repo.index()?;
     let index_gitlink = index
         .get_path(rel_path, 0)
         .filter(|e| e.mode == commit_file_mode)
         .map(|e| e.id)
-        .or_else(|| match conflicted_ours_gitlink(&index, rel) {
+        .or_else(|| match conflicted_ours_gitlink(&index, rel.as_bytes()) {
             Ok(oid) => oid,
             Err(error) => {
                 log::warn!("failed to read stage-2 gitlink for submodule {rel:?}: {error}");
@@ -172,7 +173,7 @@ pub fn submodule_status(repo: &Repository, rel: &str) -> Result<StatusSummary, S
 /// unmerged, found through the index's conflict records.
 fn conflicted_ours_gitlink(
     index: &git2::Index,
-    rel: &str,
+    rel: &[u8],
 ) -> Result<Option<git2::Oid>, git2::Error> {
     if !index.has_conflicts() {
         return Ok(None);
@@ -180,7 +181,7 @@ fn conflicted_ours_gitlink(
     for conflict in index.conflicts()? {
         let conflict = conflict?;
         let Some(ours) = conflict.our else { continue };
-        if ours.path == rel.as_bytes() && ours.mode == u32::from(FileMode::Commit) {
+        if ours.path == rel && ours.mode == u32::from(FileMode::Commit) {
             return Ok(Some(ours.id));
         }
     }
@@ -223,7 +224,7 @@ mod tests {
 
     fn status(harness: &TestHarness) -> Result<StatusSummary, SubstatusError> {
         let repo = Repository::open(harness.root().path()).unwrap();
-        submodule_status(&repo, "sub_a")
+        submodule_status(&repo, &GitPath::from("sub_a"))
     }
 
     #[apply(formats)]
