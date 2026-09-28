@@ -7,6 +7,8 @@
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
+use crate::git::path::GitPath;
+
 use super::StatusResult;
 
 pub(super) struct ConflictEntry {
@@ -120,7 +122,7 @@ fn path_within(path: &[u8], prefix: &[u8]) -> bool {
 
 pub(super) fn build_conflict_map(
     index: &git2::Index,
-) -> StatusResult<FxHashMap<String, ConflictEntry>> {
+) -> StatusResult<FxHashMap<GitPath, ConflictEntry>> {
     let mut map = FxHashMap::default();
     if !index.has_conflicts() {
         return Ok(map);
@@ -132,8 +134,7 @@ pub(super) fn build_conflict_map(
             .as_ref()
             .or(c.their.as_ref())
             .or(c.ancestor.as_ref())
-            .and_then(|e| std::str::from_utf8(&e.path).ok())
-            .map(str::to_string);
+            .map(|e| GitPath::from(&e.path[..]));
         let Some(path) = path else { continue };
         map.insert(
             path,

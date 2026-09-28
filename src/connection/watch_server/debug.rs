@@ -23,10 +23,11 @@ impl WatchServer {
             .submodules
             .iter()
             .map(|relative| {
-                (
-                    relative.clone(),
-                    self.root_path.join(relative).display().to_string(),
-                )
+                let workdir = relative.to_path().map_or_else(
+                    |_| "(not watched: not UTF-8)".to_owned(),
+                    |rel| self.root_path.join(rel).display().to_string(),
+                );
+                (format!("{relative:?}"), workdir)
             })
             .collect();
         let tripwires: Vec<String> = self
@@ -36,7 +37,7 @@ impl WatchServer {
             .collect();
 
         let submodule_statuses = try_lock_for(&self.submod_statuses, DEBUG_LOCK_TIMEOUT)
-            .map(|guard| guard.iter().map(|(k, v)| (k.clone(), *v)).collect());
+            .map(|guard| guard.iter().map(|(k, v)| (format!("{k:?}"), *v)).collect());
 
         let in_flight_tasks = in_flight.and_then(|in_flight| {
             try_lock_for(&in_flight.0, DEBUG_LOCK_TIMEOUT).map(|guard| {
@@ -47,7 +48,7 @@ impl WatchServer {
                         let rel_path = self
                             .submodules
                             .get(*idx)
-                            .map_or("(unknown)", String::as_str);
+                            .map_or_else(|| "(unknown)".to_owned(), |path| format!("{path:?}"));
                         let cancelled = state.cancel.load(Ordering::Relaxed);
                         let state_str = match (state.dirty, cancelled) {
                             (false, false) => "active",
@@ -55,7 +56,7 @@ impl WatchServer {
                             (true, false) => "dirty",
                             (true, true) => "dirty (cancelling)",
                         };
-                        (rel_path.to_owned(), state_str.to_owned())
+                        (rel_path, state_str.to_owned())
                     })
                     .collect()
             })

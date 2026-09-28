@@ -17,7 +17,7 @@ use std::io::{self, Write};
 
 use anstyle::Style;
 
-use crate::{StatusSummary, paint::paint_into};
+use crate::{StatusSummary, git::path::GitPath, paint::paint_into};
 
 use super::{
     Divergence, PorcelainOpts, StatusEntries, StatusResult, UpstreamStatus,
@@ -105,12 +105,7 @@ pub(super) fn display_xy_lines(
             .iter()
             .map(|(path, st)| SubRow::Modified(path, *st)),
     );
-    submods.extend(
-        entries
-            .deleted_submodules
-            .iter()
-            .map(|path| SubRow::Deleted(path)),
-    );
+    submods.extend(entries.deleted_submodules.iter().map(SubRow::Deleted));
     submods.extend(entries.renamed_submodules.iter().map(SubRow::Renamed));
 
     for_each_tracked_row(tracked, submods, |row| match row {
@@ -140,12 +135,15 @@ pub(super) fn display_xy_lines(
         }
         TrackedOrSubRow::Sub(SubRow::Renamed(rename)) => {
             // `R ` is a staged submodule rename. With -z the new and old paths
-            // are NUL-separated. Itherwise they render as `old -> new`.
+            // are NUL-separated. Otherwise they render as `old -> new`.
             let x = XyChar::new('R', style.palette.map(|p| p.updated));
             let y = XyChar::new(' ', None);
             write_xy_prefix(out, x, y)?;
             if null_terminate {
-                write!(out, "{new}\0{old}\0", new = rename.new, old = rename.old)
+                out.write_all(rename.new.as_bytes())?;
+                out.write_all(b"\0")?;
+                out.write_all(rename.old.as_bytes())?;
+                out.write_all(b"\0")
             } else {
                 write_path(out, rename.old.as_bytes(), rel, false, style)?;
                 out.write_all(b" -> ")?;
@@ -450,14 +448,15 @@ fn write_synthetic_rename_line(
 /// color slot.
 fn write_conflict(
     entry: &git2::StatusEntry<'_>,
-    conflicts: &FxHashMap<String, ConflictEntry>,
+    conflicts: &FxHashMap<GitPath, ConflictEntry>,
     out: &mut impl Write,
     rel: &Relativizer<'_>,
     null_terminate: bool,
     style: &LineStyle,
 ) -> io::Result<()> {
-    let path = entry.path().unwrap_or("");
-    let xy = conflicts.get(path).map_or("UU", |c| c.kind().xy());
+    let xy = conflicts
+        .get(entry.path_bytes())
+        .map_or("UU", |c| c.kind().xy());
     let mut chars = xy.chars();
     let color = style.palette.map(|p| p.unmerged);
     let x = XyChar::new(chars.next().unwrap(), color);
@@ -468,7 +467,7 @@ fn write_conflict(
 /// Writes a submodule entry. XY derived from the [`StatusSummary`]
 /// (staged-new / staged / dirty-content / deleted-workdir flags).
 fn write_submodule(
-    path: &str,
+    path: &GitPath,
     st: StatusSummary,
     out: &mut impl Write,
     rel: &Relativizer<'_>,

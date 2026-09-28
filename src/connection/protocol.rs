@@ -3,7 +3,7 @@
 
 use bincode::{BorrowDecode, Encode};
 
-use crate::StatusSummary;
+use crate::{StatusSummary, git::path::GitPath};
 
 use super::IPC_VERSION;
 
@@ -63,7 +63,7 @@ pub struct DebugState {
 #[derive(Clone, Debug, Eq, PartialEq, Encode, BorrowDecode)]
 pub enum ServerMessage {
     Status {
-        statuses: Vec<(String, StatusSummary)>,
+        statuses: Vec<(GitPath, StatusSummary)>,
         total: u32,
     },
     Indexing {
@@ -341,14 +341,14 @@ mod tests {
                 "ServerMessage::Status(one entry, total=3)",
                 bincode::encode_to_vec(
                     ServerMessage::Status {
-                        statuses: vec![("sub".to_string(), StatusSummary::MODIFIED_CONTENT)],
+                        statuses: vec![(GitPath::from("sub"), StatusSummary::MODIFIED_CONTENT)],
                         total: 3,
                     },
                     BINCODE_CFG,
                 )
                 .unwrap(),
                 // variant(0,0,0,0) | vec_len(1,0,0,0,0,0,0,0)
-                // | str_len(3,0,0,0,0,0,0,0) | "sub" | flags(1)
+                // | path_len(3,0,0,0,0,0,0,0) | "sub" | flags(1)
                 // | total(3,0,0,0)
                 &[
                     0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, b's', b'u', b'b',

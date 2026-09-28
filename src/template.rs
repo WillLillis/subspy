@@ -72,20 +72,20 @@ pub fn find_unescaped(haystack: &str, needle: char) -> Option<usize> {
 
 /// Finds the longest matching placeholder name within `content`.
 ///
-/// Returns the placeholder's index and name, or `None` if no placeholder
-/// matches. The longest match wins so that e.g. `"commit_long"` is
-/// preferred over `"commit"`.
+/// Returns the placeholder's index and name and the offset where the name
+/// starts in `content`, or `None` if no placeholder matches. The longest match
+/// wins so that e.g. `"commit_long"` is preferred over `"commit"`.
 #[must_use]
 pub fn find_placeholder<'a, const N: usize>(
     content: &str,
     placeholders: &[&'a str; N],
-) -> Option<(usize, &'a str)> {
+) -> Option<(usize, &'a str, usize)> {
     placeholders
         .iter()
         .copied()
         .enumerate()
-        .filter(|(_, p)| content.contains(p))
-        .max_by_key(|(_, p)| p.len())
+        .filter_map(|(idx, p)| content.find(p).map(|at| (idx, p, at)))
+        .max_by_key(|(_, p, _)| p.len())
 }
 
 /// One piece of a parsed [`Template`].
@@ -93,13 +93,14 @@ pub fn find_placeholder<'a, const N: usize>(
 enum Segment<'t> {
     /// Literal output text, with backslash escapes (`\n`, `\t`, `\{`, ...) resolved
     Literal(String),
-    /// A `{...}` block. `idx` and `name` identify the matched placeholder. `content`
-    /// is the full inside-braces text, so a wrapper like `{(name)}` is preserved
-    /// and padded as a unit.
+    /// A `{...}` block. `idx` and `name` identify the matched placeholder.
+    /// `prefix` and `suffix` are the inside-braces text around the name, so a
+    /// wrapper like `{(name)}` is preserved and padded as a unit.
     Placeholder {
         idx: usize,
         name: &'t str,
-        content: &'t str,
+        prefix: &'t str,
+        suffix: &'t str,
     },
 }
 
@@ -167,7 +168,7 @@ impl<'t, const N: usize> Template<'t, N> {
                     }));
                 };
                 let content = &template[start..start + end];
-                let Some((idx, name)) = find_placeholder(content, placeholders) else {
+                let Some((idx, name, at)) = find_placeholder(content, placeholders) else {
                     return Err(TemplateError::UnknownPlaceholder(UnknownPlaceholderError {
                         template: template.to_string(),
                         content_range: start..start + end,
@@ -175,7 +176,12 @@ impl<'t, const N: usize> Template<'t, N> {
                 };
                 used[idx] = true;
                 overhead[idx] = content.chars().count() - name.len();
-                segments.push(Segment::Placeholder { idx, name, content });
+                segments.push(Segment::Placeholder {
+                    idx,
+                    name,
+                    prefix: &content[..at],
+                    suffix: &content[at + name.len()..],
+                });
                 skip_until = start + end + 1;
                 continue;
             }
@@ -209,37 +215,42 @@ impl<'t, const N: usize> Template<'t, N> {
 impl<const N: usize> Template<'_, N> {
     /// Expands the template, calling `resolve(name)` for each placeholder and
     /// left-padding each resolved block to `widths[idx]` columns (zero width =
-    /// no padding).
+    /// no padding). Resolved values are bytes, so one that is not UTF-8 passes
+    /// through unchanged.
     #[must_use]
     pub fn expand<'a>(
         &self,
-        resolve: impl Fn(&str) -> Cow<'a, str>,
+        resolve: impl Fn(&str) -> Cow<'a, [u8]>,
         widths: &[usize; N],
-    ) -> String {
-        use std::fmt::Write as _;
-
-        let mut output = String::new();
+    ) -> Vec<u8> {
+        let mut output = Vec::new();
         for segment in &self.segments {
             match *segment {
-                Segment::Literal(ref text) => output.push_str(text),
-                Segment::Placeholder { idx, name, content } => {
-                    let value = resolve(name);
-                    let display = if content.len() == name.len() {
-                        value
-                    } else {
-                        Cow::Owned(content.replacen(name, &value, 1))
-                    };
-                    let w = widths[idx];
-                    if w > 0 {
-                        let _ = write!(output, "{display:<w$}");
-                    } else {
-                        output.push_str(&display);
-                    }
+                Segment::Literal(ref text) => output.extend_from_slice(text.as_bytes()),
+                Segment::Placeholder {
+                    idx,
+                    name,
+                    prefix,
+                    suffix,
+                } => {
+                    let start = output.len();
+                    output.extend_from_slice(prefix.as_bytes());
+                    output.extend_from_slice(&resolve(name));
+                    output.extend_from_slice(suffix.as_bytes());
+                    let padding = widths[idx].saturating_sub(display_width(&output[start..]));
+                    output.resize(output.len() + padding, b' ');
                 }
             }
         }
         output
     }
+}
+
+/// The columns `bytes` occupies: one per character, counting each invalid
+/// sequence as one replacement character.
+#[must_use]
+pub fn display_width(bytes: &[u8]) -> usize {
+    String::from_utf8_lossy(bytes).chars().count()
 }
 
 #[cfg(test)]
@@ -298,7 +309,7 @@ mod tests {
 
     #[test]
     fn find_placeholder_exact() {
-        assert_eq!(find_placeholder("name", &TEST_PH), Some((0, "name")));
+        assert_eq!(find_placeholder("name", &TEST_PH), Some((0, "name", 0)));
     }
 
     #[test]
@@ -306,14 +317,14 @@ mod tests {
         // "commit_long" contains "commit", but longest wins
         assert_eq!(
             find_placeholder("commit_long", &TEST_PH),
-            Some((2, "commit_long"))
+            Some((2, "commit_long", 0))
         );
     }
 
     #[test]
     fn find_placeholder_substring_in_decorator() {
         // "(name)" contains "name"
-        assert_eq!(find_placeholder("(name)", &TEST_PH), Some((0, "name")));
+        assert_eq!(find_placeholder("(name)", &TEST_PH), Some((0, "name", 1)));
     }
 
     #[test]
@@ -341,9 +352,14 @@ mod tests {
         resolve: impl Fn(&str) -> Cow<'a, str>,
         widths: &[usize; 3],
     ) -> String {
-        Template::parse(template, &SIMPLE_PH)
-            .unwrap()
-            .expand(resolve, widths)
+        let expanded = Template::parse(template, &SIMPLE_PH).unwrap().expand(
+            |name| match resolve(name) {
+                Cow::Borrowed(value) => Cow::Borrowed(value.as_bytes()),
+                Cow::Owned(value) => Cow::Owned(value.into_bytes()),
+            },
+            widths,
+        );
+        String::from_utf8(expanded).unwrap()
     }
 
     #[test]

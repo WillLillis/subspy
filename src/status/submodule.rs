@@ -7,7 +7,7 @@ use std::path::Path;
 
 use crate::{
     StatusSummary,
-    git::{parse_gitmodules, read_submodule_head, substatus},
+    git::{path::GitPath, read_submodule_head, substatus},
 };
 
 use super::{IgnoreSubmodules, StatusResult, conflict::conflicted_paths};
@@ -16,8 +16,8 @@ use super::{IgnoreSubmodules, StatusResult, conflict::conflicted_paths};
 /// gitlink OID, different path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubmoduleRename {
-    pub old: String,
-    pub new: String,
+    pub old: GitPath,
+    pub new: GitPath,
 }
 
 /// HEAD-to-index submodule changes that don't show up in
@@ -25,7 +25,7 @@ pub struct SubmoduleRename {
 /// the index) and renames (same gitlink OID at a different path).
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct SubmoduleChanges {
-    pub deleted: Vec<String>,
+    pub deleted: Vec<GitPath>,
     pub renamed: Vec<SubmoduleRename>,
 }
 
@@ -49,30 +49,20 @@ pub fn submodule_changes(repo: &Repository) -> StatusResult<SubmoduleChanges> {
     // Collect every HEAD gitlink so we can later distinguish "this
     // index entry is a fresh path" (rename candidate) from "this index
     // entry is just HEAD's own submodule at the same path" (no rename).
-    let mut head_gitlinks: Vec<(String, git2::Oid)> = Vec::new();
-    head_tree.walk(git2::TreeWalkMode::PreOrder, |root, entry| {
-        if entry.filemode() == i32::from(git2::FileMode::Commit) {
-            let Ok(name) = entry.name() else {
-                return git2::TreeWalkResult::Skip;
-            };
-            let path = if root.is_empty() {
-                name.to_string()
-            } else {
-                format!("{root}{name}")
-            };
-            head_gitlinks.push((path, entry.id()));
-            git2::TreeWalkResult::Skip
-        } else {
-            git2::TreeWalkResult::Ok
-        }
-    })?;
+    let mut head_gitlinks = Vec::new();
+    tree_gitlinks(repo, &head_tree, &mut Vec::new(), &mut head_gitlinks)?;
 
     // HEAD gitlinks lacking a stage-0 entry are candidates for `git rm` or
     // `git mv`. Per-path `get_path` lookups form the fast-path gate, allowing the
-    // common case to return before scanning the full index or conflict state.
-    let mut missing: Vec<(String, git2::Oid)> = head_gitlinks
+    // common case to return before scanning the full index or conflict state. A
+    // path this platform cannot represent has no lookup, so it never counts as
+    // missing.
+    let mut missing: Vec<(GitPath, git2::Oid)> = head_gitlinks
         .iter()
-        .filter(|(path, _)| index.get_path(Path::new(path), 0).is_none())
+        .filter(|(path, _)| {
+            path.to_path()
+                .is_ok_and(|path| index.get_path(path, 0).is_none())
+        })
         .cloned()
         .collect();
 
@@ -125,15 +115,40 @@ pub fn submodule_changes(repo: &Repository) -> StatusResult<SubmoduleChanges> {
             continue;
         };
         let (old_path, _) = missing.remove(pos);
-        let new_path = String::from_utf8_lossy(new_path_bytes).into_owned();
         changes.renamed.push(SubmoduleRename {
             old: old_path,
-            new: new_path,
+            new: GitPath::from(new_path_bytes),
         });
     }
     changes.deleted = missing.into_iter().map(|(path, _)| path).collect();
 
     Ok(changes)
+}
+
+/// Appends every gitlink under `tree` to `gitlinks`, each with its path below
+/// `prefix`.
+///
+/// `Tree::walk` hands its callback each directory as `&str` and aborts on one
+/// that is not UTF-8, so this recurses over the entries' byte names instead.
+fn tree_gitlinks(
+    repo: &Repository,
+    tree: &git2::Tree<'_>,
+    prefix: &mut Vec<u8>,
+    gitlinks: &mut Vec<(GitPath, git2::Oid)>,
+) -> Result<(), git2::Error> {
+    for entry in tree {
+        let len = prefix.len();
+        prefix.extend_from_slice(entry.name_bytes());
+        let mode = entry.filemode();
+        if mode == i32::from(git2::FileMode::Commit) {
+            gitlinks.push((GitPath::from(&prefix[..]), entry.id()));
+        } else if mode == i32::from(git2::FileMode::Tree) {
+            prefix.push(b'/');
+            tree_gitlinks(repo, &repo.find_tree(entry.id())?, prefix, gitlinks)?;
+        }
+        prefix.truncate(len);
+    }
+    Ok(())
 }
 
 /// Folds each unmerged gitlink submodule into one status keyed by path. Git
@@ -157,8 +172,8 @@ pub fn submodule_changes(repo: &Repository) -> StatusResult<SubmoduleChanges> {
 pub fn conflicted_submodule_statuses(
     repo: &Repository,
     root_path: &Path,
-    dirty_submodules: &[(String, StatusSummary)],
-) -> StatusResult<FxHashMap<String, StatusSummary>> {
+    dirty_submodules: &[(GitPath, StatusSummary)],
+) -> StatusResult<FxHashMap<GitPath, StatusSummary>> {
     let gitlink_mode = u32::from(git2::FileMode::Commit);
     let index = repo.index()?;
     let mut map = FxHashMap::default();
@@ -177,10 +192,7 @@ pub fn conflicted_submodule_statuses(
         if any.mode != gitlink_mode {
             continue;
         }
-        let Ok(path) = std::str::from_utf8(&any.path) else {
-            continue;
-        };
-        let path = path.to_string();
+        let path = GitPath::from(&any.path[..]);
 
         // m/u (and a deleted workdir) from the submodule's own status.
         let mut st = dirty_submodules.iter().find(|(p, _)| *p == path).map_or(
@@ -194,14 +206,16 @@ pub fn conflicted_submodule_statuses(
 
         // libgit2 reports no `WD_DELETED` for a gitlink with no stage-0 entry,
         // so the scan above cannot see a missing workdir here. git stats the
-        // path for the same answer, as the `c` read below already does.
-        if !root_path.join(&path).exists() {
+        // path for the same answer, as the `c` read below already does. A path
+        // this platform cannot represent has no workdir either.
+        let workdir = path.to_path().ok().map(|rel| root_path.join(rel));
+        if !workdir.as_deref().is_some_and(Path::exists) {
             st |= StatusSummary::DELETED_WORKDIR;
         }
 
         // c: the submodule advanced past the "ours" gitlink.
-        if let Some(ours) = &conflict.our {
-            let (head, _) = read_submodule_head(&root_path.join(&path));
+        if let (Some(ours), Some(workdir)) = (&conflict.our, &workdir) {
+            let (head, _) = read_submodule_head(workdir);
             if head.is_some_and(|h| h != ours.id) {
                 st |= StatusSummary::NEW_COMMITS;
             }
@@ -216,7 +230,7 @@ pub fn conflicted_submodule_statuses(
 /// server reports that path as `STAGED_NEW`, a fresh gitlink relative to HEAD.
 /// The rename's `old -> new` line already covers it.
 pub fn filter_rename_new_paths(
-    statuses: &mut Vec<(String, StatusSummary)>,
+    statuses: &mut Vec<(GitPath, StatusSummary)>,
     renames: &[SubmoduleRename],
 ) {
     if renames.is_empty() {
@@ -241,11 +255,11 @@ fn mode_mask(mode: IgnoreSubmodules) -> StatusSummary {
 /// per-submodule `submodule.<name>.ignore` config. The global mode takes
 /// priority: only when it's `None` do we consult `per_submodule`.
 pub fn apply_ignore_submodules(
-    statuses: Vec<(String, StatusSummary)>,
+    statuses: Vec<(GitPath, StatusSummary)>,
     mode: IgnoreSubmodules,
     untracked: super::UntrackedFiles,
-    per_submodule: &rustc_hash::FxHashMap<String, IgnoreSubmodules>,
-) -> Vec<(String, StatusSummary)> {
+    per_submodule: &rustc_hash::FxHashMap<GitPath, IgnoreSubmodules>,
+) -> Vec<(GitPath, StatusSummary)> {
     if mode == IgnoreSubmodules::All {
         return Vec::new();
     }
@@ -276,31 +290,23 @@ pub fn apply_ignore_submodules(
         .collect()
 }
 
-/// Computes submodule statuses locally via git2 without the watch server.
+/// Computes submodule statuses locally via git2 without the watch server, for
+/// every gitlink in the index, the same set the watch server reports.
 ///
 /// # Errors
 ///
-/// Returns `git2::Error` on failure to parse the `.gitmodules` file.
-///
-/// # Panics
-///
-/// Panics if a submodule path contains non-UTF-8.
+/// Returns `git2::Error` if the repository or its index cannot be read.
 pub fn compute_local_statuses(
     root_path: &Path,
-) -> Result<Vec<(String, StatusSummary)>, git2::Error> {
+) -> Result<Vec<(GitPath, StatusSummary)>, git2::Error> {
     use rayon::prelude::*;
 
-    // Read `.gitmodules` lock-free: git replaces it via an atomic rename, so a
-    // reader always sees a complete old-or-new file. Holding the root
-    // `index.lock` here would be unnecessary and actively harmful (it makes
-    // concurrent git commands fail fast on the pre-existing lock). Mirrors the
-    // watch server's `populate_status_map`.
-    let gitmodule_entries = parse_gitmodules(root_path)?;
+    let paths = substatus::gitlink_paths(&Repository::open(root_path)?)?;
     let tl_repo = thread_local::ThreadLocal::new();
 
-    let statuses: Vec<_> = gitmodule_entries
+    let statuses: Vec<_> = paths
         .into_par_iter()
-        .map(|(_, path, _)| -> (String, StatusSummary) {
+        .map(|path| -> (GitPath, StatusSummary) {
             let summary = tl_repo
                 .get_or_try(|| Repository::open(root_path))
                 .map_err(substatus::SubstatusError::from)
@@ -435,9 +441,9 @@ mod tests {
             .build();
         let assert_statuses = |expected: &[(&str, StatusSummary)]| {
             let statuses = compute_local_statuses(harness.root().path()).unwrap();
-            let statuses: Vec<_> = statuses
+            let expected: Vec<_> = expected
                 .iter()
-                .map(|(path, status)| (path.as_str(), *status))
+                .map(|(path, status)| (GitPath::from(*path), *status))
                 .collect();
             assert_eq!(statuses, expected);
         };
@@ -508,11 +514,44 @@ mod tests {
 
         let repo = Repository::open(&root).unwrap();
         let changes = submodule_changes(&repo).unwrap();
-        assert_eq!(changes.deleted, vec!["sub_b".to_string()]);
+        assert_eq!(changes.deleted, vec![GitPath::from("sub_b")]);
         assert!(
             changes.renamed.is_empty(),
             "expected no renames, got {:?}",
             changes.renamed
+        );
+    }
+
+    /// The HEAD walk descends into a directory whose name is not UTF-8 and finds
+    /// the gitlink below it.
+    ///
+    /// Linux-only: Windows (NTFS is UTF-16) and macOS (EILSEQ) refuse the name.
+    #[cfg(target_os = "linux")]
+    #[apply(formats)]
+    fn submodule_changes_walks_non_utf8_directories(ref_format: RefFormat) {
+        use std::{ffi::OsStr, os::unix::ffi::OsStrExt as _};
+
+        let harness = HarnessBuilder::new()
+            .ref_format(ref_format)
+            .submodule(b"dir\xff/sub")
+            .no_server()
+            .build();
+        let root = harness.root().path();
+        let changes = || submodule_changes(&Repository::open(root).unwrap()).unwrap();
+        assert_eq!(changes(), SubmoduleChanges::default());
+
+        // `git` from the helper above takes `&str` arguments.
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["rm", "-q", "-f"])
+            .arg(OsStr::from_bytes(b"dir\xff/sub"))
+            .status()
+            .unwrap();
+        assert!(status.success());
+        assert_eq!(
+            changes().deleted,
+            vec![GitPath::from(b"dir\xff/sub".as_slice())]
         );
     }
 }

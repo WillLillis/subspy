@@ -278,3 +278,38 @@ fn reindex_against_changed_gitmodules_converges(ref_format: RefFormat, _run: u32
 
     harness.assert_submodule_status("sub_a", StatusSummary::clean());
 }
+
+/// A submodule whose path is not UTF-8 gets a slot, a watch root, and status
+/// updates like any other.
+///
+/// Linux-only: Windows (NTFS is UTF-16) and macOS (EILSEQ) refuse the name.
+#[cfg(target_os = "linux")]
+#[apply(common::repeat)]
+fn non_utf8_submodule_path_is_watched(ref_format: RefFormat, _run: u32) {
+    let harness = common::HarnessBuilder::new()
+        .ref_format(ref_format)
+        .submodule(b"sub\xff")
+        .submodule("plain")
+        .build();
+    harness.assert_all_clean();
+
+    let sub = harness.submodule(b"sub\xff");
+    sub.write("untracked.txt", "x\n");
+    harness.assert_submodule_status(b"sub\xff", StatusSummary::UNTRACKED_CONTENT);
+
+    sub.write("README.md", "changed\n");
+    harness.assert_submodule_status(
+        b"sub\xff",
+        StatusSummary::UNTRACKED_CONTENT | StatusSummary::MODIFIED_CONTENT,
+    );
+
+    sub.add_all();
+    harness.assert_submodule_status(b"sub\xff", StatusSummary::MODIFIED_CONTENT);
+
+    sub.commit("advance");
+    harness.assert_submodule_status(b"sub\xff", StatusSummary::NEW_COMMITS);
+
+    // Events for the neighboring submodule still reach its own slot.
+    harness.submodule("plain").write("untracked.txt", "x\n");
+    harness.assert_submodule_status("plain", StatusSummary::UNTRACKED_CONTENT);
+}

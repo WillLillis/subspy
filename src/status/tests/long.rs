@@ -13,6 +13,7 @@ use testutil::{HarnessBuilder, RefFormat, Repo};
 use crate::{
     RepoKind, StatusSummary,
     cli::ProjectPath,
+    git::path::GitPath,
     status::{
         IgnoreSubmodules, IgnoredFiles, LongOpts, OutputFormat, OutputOpts, UntrackedFiles,
         assemble_status, compute_local_statuses, display::display_status,
@@ -687,6 +688,9 @@ fn unreadable_submodules_reach_the_renderer(ref_format: RefFormat) {
             |_, entries, _| Ok(entries.submodules.to_vec()),
         )
         .unwrap();
-        assert_eq!(submodules, [("sub".to_owned(), StatusSummary::UNREADABLE)]);
+        assert_eq!(
+            submodules,
+            [(GitPath::from("sub"), StatusSummary::UNREADABLE)]
+        );
     }
 }

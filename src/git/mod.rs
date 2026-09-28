@@ -1,5 +1,6 @@
 //! Lightweight git helpers that bypass expensive libgit2 machinery.
 
+pub mod path;
 pub mod substatus;
 
 use git2::{Config, Repository, RepositoryOpenFlags};
@@ -8,6 +9,8 @@ use rustc_hash::FxHashMap;
 use std::path::Path;
 
 use crate::status::IgnoreSubmodules;
+
+use path::GitPath;
 
 /// Configures global libgit2 options for subspy's read-only, local-only use case.
 ///
@@ -152,33 +155,53 @@ fn parse_ignore_mode(s: &str) -> Option<IgnoreSubmodules> {
     }
 }
 
-/// Scans `config` for `submodule.<name>.path` and `submodule.<name>.ignore`
-/// entries, accumulating into the supplied maps. Used by
-/// [`parse_per_submodule_ignore`] to combine `.gitmodules` (always read) with
-/// `.git/config` (overrides per key).
-fn scan_submodule_props(
-    config: &Config,
-    name_to_path: &mut FxHashMap<String, String>,
-    name_to_ignore: &mut FxHashMap<String, IgnoreSubmodules>,
-) {
-    let Ok(mut iter) = config.entries(Some("submodule\\..*\\.(path|ignore)")) else {
-        return;
-    };
-    while let Some(Ok(entry)) = iter.next() {
-        let Ok(key) = entry.name() else { continue };
-        let Some(rest) = key.strip_prefix("submodule.") else {
+/// What a `.gitmodules`-style config sets for one submodule. Paths and branches
+/// are bytes, as git records them.
+#[derive(Default)]
+struct SubmoduleConfig {
+    path: Option<GitPath>,
+    branch: Option<Vec<u8>>,
+    ignore: Option<IgnoreSubmodules>,
+}
+
+/// Collects the `submodule.<name>.path`, `.branch`, and `.ignore` entries in
+/// `config`, keyed by the submodule name's bytes. A later entry overrides an
+/// earlier one, as in git.
+///
+/// # Errors
+///
+/// Returns `git2::Error` if the entries cannot be read.
+fn scan_submodules(config: &Config) -> Result<FxHashMap<Vec<u8>, SubmoduleConfig>, git2::Error> {
+    let mut submodules: FxHashMap<Vec<u8>, SubmoduleConfig> = FxHashMap::default();
+    let mut iter = config.entries(Some("submodule\\..*\\.(path|branch|ignore)"))?;
+    while let Some(entry) = iter.next() {
+        let entry = entry?;
+        // `submodule.<name>.<key>`, where the name can contain dots and the key
+        // cannot.
+        let Some(rest) = entry.name_bytes().strip_prefix(b"submodule.") else {
             continue;
         };
-        if let Some(name) = rest.strip_suffix(".path") {
-            if let Ok(val) = entry.value() {
-                name_to_path.insert(name.to_string(), val.to_string());
+        let Some(dot) = rest.iter().rposition(|&b| b == b'.') else {
+            continue;
+        };
+        // A key written without `=` has no value, and `value_bytes` panics on it.
+        if !entry.has_value() {
+            continue;
+        }
+        let value = entry.value_bytes();
+        let submodule = submodules.entry(rest[..dot].to_vec()).or_default();
+        match &rest[dot + 1..] {
+            b"path" => submodule.path = Some(GitPath::from(value)),
+            b"branch" => submodule.branch = Some(value.to_vec()),
+            b"ignore" => {
+                if let Some(mode) = std::str::from_utf8(value).ok().and_then(parse_ignore_mode) {
+                    submodule.ignore = Some(mode);
+                }
             }
-        } else if let Some(name) = rest.strip_suffix(".ignore")
-            && let Some(mode) = entry.value().ok().and_then(parse_ignore_mode)
-        {
-            name_to_ignore.insert(name.to_string(), mode);
+            _ => {}
         }
     }
+    Ok(submodules)
 }
 
 /// Cheap byte scan for  `ignore` in a readable file. A `false` result lets
@@ -201,69 +224,55 @@ fn file_mentions_ignore(path: &Path) -> bool {
 pub fn parse_per_submodule_ignore(
     repo: &Repository,
     root_path: &Path,
-) -> FxHashMap<String, IgnoreSubmodules> {
+) -> FxHashMap<GitPath, IgnoreSubmodules> {
     let gitmodules_path = root_path.join(".gitmodules");
     let repo_config_path = repo.path().join("config");
     if !file_mentions_ignore(&gitmodules_path) && !file_mentions_ignore(&repo_config_path) {
         return FxHashMap::default();
     }
 
-    let mut name_to_path: FxHashMap<String, String> = FxHashMap::default();
-    let mut name_to_ignore: FxHashMap<String, IgnoreSubmodules> = FxHashMap::default();
-
-    if let Ok(gm) = Config::open(&gitmodules_path) {
-        scan_submodule_props(&gm, &mut name_to_path, &mut name_to_ignore);
+    let mut submodules = Config::open(&gitmodules_path)
+        .and_then(|config| scan_submodules(&config))
+        .unwrap_or_default();
+    // `.git/config` overrides `ignore` per name. Submodule paths come from
+    // `.gitmodules`.
+    if let Ok(overrides) = repo.config().and_then(|config| scan_submodules(&config)) {
+        for (name, submodule) in overrides {
+            if let Some(ignore) = submodule.ignore {
+                submodules.entry(name).or_default().ignore = Some(ignore);
+            }
+        }
     }
-    if let Ok(repo_cfg) = repo.config() {
-        // Collect only ignore overrides from `.git/config`. Submodule paths come
-        // from `.gitmodules`.
-        scan_submodule_props(&repo_cfg, &mut FxHashMap::default(), &mut name_to_ignore);
-    }
 
-    name_to_ignore
-        .into_iter()
-        .filter_map(|(name, mode)| name_to_path.get(&name).map(|p| (p.clone(), mode)))
+    submodules
+        .into_values()
+        .filter_map(|submodule| Some((submodule.path?, submodule.ignore?)))
         .collect()
 }
 
-/// One `.gitmodules` entry: `(name, path, branch)`.
-pub type GitmodulesEntry = (String, String, Option<String>);
+/// What `.gitmodules` records for a submodule besides its path. Bytes, as git
+/// records them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Gitmodule {
+    pub name: Vec<u8>,
+    pub branch: Option<Vec<u8>>,
+}
 
-/// Parses `.gitmodules` directly via [`git2::Config`] to extract submodule names,
-/// paths, and branches. A missing file parses as no entries.
+/// Parses `.gitmodules` directly via [`git2::Config`] for each submodule's name
+/// and branch, keyed by path. A missing file parses as no entries.
 ///
 /// # Errors
 ///
 /// Returns `git2::Error` if `.gitmodules` cannot be parsed.
-pub fn parse_gitmodules(root_path: &Path) -> Result<Vec<GitmodulesEntry>, git2::Error> {
-    let gitmodules_path = root_path.join(".gitmodules");
-    let config = git2::Config::open(&gitmodules_path)?;
-    let mut entries = Vec::new();
-
-    let mut branch_key = String::from("submodule.");
-    let mut iter = config.entries(Some("submodule\\..*\\.path"))?;
-    while let Some(entry) = iter.next() {
-        let entry = entry?;
-        // Git permits arbitrary bytes in submodule paths on linux, while `git2::Config`
-        // exposes keys and values as UTF-8. Skip entries it cannot decode. Mirrors
-        // `scan_submodule_props`.
-        let Ok(key) = entry.name() else { continue };
-        // The regex filter on `entries()` guarantees this shape
-        let Some(name) = key
-            .strip_prefix("submodule.")
-            .and_then(|s| s.strip_suffix(".path"))
-        else {
-            continue;
-        };
-        let Ok(path) = entry.value() else { continue };
-        let path = path.to_string();
-        branch_key.truncate("submodule.".len());
-        branch_key.push_str(name);
-        branch_key.push_str(".branch");
-        let branch = config.get_string(&branch_key).ok();
-        entries.push((name.to_string(), path, branch));
-    }
-    Ok(entries)
+pub fn parse_gitmodules(root_path: &Path) -> Result<FxHashMap<GitPath, Gitmodule>, git2::Error> {
+    let config = Config::open(&root_path.join(".gitmodules"))?;
+    Ok(scan_submodules(&config)?
+        .into_iter()
+        .filter_map(|(name, submodule)| {
+            let branch = submodule.branch;
+            Some((submodule.path?, Gitmodule { name, branch }))
+        })
+        .collect())
 }
 
 #[cfg(test)]
@@ -388,6 +397,23 @@ mod tests {
         assert!(!gitlink_points_at_worktree(b"", tmp.path()));
     }
 
+    /// A `.gitmodules` entry as `(path, name, branch)`.
+    type Entry<'a> = (&'a [u8], &'a [u8], Option<&'a [u8]>);
+
+    /// The expected [`parse_gitmodules`] result for `entries`.
+    fn gitmodules<const N: usize>(entries: [Entry<'_>; N]) -> FxHashMap<GitPath, Gitmodule> {
+        entries
+            .into_iter()
+            .map(|(path, name, branch)| {
+                let gitmodule = Gitmodule {
+                    name: name.to_vec(),
+                    branch: branch.map(<[u8]>::to_vec),
+                };
+                (GitPath::from(path), gitmodule)
+            })
+            .collect()
+    }
+
     #[test]
     fn single_submodule() {
         let tmp = TempDir::new().unwrap();
@@ -395,11 +421,10 @@ mod tests {
             tmp.path(),
             "[submodule \"sub\"]\n\tpath = sub\n\turl = https://example.com/sub.git\n",
         );
-        let entries = parse_gitmodules(tmp.path()).unwrap();
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].0, "sub");
-        assert_eq!(entries[0].1, "sub");
-        assert_eq!(entries[0].2, None);
+        assert_eq!(
+            parse_gitmodules(tmp.path()).unwrap(),
+            gitmodules([(b"sub", b"sub", None)])
+        );
     }
 
     #[test]
@@ -410,12 +435,10 @@ mod tests {
             "[submodule \"a\"]\n\tpath = a\n\turl = u\n\
              [submodule \"b\"]\n\tpath = libs/b\n\turl = u\n",
         );
-        let entries = parse_gitmodules(tmp.path()).unwrap();
-        assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].0, "a");
-        assert_eq!(entries[0].1, "a");
-        assert_eq!(entries[1].0, "b");
-        assert_eq!(entries[1].1, "libs/b");
+        assert_eq!(
+            parse_gitmodules(tmp.path()).unwrap(),
+            gitmodules([(b"a", b"a", None), (b"libs/b", b"b", None)])
+        );
     }
 
     #[test]
@@ -425,8 +448,10 @@ mod tests {
             tmp.path(),
             "[submodule \"sub\"]\n\tpath = sub\n\turl = u\n\tbranch = main\n",
         );
-        let entries = parse_gitmodules(tmp.path()).unwrap();
-        assert_eq!(entries[0].2, Some("main".to_string()));
+        assert_eq!(
+            parse_gitmodules(tmp.path()).unwrap(),
+            gitmodules([(b"sub", b"sub", Some(b"main"))])
+        );
     }
 
     #[test]
@@ -436,9 +461,10 @@ mod tests {
             tmp.path(),
             "[submodule \"vendor/lib\"]\n\tpath = vendor/lib\n\turl = u\n",
         );
-        let entries = parse_gitmodules(tmp.path()).unwrap();
-        assert_eq!(entries[0].0, "vendor/lib");
-        assert_eq!(entries[0].1, "vendor/lib");
+        assert_eq!(
+            parse_gitmodules(tmp.path()).unwrap(),
+            gitmodules([(b"vendor/lib", b"vendor/lib", None)])
+        );
     }
 
     #[test]
@@ -448,8 +474,10 @@ mod tests {
             tmp.path(),
             "[submodule \"my.lib\"]\n\tpath = my.lib\n\turl = u\n",
         );
-        let entries = parse_gitmodules(tmp.path()).unwrap();
-        assert_eq!(entries[0].0, "my.lib");
+        assert_eq!(
+            parse_gitmodules(tmp.path()).unwrap(),
+            gitmodules([(b"my.lib", b"my.lib", None)])
+        );
     }
 
     #[test]
@@ -467,21 +495,41 @@ mod tests {
         assert!(entries.is_empty());
     }
 
+    /// Git records names, paths, and branches as bytes, so ones that are not
+    /// UTF-8 come through intact.
     #[test]
-    fn non_utf8_path_is_skipped_not_panicking() {
-        // A submodule path is arbitrary bytes on Linux; libgit2 surfaces the
-        // entry but `value()` returns Err for the non-UTF-8 byte. The bad entry
-        // must be skipped, not crash the process (which would take down the
-        // whole daemon under `panic = "abort"`).
+    fn non_utf8_entries_are_kept() {
         let tmp = TempDir::new().unwrap();
         let mut content = Vec::new();
         content.extend_from_slice(b"[submodule \"good\"]\n\tpath = good\n\turl = u\n");
-        content.extend_from_slice(b"[submodule \"bad\"]\n\tpath = b\xffd\n\turl = u\n");
+        content.extend_from_slice(
+            b"[submodule \"b\xffd\"]\n\tpath = p\xffth\n\turl = u\n\tbranch = br\xff\n",
+        );
         std::fs::write(tmp.path().join(".gitmodules"), content).unwrap();
 
-        let entries = parse_gitmodules(tmp.path()).unwrap();
-        assert!(entries.iter().any(|(n, p, _)| n == "good" && p == "good"));
-        assert!(!entries.iter().any(|(n, _, _)| n == "bad"));
+        assert_eq!(
+            parse_gitmodules(tmp.path()).unwrap(),
+            gitmodules([
+                (b"good", b"good", None),
+                (b"p\xffth", b"b\xffd", Some(b"br\xff")),
+            ])
+        );
+    }
+
+    /// A key written without `=` has no value, which git2's value accessors
+    /// panic on.
+    #[test]
+    fn bare_key_is_skipped() {
+        let tmp = TempDir::new().unwrap();
+        write_gitmodules(
+            tmp.path(),
+            "[submodule \"bare\"]\n\tpath\n\turl = u\n\
+             [submodule \"ok\"]\n\tpath = ok\n\turl = u\n",
+        );
+        assert_eq!(
+            parse_gitmodules(tmp.path()).unwrap(),
+            gitmodules([(b"ok", b"ok", None)])
+        );
     }
 
     #[test]
@@ -495,25 +543,23 @@ mod tests {
         let entries = parse_gitmodules(tmp.path()).unwrap();
         assert_eq!(entries.len(), 172);
         // All entries should have non-empty name and path
-        for (name, path, _) in &entries {
-            assert!(!name.is_empty(), "empty name in boost .gitmodules");
-            assert!(!path.is_empty(), "empty path in boost .gitmodules");
+        for (path, gitmodule) in &entries {
+            assert!(
+                !gitmodule.name.is_empty(),
+                "empty name in boost .gitmodules"
+            );
+            assert!(
+                !path.as_bytes().is_empty(),
+                "empty path in boost .gitmodules"
+            );
         }
         // All boost submodules use `branch = .`
-        for (_, _, branch) in &entries {
-            assert_eq!(branch.as_deref(), Some("."));
+        for gitmodule in entries.values() {
+            assert_eq!(gitmodule.branch.as_deref(), Some(b".".as_slice()));
         }
         // Spot check a few known entries
-        assert!(
-            entries
-                .iter()
-                .any(|(n, p, _)| n == "system" && p == "libs/system")
-        );
-        assert!(
-            entries
-                .iter()
-                .any(|(n, p, _)| n == "math" && p == "libs/math")
-        );
+        assert_eq!(entries[b"libs/system".as_slice()].name, b"system");
+        assert_eq!(entries[b"libs/math".as_slice()].name, b"math");
     }
 
     #[test]
@@ -542,8 +588,23 @@ mod tests {
         let repo = git2::Repository::init(tmp.path()).unwrap();
         let map = parse_per_submodule_ignore(&repo, tmp.path());
         assert_eq!(map.len(), 1);
-        assert_eq!(map.get("vendor/foo"), Some(&IgnoreSubmodules::Dirty));
-        assert_eq!(map.get("vendor/bar"), None);
+        assert_eq!(
+            map.get(b"vendor/foo".as_slice()),
+            Some(&IgnoreSubmodules::Dirty)
+        );
+        assert_eq!(map.get(b"vendor/bar".as_slice()), None);
+    }
+
+    /// A bare `ignore` key has no value, which git2's value accessors panic on.
+    #[test]
+    fn per_submodule_ignore_skips_a_bare_key() {
+        let tmp = TempDir::new().unwrap();
+        write_gitmodules(
+            tmp.path(),
+            "[submodule \"sub\"]\n\tpath = sub\n\turl = u\n\tignore\n",
+        );
+        let repo = git2::Repository::init(tmp.path()).unwrap();
+        assert!(parse_per_submodule_ignore(&repo, tmp.path()).is_empty());
     }
 
     #[test]
@@ -563,7 +624,10 @@ mod tests {
             .set_str("submodule.vendor/foo.ignore", "untracked")
             .unwrap();
         let map = parse_per_submodule_ignore(&repo, tmp.path());
-        assert_eq!(map.get("vendor/foo"), Some(&IgnoreSubmodules::Untracked));
+        assert_eq!(
+            map.get(b"vendor/foo".as_slice()),
+            Some(&IgnoreSubmodules::Untracked)
+        );
     }
 
     fn git(args: &[&str]) {

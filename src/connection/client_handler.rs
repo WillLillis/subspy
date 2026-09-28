@@ -17,6 +17,7 @@ use crate::{
         BINCODE_CFG, ClientMessage, ClientRequest, IPC_VERSION, ServerMessage,
         read_full_message_fixed, transport::MSG_PREFIX_LEN, write_full_message_fixed,
     },
+    git::path::GitPath,
     watch::{WatchError, WatchResult},
 };
 
@@ -140,14 +141,14 @@ fn handle_status_request(
 /// and writes it to `conn`.
 ///
 /// The wire format matches the derived `Encode` for `ServerMessage::Status`:
-/// `variant(u32) | vec_len(u64) | [str_len(u64) + str_bytes + status(u8)]... | total(u32)`
+/// `variant(u32) | vec_len(u64) | [path_len(u64) + path_bytes + status(u8)]... | total(u32)`
 ///
 /// # Errors
 ///
 /// Returns `Err` if writing to `conn` fails.
 fn encode_status_response(
     conn: &mut BufReader<IpcStream>,
-    guard: MutexGuard<'_, BTreeMap<String, StatusSummary>>,
+    guard: MutexGuard<'_, BTreeMap<GitPath, StatusSummary>>,
     buf: &mut Vec<u8>,
 ) -> WatchResult<()> {
     encode_status_into(&guard, buf);
@@ -157,11 +158,11 @@ fn encode_status_response(
 }
 
 /// Encodes a length-prefixed `ServerMessage::Status` into `buf` directly from
-/// the status map, avoiding String clones.
+/// the status map, avoiding path clones.
 ///
 /// The payload after the length prefix is byte-identical to bincode's derived
 /// `Encode` for `ServerMessage::Status { statuses, total }`.
-fn encode_status_into(map: &BTreeMap<String, StatusSummary>, buf: &mut Vec<u8>) {
+fn encode_status_into(map: &BTreeMap<GitPath, StatusSummary>, buf: &mut Vec<u8>) {
     let total = map.len() as u32;
 
     buf.clear();
@@ -181,7 +182,7 @@ fn encode_status_into(map: &BTreeMap<String, StatusSummary>, buf: &mut Vec<u8>) 
             continue;
         }
         dirty_count += 1;
-        buf.extend_from_slice(&(path.len() as u64).to_le_bytes());
+        buf.extend_from_slice(&(path.as_bytes().len() as u64).to_le_bytes());
         buf.extend_from_slice(path.as_bytes());
         buf.push(status.bits());
     }
@@ -292,7 +293,7 @@ fn get_status_guard_with_progress<'a>(
     client_pid: u32,
     statuses: &'a StatusMap,
     subscribers: &ProgressSubscribers,
-) -> WatchResult<MutexGuard<'a, BTreeMap<String, StatusSummary>>> {
+) -> WatchResult<MutexGuard<'a, BTreeMap<GitPath, StatusSummary>>> {
     loop {
         if let Some(g) = try_lock(statuses) {
             return Ok(g);
@@ -312,14 +313,14 @@ mod tests {
 
     /// Builds a reference encoding using bincode's derived Encode, and compares
     /// it against our manual `encode_status_into`.
-    fn assert_encoding_matches(map: &BTreeMap<String, StatusSummary>) {
+    fn assert_encoding_matches(map: &BTreeMap<GitPath, StatusSummary>) {
         // Manual encoding
         let mut manual_buf = Vec::new();
         encode_status_into(map, &mut manual_buf);
 
         // Derived encoding: replicate the old clone+encode path
         let total = map.len() as u32;
-        let status_out: Vec<(String, StatusSummary)> = map
+        let status_out: Vec<(GitPath, StatusSummary)> = map
             .iter()
             .filter(|(_, st)| **st != StatusSummary::clean())
             .map(|(path, st)| (path.clone(), *st))
@@ -351,28 +352,28 @@ mod tests {
     #[test]
     fn encode_all_clean() {
         let mut map = BTreeMap::new();
-        map.insert("sub_a".to_string(), StatusSummary::clean());
-        map.insert("sub_b".to_string(), StatusSummary::clean());
+        map.insert(GitPath::from("sub_a"), StatusSummary::clean());
+        map.insert(GitPath::from("sub_b"), StatusSummary::clean());
         assert_encoding_matches(&map);
     }
 
     #[test]
     fn encode_all_dirty() {
         let mut map = BTreeMap::new();
-        map.insert("sub_a".to_string(), StatusSummary::MODIFIED_CONTENT);
-        map.insert("sub_b".to_string(), StatusSummary::UNTRACKED_CONTENT);
-        map.insert("sub_c".to_string(), StatusSummary::NEW_COMMITS);
+        map.insert(GitPath::from("sub_a"), StatusSummary::MODIFIED_CONTENT);
+        map.insert(GitPath::from("sub_b"), StatusSummary::UNTRACKED_CONTENT);
+        map.insert(GitPath::from("sub_c"), StatusSummary::NEW_COMMITS);
         assert_encoding_matches(&map);
     }
 
     #[test]
     fn encode_mixed_clean_and_dirty() {
         let mut map = BTreeMap::new();
-        map.insert("clean_one".to_string(), StatusSummary::clean());
-        map.insert("dirty_one".to_string(), StatusSummary::MODIFIED_CONTENT);
-        map.insert("clean_two".to_string(), StatusSummary::clean());
+        map.insert(GitPath::from("clean_one"), StatusSummary::clean());
+        map.insert(GitPath::from("dirty_one"), StatusSummary::MODIFIED_CONTENT);
+        map.insert(GitPath::from("clean_two"), StatusSummary::clean());
         map.insert(
-            "dirty_two".to_string(),
+            GitPath::from("dirty_two"),
             StatusSummary::STAGED | StatusSummary::NEW_COMMITS,
         );
         assert_encoding_matches(&map);
@@ -382,11 +383,35 @@ mod tests {
     fn encode_combined_flags() {
         let mut map = BTreeMap::new();
         map.insert(
-            "libs/system".to_string(),
+            GitPath::from("libs/system"),
             StatusSummary::MODIFIED_CONTENT
                 | StatusSummary::UNTRACKED_CONTENT
                 | StatusSummary::NEW_COMMITS,
         );
         assert_encoding_matches(&map);
+    }
+
+    /// A path that is not UTF-8 encodes like any other and decodes back intact.
+    #[test]
+    fn encode_non_utf8_path() {
+        let path = GitPath::from(b"libs/sub\xff".as_slice());
+        let mut map = BTreeMap::new();
+        map.insert(path.clone(), StatusSummary::MODIFIED_CONTENT);
+        assert_encoding_matches(&map);
+
+        let mut buf = Vec::new();
+        encode_status_into(&map, &mut buf);
+        let (decoded, _) = bincode::borrow_decode_from_slice::<ServerMessage, _>(
+            &buf[MSG_PREFIX_LEN..],
+            BINCODE_CFG,
+        )
+        .unwrap();
+        assert_eq!(
+            decoded,
+            ServerMessage::Status {
+                statuses: vec![(path, StatusSummary::MODIFIED_CONTENT)],
+                total: 1,
+            }
+        );
     }
 }

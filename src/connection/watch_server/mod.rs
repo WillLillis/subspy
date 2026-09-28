@@ -41,7 +41,7 @@ use crate::{
         IpcStream, cleanup_socket, create_listener, ipc_connect, ipc_socket_path,
         protocol::SHUTDOWN_ACK, watch_server::trace::wtrace, write_full_message_fixed,
     },
-    git::substatus,
+    git::{path::GitPath, substatus},
     watch::WatchResult,
 };
 
@@ -56,7 +56,7 @@ use super::progress::ProgressSubscribers;
 const IDLE_SERVER_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// The submodule status map
-pub(super) type StatusMap = Mutex<BTreeMap<String, StatusSummary>>;
+pub(super) type StatusMap = Mutex<BTreeMap<GitPath, StatusSummary>>;
 
 /// Message receiver type for a watcher
 type WatchReceiver = crossbeam_channel::Receiver<Result<notify::Event, notify::Error>>;
@@ -97,7 +97,7 @@ struct WatchServer {
     /// Root-relative submodule paths by slot index. Slot `i` corresponds to entry
     /// `i` in every index-keyed structure (`pending_rescan`, in-flight tasks, and
     /// the values of the `*_to_index` maps).
-    submodules: Vec<String>,
+    submodules: Vec<GitPath>,
     /// Root-relative ancestor directories of every submodule, watched
     /// non-recursively on the tree watcher. A submodule's own watch root dies
     /// silently when its directory is deleted, so these surviving parent
@@ -291,7 +291,7 @@ impl WatchServer {
     ///
     /// Returns `git2::Error` when the read still fails at the end of the
     /// budget.
-    fn read_gitlink_paths(&self) -> Result<Vec<String>, git2::Error> {
+    fn read_gitlink_paths(&self) -> Result<Vec<GitPath>, git2::Error> {
         const YIELD_RETRIES: usize = 16;
         const SLEEP_RETRIES: usize = 50;
         const SLEEP_STEP: Duration = Duration::from_millis(1);
@@ -333,7 +333,7 @@ impl WatchServer {
     fn watch(
         &mut self,
         display_progress: bool,
-        status_guard: MutexGuard<'_, BTreeMap<String, StatusSummary>>,
+        status_guard: MutexGuard<'_, BTreeMap<GitPath, StatusSummary>>,
     ) -> WatchResult<()> {
         const READ_RETRY_LIMIT: u32 = 16;
 

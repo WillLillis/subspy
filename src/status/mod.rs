@@ -29,7 +29,7 @@ mod interleave;
 mod pathspec;
 mod porcelain_v1;
 mod porcelain_v2;
-mod quote;
+pub(crate) mod quote;
 mod relativize;
 mod rename_score;
 mod short;
@@ -55,6 +55,7 @@ use crate::{
         IpcError,
         client::{recv_status_response, send_status_request},
     },
+    git::path::GitPath,
 };
 
 pub use case::CaseSensitivity;
@@ -118,9 +119,9 @@ pub enum StatusError {
     IO(#[from] io::Error),
     #[error(
         "Short and porcelain output cannot report unreadable submodules: {}",
-        .0.join(", ")
+        .0.iter().map(GitPath::display).collect::<Vec<_>>().join(", ")
     )]
-    UnreadableSubmodules(Vec<String>),
+    UnreadableSubmodules(Vec<GitPath>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -241,8 +242,8 @@ pub struct PorcelainOpts {
 /// The set of status entries to render.
 pub struct StatusEntries<'a> {
     pub non_submod: &'a git2::Statuses<'a>,
-    pub submodules: &'a [(String, StatusSummary)],
-    pub deleted_submodules: &'a [String],
+    pub submodules: &'a [(GitPath, StatusSummary)],
+    pub deleted_submodules: &'a [GitPath],
     pub renamed_submodules: &'a [SubmoduleRename],
     /// Byte paths of unmerged (conflicted) entries. Renderers drop the phantom
     /// untracked rows libgit2 emits for a conflicted submodule's working tree.
@@ -253,7 +254,7 @@ pub struct StatusEntries<'a> {
     /// commits), keyed by path. Already excluded from `submodules` so they don't
     /// render as a separate dirty row. Porcelain v2 uses this for the `u`-line
     /// `S<c><m><u>` field. Empty when the index has no gitlink conflicts.
-    pub conflicted_submodules: &'a FxHashMap<String, StatusSummary>,
+    pub conflicted_submodules: &'a FxHashMap<GitPath, StatusSummary>,
     /// Where libgit2's reported status diverges from git's for this request.
     /// Apply with [`StatusEntries::effective`] rather than reading
     /// `entry.status()` directly.
@@ -349,7 +350,7 @@ pub fn build_status_options(opts: OutputOpts, repo_kind: RepoKind) -> git2::Stat
 pub fn assemble_status<R>(
     project: &ProjectPath,
     opts: OutputOpts,
-    submodule_statuses: impl FnOnce() -> StatusResult<Vec<(String, StatusSummary)>>,
+    submodule_statuses: impl FnOnce() -> StatusResult<Vec<(GitPath, StatusSummary)>>,
     render: impl FnOnce(&Repository, &StatusEntries<'_>, &Relativizer<'_>) -> StatusResult<R>,
 ) -> StatusResult<R> {
     match assemble_status_scoped(
@@ -398,13 +399,13 @@ fn unsupported_config(
 /// could not be read, so a request in those formats fails.
 fn reject_unreadable_submodules(
     format: OutputFormat,
-    submods: &[(String, StatusSummary)],
+    submods: &[(GitPath, StatusSummary)],
 ) -> StatusResult<()> {
     match format {
         OutputFormat::Long => return Ok(()),
         OutputFormat::Short | OutputFormat::Porcelain(_) => {}
     }
-    let unreadable: Vec<String> = submods
+    let unreadable: Vec<GitPath> = submods
         .iter()
         .filter(|(_, status)| status.contains(StatusSummary::UNREADABLE))
         .map(|(path, _)| path.clone())
@@ -421,7 +422,7 @@ fn assemble_status_scoped<R>(
     opts: OutputOpts,
     scope: StatusScope,
     can_decline: bool,
-    submodule_statuses: impl FnOnce() -> StatusResult<Vec<(String, StatusSummary)>>,
+    submodule_statuses: impl FnOnce() -> StatusResult<Vec<(GitPath, StatusSummary)>>,
     render: impl FnOnce(&Repository, &StatusEntries<'_>, &Relativizer<'_>) -> StatusResult<R>,
 ) -> StatusResult<AssembleOutcome<R>> {
     let repo = Repository::open(&project.repo_root)?;
@@ -563,7 +564,7 @@ fn assemble_status_scoped<R>(
 }
 
 fn apply_path_filter_to_submodules(
-    submods: &mut Vec<(String, StatusSummary)>,
+    submods: &mut Vec<(GitPath, StatusSummary)>,
     changes: &mut SubmoduleChanges,
     path_filter: PathFilter<'_>,
 ) {
@@ -572,7 +573,7 @@ fn apply_path_filter_to_submodules(
     }
     submods.retain(|(path, _)| path_filter.keeps(path.as_bytes()));
 
-    let mut scoped_deleted: Vec<String> = std::mem::take(&mut changes.deleted)
+    let mut scoped_deleted: Vec<GitPath> = std::mem::take(&mut changes.deleted)
         .into_iter()
         .filter(|path| path_filter.keeps(path.as_bytes()))
         .collect();
