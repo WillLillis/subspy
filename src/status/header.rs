@@ -956,8 +956,14 @@ fn detached_target(
         } else {
             "from"
         };
-        let display = resolved_ref_name(repo, target, entry.id_new())
-            .unwrap_or_else(|| abbrev.shorten(&entry.id_new().to_string()));
+        // git reads a `HEAD` target as relative to that checkout, and names the
+        // commit it landed on.
+        let ref_name = if target == "HEAD" {
+            None
+        } else {
+            resolved_ref_name(repo, target, entry.id_new())
+        };
+        let display = ref_name.unwrap_or_else(|| abbrev.shorten(&entry.id_new().to_string()));
         return Some((preposition, display));
     }
 
