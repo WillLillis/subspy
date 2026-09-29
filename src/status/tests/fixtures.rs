@@ -658,6 +658,13 @@ pub fn setup_detached_abbrev_configured(root: &Path) {
     repo.run_git(&["checkout", "--detach", "refs/tags/first^{commit}"]);
 }
 
+/// Detached by `git switch --detach` with no argument, which logs the checkout
+/// target as `HEAD`.
+pub fn setup_detached_at_head(root: &Path) {
+    setup_clean(root);
+    Repo::new(root).run_git(&["switch", "--detach"]);
+}
+
 pub fn setup_bisect(root: &Path) {
     let repo = Repo::init(root);
     repo.write("a.txt", "one\n").add_all().commit("one");

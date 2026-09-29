@@ -61,6 +61,10 @@ const CASES: &[Case] = &[
         setup: Setup::Plain(setup_detached_abbrev_configured),
     },
     Case {
+        name: "detached_at_head",
+        setup: Setup::Plain(setup_detached_at_head),
+    },
+    Case {
         name: "skip_worktree_absent_with_staged_change",
         setup: Setup::Plain(setup_skip_worktree_absent_with_staged_change),
     },
