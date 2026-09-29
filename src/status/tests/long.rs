@@ -8,7 +8,7 @@ use pretty_assertions::assert_eq;
 use rstest_reuse::apply;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
-use testutil::{HarnessBuilder, RefFormat, Repo};
+use testutil::{HarnessBuilder, RefFormat, Repo, TestHarness};
 
 use crate::{
     RepoKind, StatusSummary,
@@ -262,6 +262,13 @@ const CASES: &[Case] = &[
         setup: Setup::WithSubmodules {
             names: &["sub"],
             setup: setup_submodule_renamed,
+        },
+    },
+    Case {
+        name: "submodule_renamed_dirty",
+        setup: Setup::WithSubmodules {
+            names: &["sub"],
+            setup: setup_submodule_renamed_dirty,
         },
     },
     Case {
@@ -662,12 +669,13 @@ fn long_no_ahead_behind_snapshots(ref_format: RefFormat) {
 }
 
 /// The long format lists unreadable submodules in a section of their own, so
-/// each one reaches the renderer, a conflicted one included.
+/// each one reaches the renderer, a conflicted or renamed one included.
 #[apply(formats)]
 fn unreadable_submodules_reach_the_renderer(ref_format: RefFormat) {
-    for setup in [
-        setup_submodule_unreadable,
-        setup_submodule_gitlink_conflict_unreadable,
+    for (setup, unreadable) in [
+        (setup_submodule_unreadable as fn(&TestHarness), "sub"),
+        (setup_submodule_gitlink_conflict_unreadable, "sub"),
+        (setup_submodule_renamed_unreadable, "renamed_sub"),
     ] {
         let harness = HarnessBuilder::new()
             .ref_format(ref_format)
@@ -690,7 +698,7 @@ fn unreadable_submodules_reach_the_renderer(ref_format: RefFormat) {
         .unwrap();
         assert_eq!(
             submodules,
-            [(GitPath::from("sub"), StatusSummary::UNREADABLE)]
+            [(GitPath::from(unreadable), StatusSummary::UNREADABLE)]
         );
     }
 }

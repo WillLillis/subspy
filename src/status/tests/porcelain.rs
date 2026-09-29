@@ -1354,10 +1354,6 @@ fn unreadable_submodule_refuses_like_git(ref_format: RefFormat) {
 }
 
 /// Compares porcelain v1 and v2, with and without `-z`, against git.
-#[cfg_attr(
-    not(target_os = "linux"),
-    expect(dead_code, reason = "linux-only test helper")
-)]
 fn assert_porcelain_matches_git(project: &ProjectPath, step: &str) {
     for version in [PorcelainVersion::V1, PorcelainVersion::V2] {
         for null_terminate in [false, true] {
@@ -1373,9 +1369,47 @@ fn assert_porcelain_matches_git(project: &ProjectPath, step: &str) {
     }
 }
 
+/// A renamed submodule shows its working-tree state on the rename row
+/// (`RM sub -> moved`, `2 RM SC..`), compared against git as the submodule gains
+/// untracked, modified, and staged content and new commits, then loses its
+/// workdir.
+#[apply(formats)]
+fn renamed_submodule_worktree_state_matches_git(ref_format: RefFormat) {
+    let harness = HarnessBuilder::new()
+        .ref_format(ref_format)
+        .no_server()
+        .submodule("sub")
+        .build();
+    let root = harness.root().path();
+    let project = ProjectPath {
+        repo_root: root.to_path_buf(),
+        effective_cwd: root.to_path_buf(),
+        kind: RepoKind::WithSubmodules,
+    };
+
+    harness.root().mv("sub", "moved");
+    assert_porcelain_matches_git(&project, "renamed");
+
+    let moved = Repo::new(&root.join("moved"));
+    moved.write("untracked.txt", "x\n");
+    assert_porcelain_matches_git(&project, "renamed with untracked content");
+
+    moved.write("README.md", "changed\n");
+    assert_porcelain_matches_git(&project, "renamed with modified and untracked content");
+
+    moved.add_all();
+    assert_porcelain_matches_git(&project, "renamed with staged content");
+
+    moved.commit("advance");
+    assert_porcelain_matches_git(&project, "renamed with new commits");
+
+    std::fs::remove_dir_all(root.join("moved")).unwrap();
+    assert_porcelain_matches_git(&project, "renamed with its workdir deleted");
+}
+
 /// A submodule whose path is not UTF-8, compared against git after each step
 /// through the rows that name it: a staged rename, modified and untracked
-/// content, new commits, and a staged deletion.
+/// content, new commits, a rename carrying them, and a staged deletion.
 ///
 /// Linux-only: Windows (NTFS is UTF-16) and macOS (EILSEQ) refuse the name.
 #[cfg(target_os = "linux")]
@@ -1427,7 +1461,10 @@ fn non_utf8_submodule_path_matches_git(ref_format: RefFormat) {
     sub.commit("advance");
     matches_git("new commits");
 
-    git(&[b"rm", b"-q", b"-f", b"moved\xfe"]);
+    git(&[b"mv", b"moved\xfe", b"again\xfd"]);
+    matches_git("staged rename with new commits");
+
+    git(&[b"rm", b"-q", b"-f", b"again\xfd"]);
     matches_git("staged deletion");
 }
 

@@ -1,0 +1,12 @@
+On branch master
+Changes to be committed:
+  (use "git restore --staged <file>..." to unstage)
+	modified:   .gitmodules
+	renamed:    sub -> renamed_sub
+
+Changes not staged for commit:
+  (use "git add <file>..." to update what will be committed)
+  (use "git restore <file>..." to discard changes in working directory)
+  (commit or discard the untracked or modified content in submodules)
+	modified:   renamed_sub (new commits, modified content, untracked content)
+

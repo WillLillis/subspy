@@ -1045,6 +1045,26 @@ pub fn setup_submodule_renamed(h: &TestHarness) {
     h.root().run_git(&["mv", "sub", "renamed_sub"]);
 }
 
+/// A renamed submodule with only untracked content, which the short format
+/// marks `?` on the rename row.
+pub fn setup_submodule_renamed_untracked(h: &TestHarness) {
+    setup_submodule_renamed(h);
+    Repo::new(&h.root().path().join("renamed_sub")).write("untracked.txt", "x\n");
+}
+
+/// A renamed submodule with a new commit, modified content, and untracked
+/// content. The long format lists the rename as staged and the new path's
+/// working-tree state as unstaged.
+pub fn setup_submodule_renamed_dirty(h: &TestHarness) {
+    setup_submodule_renamed(h);
+    Repo::new(&h.root().path().join("renamed_sub"))
+        .write("README.md", "moved forward\n")
+        .add_all()
+        .commit("submodule advances")
+        .write("README.md", "and now dirty\n")
+        .write("untracked.txt", "x\n");
+}
+
 /// A submodule with both a new commit (HEAD advanced past the parent's
 /// gitlink) and modified working-tree content.
 pub fn setup_submodule_modified_and_new_commits(h: &TestHarness) {

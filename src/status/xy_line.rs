@@ -63,7 +63,6 @@ pub(super) struct Palette {
 /// Renders the full output: optional `## branch...` header followed by
 /// the five entry passes (tracked, submodules, deleted submodules,
 /// untracked, ignored).
-#[expect(clippy::too_many_lines)]
 pub(super) fn display_xy_lines(
     out: &mut impl Write,
     repo: &Repository,
@@ -94,19 +93,7 @@ pub(super) fn display_xy_lines(
     // pre-classifies the tracked file rows and reconciles renames. Interleave the
     // separately supplied submodule rows by path.
     let tracked = normalized_tracked_rows(repo, entries);
-    let mut submods: Vec<SubRow<'_>> = Vec::with_capacity(
-        entries.submodules.len()
-            + entries.deleted_submodules.len()
-            + entries.renamed_submodules.len(),
-    );
-    submods.extend(
-        entries
-            .submodules
-            .iter()
-            .map(|(path, st)| SubRow::Modified(path, *st)),
-    );
-    submods.extend(entries.deleted_submodules.iter().map(SubRow::Deleted));
-    submods.extend(entries.renamed_submodules.iter().map(SubRow::Renamed));
+    let submods = entries.one_line_submodule_rows();
 
     for_each_tracked_row(tracked, submods, |row| match row {
         TrackedOrSubRow::File(TrackedRow::Entry(entry, st)) => {
@@ -134,10 +121,13 @@ pub(super) fn display_xy_lines(
             write_xy_path(out, x, y, path.as_bytes(), rel, null_terminate, style)
         }
         TrackedOrSubRow::Sub(SubRow::Renamed(rename)) => {
-            // `R ` is a staged submodule rename. With -z the new and old paths
-            // are NUL-separated. Otherwise they render as `old -> new`.
-            let x = XyChar::new('R', style.palette.map(|p| p.updated));
-            let y = XyChar::new(' ', None);
+            // `R` is a staged submodule rename, and Y is the new path's
+            // working-tree state. With -z the new and old paths are
+            // NUL-separated. Otherwise they render as `old -> new`.
+            let (_, y) = submodule_xy(entries.rename_worktree(rename), style.submodule);
+            let (x_color, y_color) = ordinary_colors(style);
+            let x = XyChar::new('R', x_color);
+            let y = XyChar::new(y, y_color);
             write_xy_prefix(out, x, y)?;
             if null_terminate {
                 out.write_all(rename.new.as_bytes())?;

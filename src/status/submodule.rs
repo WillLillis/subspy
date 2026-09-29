@@ -226,17 +226,26 @@ pub fn conflicted_submodule_statuses(
     Ok(map)
 }
 
-/// Drops submodule statuses whose path is the new side of a rename. The watch
-/// server reports that path as `STAGED_NEW`, a fresh gitlink relative to HEAD.
-/// The rename's `old -> new` line already covers it.
-pub fn filter_rename_new_paths(
+/// Clears the staged flags of each submodule status whose path is the new side
+/// of a rename, dropping the ones left clean. The watch server reports that path
+/// as `STAGED_NEW`, a fresh gitlink relative to HEAD, which the rename's
+/// `old -> new` row already covers. What remains is the new path's working-tree
+/// state, which the long format lists as unstaged and the one-line formats print
+/// on the rename row.
+pub fn clear_rename_staged_flags(
     statuses: &mut Vec<(GitPath, StatusSummary)>,
     renames: &[SubmoduleRename],
 ) {
     if renames.is_empty() {
         return;
     }
-    statuses.retain(|(path, _)| !renames.iter().any(|r| r.new == *path));
+    statuses.retain_mut(|(path, status)| {
+        if !renames.iter().any(|r| r.new == *path) {
+            return true;
+        }
+        status.remove(StatusSummary::STAGED | StatusSummary::STAGED_NEW);
+        !status.is_empty()
+    });
 }
 
 /// Returns the mask to AND each status against to honor `mode`.
