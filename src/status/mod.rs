@@ -65,6 +65,8 @@ pub use pathspec::PathFilter;
 pub use relativize::Relativizer;
 pub use submodule::{SubmoduleChanges, SubmoduleRename, compute_local_statuses, submodule_changes};
 
+use interleave::SubRow;
+
 pub type StatusResult<T> = Result<T, StatusError>;
 
 /// A resolved status invocation shared by the CLI and git shim entry points.
@@ -267,6 +269,34 @@ impl StatusEntries<'_> {
     /// git's view of `entry`. `None` when git renders no row for it.
     pub(super) fn effective(&self, entry: &git2::StatusEntry<'_>) -> Option<git2::Status> {
         effective_status::effective_status(entry.status(), entry.path_bytes(), self.corrections)
+    }
+
+    /// The submodule rows of the one-line formats (short and porcelain). git
+    /// prints a renamed submodule on a single row, so the rename's new path gets
+    /// no row of its own. Its working-tree state goes on the rename row, from
+    /// [`Self::rename_worktree`].
+    fn one_line_submodule_rows(&self) -> Vec<SubRow<'_>> {
+        let mut rows = Vec::with_capacity(
+            self.submodules.len() + self.deleted_submodules.len() + self.renamed_submodules.len(),
+        );
+        rows.extend(
+            self.submodules
+                .iter()
+                .filter(|(path, _)| !self.renamed_submodules.iter().any(|r| r.new == *path))
+                .map(|(path, st)| SubRow::Modified(path, *st)),
+        );
+        rows.extend(self.deleted_submodules.iter().map(SubRow::Deleted));
+        rows.extend(self.renamed_submodules.iter().map(SubRow::Renamed));
+        rows
+    }
+
+    /// The working-tree state of `rename`'s new path: new commits, modified or
+    /// untracked content, or a deleted workdir.
+    fn rename_worktree(&self, rename: &SubmoduleRename) -> StatusSummary {
+        self.submodules
+            .iter()
+            .find(|(path, _)| *path == rename.new)
+            .map_or(StatusSummary::clean(), |(_, st)| *st)
     }
 }
 
@@ -524,7 +554,7 @@ fn assemble_status_scoped<R>(
     reject_unreadable_submodules(opts.format, &submods)?;
 
     apply_path_filter_to_submodules(&mut submods, &mut submod_changes, path_filter);
-    submodule::filter_rename_new_paths(&mut submods, &submod_changes.renamed);
+    submodule::clear_rename_staged_flags(&mut submods, &submod_changes.renamed);
 
     // the conflict machinery owns each unmerged submodule's output. Fold its status
     // into the conflict entry and remove it from the normal submodule rows. An

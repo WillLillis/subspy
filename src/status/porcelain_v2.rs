@@ -98,15 +98,7 @@ pub fn display_porcelain_v2(
     // libgit2 excludes submodules from `non_submod`, so interleave the
     // submodule rows among the tracked file rows by path.
     let tracked = normalized_tracked_rows(repo, entries);
-    let mut submods: Vec<SubRow<'_>> = Vec::new();
-    submods.extend(
-        entries
-            .submodules
-            .iter()
-            .map(|(path, st)| SubRow::Modified(path, *st)),
-    );
-    submods.extend(entries.deleted_submodules.iter().map(SubRow::Deleted));
-    submods.extend(entries.renamed_submodules.iter().map(SubRow::Renamed));
+    let submods = entries.one_line_submodule_rows();
 
     // Gitlink OIDs come from HEAD's tree and the index, keyed by submodule path.
     let head_oid = |path: &GitPath| {
@@ -150,6 +142,7 @@ pub fn display_porcelain_v2(
         }
         TrackedOrSubRow::Sub(SubRow::Renamed(rename)) => write_renamed_submodule(
             rename,
+            entries.rename_worktree(rename),
             head_oid(&rename.old),
             index_oid(&rename.new),
             out,
@@ -336,6 +329,16 @@ const fn submodule_cmu(st: StatusSummary) -> (char, char, char) {
         '.'
     };
     (c, m, u)
+}
+
+/// A submodule's working-tree mode in a porcelain v2 line: the gitlink mode, or
+/// zero once its workdir is deleted.
+const fn gitlink_worktree_mode(st: StatusSummary) -> u32 {
+    if st.contains(StatusSummary::DELETED_WORKDIR) {
+        0
+    } else {
+        0o160_000
+    }
 }
 
 /// The `<sub>` field of a porcelain v2 `1`/`2` line, derived from the entry's
@@ -559,12 +562,7 @@ fn write_conflict(
             .copied()
             .unwrap_or_else(StatusSummary::clean);
         let (c, m, u) = submodule_cmu(st);
-        let m_work = if st.contains(StatusSummary::DELETED_WORKDIR) {
-            0u32
-        } else {
-            0o160_000_u32
-        };
-        ('S', c, m, u, m_work)
+        ('S', c, m, u, gitlink_worktree_mode(st))
     } else {
         let m_work = entry
             .index_to_workdir()
@@ -608,11 +606,7 @@ fn write_submodule(
     } else {
         0o160_000_u32
     };
-    let m_work = if st.contains(StatusSummary::DELETED_WORKDIR) {
-        0u32
-    } else {
-        0o160_000_u32
-    };
+    let m_work = gitlink_worktree_mode(st);
     write!(
         out,
         "1 {x}{y} S{c}{m}{u} {:06o} {:06o} {:06o} {h_head} {h_index} ",
@@ -654,21 +648,26 @@ fn write_deleted_submodule(
     out.write_all(line_terminator(render_opts.null_terminate).as_bytes())
 }
 
-/// Writes a submodule rename as a porcelain v2 `2 R. S<C><M><U>` line:
-/// gitlink mode at all three positions, same OID at head/index (it's a
-/// pure rename), score 100, then `<new>\t<old>` (or NUL-separated with
-/// `-z`).
+/// Writes a submodule rename as a porcelain v2 `2 R<Y> S<C><M><U>` line. Y,
+/// `S<C><M><U>`, and the working-tree mode come from the new path's
+/// working-tree state `worktree`. Head and index carry the gitlink mode and the
+/// same OID (it's a pure rename), score 100, then `<new>\t<old>` (or
+/// NUL-separated with `-z`).
 fn write_renamed_submodule(
     rename: &super::SubmoduleRename,
+    worktree: StatusSummary,
     h_head: git2::Oid,
     h_index: git2::Oid,
     out: &mut impl Write,
     render_opts: &RenderOpts<'_>,
 ) -> Result<(), io::Error> {
+    let (_, y) = submodule_xy(worktree);
+    let (c, m, u) = submodule_cmu(worktree);
     let gitlink = 0o160_000_u32;
+    let m_work = gitlink_worktree_mode(worktree);
     write!(
         out,
-        "2 R. S... {gitlink:06o} {gitlink:06o} {gitlink:06o} {h_head} {h_index} R100 ",
+        "2 R{y} S{c}{m}{u} {gitlink:06o} {gitlink:06o} {m_work:06o} {h_head} {h_index} R100 ",
     )?;
     render_opts.rel.write_quoted(
         out,

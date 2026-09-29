@@ -202,6 +202,14 @@ const CASES: &[Case] = &[
         branch: false,
     },
     Case {
+        name: "submodule_renamed_untracked",
+        setup: Setup::WithSubmodules {
+            names: &["sub"],
+            setup: setup_submodule_renamed_untracked,
+        },
+        branch: false,
+    },
+    Case {
         name: "submodules_interleaved_unstaged",
         setup: Setup::WithSubmodules {
             names: &["ddd", "ppp"],
