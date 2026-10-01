@@ -51,6 +51,8 @@ pub enum IpcError {
     IO(#[from] std::io::Error),
     #[error(transparent)]
     VersionMismatch(#[from] VersionMismatchError),
+    #[error("indexing failed")]
+    IndexingFailed,
 }
 
 pub type IpcResult<T> = Result<T, IpcError>;

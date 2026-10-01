@@ -142,6 +142,9 @@ Every client message is wrapped in `ClientRequest { version: u8, message: Client
 The server checks `version` against `IPC_VERSION` and responds with
 `ServerMessage::VersionMismatch` on mismatch, keeping the server alive for other clients.
 
+A reindex request receives `Indexing` progress until `curr == total`, or
+`IndexingFailed` when the pass fails. The server keeps serving its last indexed state.
+
 Small fixed-size messages (status requests, shutdown ack, etc.) use stack buffers and
 `write_full_message_fixed` for single-syscall writes. Large variable-size messages
 (status responses, debug dumps) use `encode_and_write`, which prepends the length prefix

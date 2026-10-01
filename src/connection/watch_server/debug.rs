@@ -7,7 +7,9 @@ use std::{
 use log::error;
 
 use crate::connection::{
-    DebugState, IpcStream, ServerMessage, encode_and_write, ipc_socket_path, try_lock_for,
+    DebugState, IpcStream, ServerMessage, encode_and_write, ipc_socket_path,
+    progress::ProgressEvent,
+    try_lock_for,
     watch_server::{InFlightTracker, WatchServer},
 };
 
@@ -66,7 +68,14 @@ impl WatchServer {
             .map(|guard| {
                 guard
                     .iter()
-                    .map(|(pid, pending)| (*pid, pending.map(|p| (p.curr, p.total))))
+                    .map(|(pid, pending)| {
+                        let pending = pending.and_then(|event| match event {
+                            ProgressEvent::Update(update) => Some((update.curr, update.total)),
+                            // Its handler takes a failure on the next poll.
+                            ProgressEvent::Failed => None,
+                        });
+                        (*pid, pending)
+                    })
                     .collect()
             });
 

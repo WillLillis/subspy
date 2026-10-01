@@ -20,9 +20,17 @@ impl ProgressUpdate {
     }
 }
 
-/// Client PIDs subscribed to indexing progress, each holding the update it has
+/// What an indexing pass tells its subscribers.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum ProgressEvent {
+    Update(ProgressUpdate),
+    /// The pass failed, so no further update for it will come.
+    Failed,
+}
+
+/// Client PIDs subscribed to indexing progress, each holding the event it has
 /// not read yet.
-pub(super) type ProgressSubscribers = Mutex<FxHashMap<u32, Option<ProgressUpdate>>>;
+pub(super) type ProgressSubscribers = Mutex<FxHashMap<u32, Option<ProgressEvent>>>;
 
 /// Makes `progress_val` the pending update for every subscriber, replacing
 /// whatever each had not yet read.
@@ -32,11 +40,25 @@ pub(super) type ProgressSubscribers = Mutex<FxHashMap<u32, Option<ProgressUpdate
 /// Panics if the mutex has been poisoned.
 #[inline]
 pub(super) fn broadcast_progress(subscribers: &ProgressSubscribers, progress_val: ProgressUpdate) {
+    broadcast(subscribers, ProgressEvent::Update(progress_val));
+}
+
+/// Tells every subscriber that the indexing pass it waited on failed, replacing
+/// whatever each had not yet read.
+///
+/// # Panics
+///
+/// Panics if the mutex has been poisoned.
+pub(super) fn broadcast_indexing_failed(subscribers: &ProgressSubscribers) {
+    broadcast(subscribers, ProgressEvent::Failed);
+}
+
+fn broadcast(subscribers: &ProgressSubscribers, event: ProgressEvent) {
     for pending in subscribers
         .lock()
         .expect("Subscribers mutex poisoned")
         .values_mut()
     {
-        *pending = Some(progress_val);
+        *pending = Some(event);
     }
 }

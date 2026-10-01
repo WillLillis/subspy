@@ -162,7 +162,8 @@ fn try_get_statuses(
             ServerMessage::Indexing { .. } => {}
             ServerMessage::VersionMismatch { .. }
             | ServerMessage::ShutdownAck
-            | ServerMessage::DebugInfo(_) => {
+            | ServerMessage::DebugInfo(_)
+            | ServerMessage::IndexingFailed => {
                 break None;
             }
         }
