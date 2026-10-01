@@ -14,8 +14,9 @@ use log::error;
 use crate::{
     StatusSummary,
     connection::{
-        BINCODE_CFG, ClientMessage, ClientRequest, DebugState, IPC_VERSION, IpcResult, IpcStream,
-        ServerMessage, ShutdownEndpointError, VersionMismatchError, ipc_connect, ipc_socket_path,
+        BINCODE_CFG, ClientMessage, ClientRequest, DebugState, IPC_VERSION, IpcError, IpcResult,
+        IpcStream, ServerMessage, ShutdownEndpointError, VersionMismatchError, ipc_connect,
+        ipc_socket_path,
         protocol::{DEBUG_REQUEST, SHUTDOWN_REQUEST},
         read_full_message, read_full_message_fixed, server_not_started, set_recv_timeout,
         write_full_message_fixed,
@@ -29,7 +30,8 @@ use crate::{
 ///
 /// # Errors
 ///
-/// Returns `Err` if client-server communication or bincode encoding fails.
+/// Returns `Err` if client-server communication or bincode encoding fails, and
+/// [`IpcError::IndexingFailed`] when the server's indexing pass fails.
 pub fn request_reindex(root_path: &Path, display_progress: bool) -> IpcResult<()> {
     let sock_path = ipc_socket_path(root_path);
     let conn = ipc_connect(&sock_path)?;
@@ -70,6 +72,7 @@ pub fn request_reindex(root_path: &Path, display_progress: bool) -> IpcResult<()
                     break Ok(());
                 }
             }
+            Ok((ServerMessage::IndexingFailed, _)) => break Err(IpcError::IndexingFailed),
             Ok(_) => break Ok(()),
         }
     };
@@ -79,6 +82,9 @@ pub fn request_reindex(root_path: &Path, display_progress: bool) -> IpcResult<()
             pb.finish_with_message("Reindex complete");
         } else {
             pb.abandon();
+            // The bar leaves the cursor on its line, so start the caller's error
+            // on the next one.
+            eprintln!();
         }
     }
 

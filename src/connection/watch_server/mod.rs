@@ -51,7 +51,7 @@ use layout::GitLayout;
 use update::InFlightTracker;
 
 use super::client_handler::handle_client_connection;
-use super::progress::ProgressSubscribers;
+use super::progress::{ProgressSubscribers, broadcast_indexing_failed};
 
 const IDLE_SERVER_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -451,6 +451,9 @@ impl WatchServer {
                             "Scheduled reindex retries exhausted, statuses refresh on the next git operation"
                         );
                     }
+                    // A reindex request waits for this pass to finish, which it
+                    // never will.
+                    broadcast_indexing_failed(&self.progress_subscribers);
                     exit_reason = self.handle_events(retry_scheduled)?;
                     continue;
                 }

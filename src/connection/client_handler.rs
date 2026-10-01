@@ -15,14 +15,15 @@ use crate::{
     StatusSummary,
     connection::{
         BINCODE_CFG, ClientMessage, ClientRequest, IPC_VERSION, ServerMessage,
-        read_full_message_fixed, transport::MSG_PREFIX_LEN, write_full_message_fixed,
+        protocol::INDEXING_FAILED, read_full_message_fixed, transport::MSG_PREFIX_LEN,
+        write_full_message_fixed,
     },
     git::path::GitPath,
     watch::{WatchError, WatchResult},
 };
 
 use super::{
-    progress::{ProgressSubscribers, ProgressUpdate},
+    progress::{ProgressEvent, ProgressSubscribers, ProgressUpdate},
     try_lock,
     watch_server::{ControlMessage, StatusMap},
 };
@@ -220,24 +221,31 @@ fn handle_reindex_request(
     result
 }
 
-/// Sends the pending reindex progress update. Terminal updates unsubscribe the
-/// client before they are written, so a sequential request from the same process
-/// cannot be mistaken for stale state from this one.
+/// Sends the pending reindex progress event. Terminal events (the final update or
+/// a failed pass) unsubscribe the client before they are written.
 fn try_send_reindex_progress_update(
     conn: &mut BufReader<IpcStream>,
     client_pid: u32,
     subscribers: &ProgressSubscribers,
 ) -> WatchResult<bool> {
-    let Some(ProgressUpdate { curr, total }) = try_take_progress_update(client_pid, subscribers)
-    else {
+    let Some(event) = try_take_progress_event(client_pid, subscribers) else {
         return Ok(false);
     };
-    let complete = curr == total;
-    if complete {
-        remove_progress_client(client_pid, subscribers);
+    match event {
+        ProgressEvent::Update(ProgressUpdate { curr, total }) => {
+            let complete = curr == total;
+            if complete {
+                remove_progress_client(client_pid, subscribers);
+            }
+            send_progress_update(conn, curr, total)?;
+            Ok(complete)
+        }
+        ProgressEvent::Failed => {
+            remove_progress_client(client_pid, subscribers);
+            write_full_message_fixed(conn, &INDEXING_FAILED)?;
+            Ok(true)
+        }
     }
-    send_progress_update(conn, curr, total)?;
-    Ok(complete)
 }
 
 /// Unsubscribes a client, discarding any update it had not read.
@@ -248,8 +256,9 @@ fn remove_progress_client(client_pid: u32, subscribers: &ProgressSubscribers) {
         .remove(&client_pid);
 }
 
-/// Attempts to send an indexing progress message to `conn` for `client_pid`. Returns
-/// `true` after sending an update where `curr == total`.
+/// Attempts to send an indexing progress message to `conn` for `client_pid`.
+/// Returns `true` when the indexing pass has ended, so the caller can retry
+/// the status map lock without yielding.
 ///
 /// # Errors
 ///
@@ -259,21 +268,23 @@ fn try_send_progress_update(
     client_pid: u32,
     subscribers: &ProgressSubscribers,
 ) -> WatchResult<bool> {
-    let Some(ProgressUpdate { curr, total }) = try_take_progress_update(client_pid, subscribers)
-    else {
-        return Ok(false);
-    };
-
-    send_progress_update(conn, curr, total)?;
-
-    Ok(curr == total)
+    match try_take_progress_event(client_pid, subscribers) {
+        Some(ProgressEvent::Update(ProgressUpdate { curr, total })) => {
+            send_progress_update(conn, curr, total)?;
+            Ok(curr == total)
+        }
+        // A failed pass never takes the status map lock, so the caller can
+        // retry it immediately and get the last indexed map.
+        Some(ProgressEvent::Failed) => Ok(true),
+        None => Ok(false),
+    }
 }
 
-/// Takes the pending update without blocking behind an active broadcast.
-fn try_take_progress_update(
+/// Takes the pending event without blocking behind an active broadcast.
+fn try_take_progress_event(
     client_pid: u32,
     subscribers: &ProgressSubscribers,
-) -> Option<ProgressUpdate> {
+) -> Option<ProgressEvent> {
     try_lock(subscribers)?.get_mut(&client_pid)?.take()
 }
 

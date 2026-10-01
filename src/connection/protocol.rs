@@ -75,6 +75,8 @@ pub enum ServerMessage {
     VersionMismatch {
         server_version: u8,
     },
+    /// Ends a reindex request whose indexing pass failed.
+    IndexingFailed,
 }
 
 /// Pre-encoded wire bytes for the payload-free messages, allowing their send paths
@@ -82,6 +84,7 @@ pub enum ServerMessage {
 pub(super) const SHUTDOWN_REQUEST: [u8; 5] = [1, 1, 0, 0, 0];
 pub(super) const DEBUG_REQUEST: [u8; 5] = [1, 3, 0, 0, 0];
 pub(super) const SHUTDOWN_ACK: [u8; 4] = [2, 0, 0, 0];
+pub(super) const INDEXING_FAILED: [u8; 4] = [5, 0, 0, 0];
 
 #[cfg(test)]
 mod tests {
@@ -105,6 +108,10 @@ mod tests {
             bincode::encode_to_vec(ServerMessage::ShutdownAck, BINCODE_CFG).unwrap(),
             SHUTDOWN_ACK,
         );
+        assert_eq!(
+            bincode::encode_to_vec(ServerMessage::IndexingFailed, BINCODE_CFG).unwrap(),
+            INDEXING_FAILED,
+        );
     }
 
     #[test]
@@ -113,6 +120,10 @@ mod tests {
             (
                 "ServerMessage::ShutdownAck",
                 bincode::encode_to_vec(ServerMessage::ShutdownAck, BINCODE_CFG).unwrap(),
+            ),
+            (
+                "ServerMessage::IndexingFailed",
+                bincode::encode_to_vec(ServerMessage::IndexingFailed, BINCODE_CFG).unwrap(),
             ),
             (
                 "ClientMessage::Shutdown",
@@ -241,6 +252,10 @@ mod tests {
             (
                 "ServerMessage::ShutdownAck",
                 bincode::encode_to_vec(ServerMessage::ShutdownAck, BINCODE_CFG).unwrap(),
+            ),
+            (
+                "ServerMessage::IndexingFailed",
+                bincode::encode_to_vec(ServerMessage::IndexingFailed, BINCODE_CFG).unwrap(),
             ),
             (
                 "ServerMessage::VersionMismatch",
@@ -414,6 +429,12 @@ mod tests {
                 .unwrap(),
                 // variant(4,0,0,0) | version(0)
                 &[4, 0, 0, 0, 1],
+            ),
+            (
+                "ServerMessage::IndexingFailed",
+                bincode::encode_to_vec(ServerMessage::IndexingFailed, BINCODE_CFG).unwrap(),
+                // variant(5,0,0,0)
+                &[5, 0, 0, 0],
             ),
         ];
 
