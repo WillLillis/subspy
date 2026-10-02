@@ -713,7 +713,7 @@ fn render_status(
         || match conn {
             Some(ref mut c) => Ok(recv_status_response(c, display_progress)?.0),
             None if kind.has_submodules() && ignore_submodules != IgnoreSubmodules::All => {
-                Ok(compute_local_statuses(&project.repo_root)?)
+                Ok(compute_local_statuses(&project.repo_root)?.0)
             }
             None => Ok(Vec::new()),
         },

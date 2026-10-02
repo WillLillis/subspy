@@ -628,7 +628,7 @@ fn assert_outputs_match(project: &ProjectPath, case_name: &str, opts: OutputOpts
         opts,
         || {
             Ok(if with_submodules {
-                compute_local_statuses(&project.repo_root)?
+                compute_local_statuses(&project.repo_root)?.0
             } else {
                 Vec::new()
             })
@@ -1342,7 +1342,7 @@ fn unreadable_submodule_refuses_like_git(ref_format: RefFormat) {
             let result = assemble_status(
                 &project,
                 opts,
-                || Ok(compute_local_statuses(root)?),
+                || Ok(compute_local_statuses(root)?.0),
                 |_, _, _| Ok(()),
             );
             assert!(

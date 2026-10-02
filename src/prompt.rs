@@ -8,7 +8,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use git2::Repository;
 use thiserror::Error;
 
 use crate::{
@@ -17,7 +16,7 @@ use crate::{
         BINCODE_CFG, ClientMessage, ClientRequest, ServerMessage, ipc_connect, ipc_socket_path,
         read_full_message, server_not_started, set_recv_timeout, write_full_message_fixed,
     },
-    git::{path::GitPath, substatus::gitlink_paths},
+    git::path::GitPath,
     status::compute_local_statuses,
     template::{Template, TemplateError},
     watch::spawn_daemon,
@@ -61,13 +60,10 @@ pub fn prompt(
         };
         (statuses, total as usize)
     } else {
-        let Ok(gitlinks) = Repository::open(root_path).and_then(|repo| gitlink_paths(&repo)) else {
+        let Ok(local) = compute_local_statuses(root_path) else {
             return Ok(());
         };
-        let Ok(statuses) = compute_local_statuses(root_path) else {
-            return Ok(());
-        };
-        (statuses, gitlinks.len())
+        local
     };
 
     let mut dirty = 0u32;

@@ -383,7 +383,7 @@ fn run_subspy_long(project: &ProjectPath, opts: OutputOpts) -> Vec<u8> {
         opts,
         || {
             Ok(if has_submodules {
-                compute_local_statuses(&project.repo_root)?
+                compute_local_statuses(&project.repo_root)?.0
             } else {
                 Vec::new()
             })
@@ -696,7 +696,7 @@ fn unreadable_submodules_reach_the_renderer(ref_format: RefFormat) {
         let submodules = assemble_status(
             &project,
             default_opts(),
-            || Ok(compute_local_statuses(root)?),
+            || Ok(compute_local_statuses(root)?.0),
             |_, entries, _| Ok(entries.submodules.to_vec()),
         )
         .unwrap();
