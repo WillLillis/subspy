@@ -12,7 +12,7 @@ use super::trace::wtrace;
 use crate::{
     DOT_GIT, StatusSummary,
     connection::{
-        progress::{ProgressUpdate, broadcast_progress},
+        progress::{ProgressUpdate, advance_progress, broadcast_progress},
         watch_server::WatchServer,
     },
     create_progress_bar,
@@ -37,7 +37,7 @@ impl WatchServer {
         display_progress: bool,
         mut status_guard: MutexGuard<'_, BTreeMap<GitPath, StatusSummary>>,
     ) -> WatchResult<()> {
-        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::atomic::AtomicU32;
 
         use rayon::prelude::*;
 
@@ -116,16 +116,7 @@ impl WatchServer {
                         }
                     };
 
-                let count = completed.fetch_add(1, Ordering::Relaxed) + 1;
-                // Workers can broadcast out of order, and each subscriber keeps only
-                // the latest update, so the final count is published below, once
-                // every worker is done.
-                if count < n_submodules {
-                    broadcast_progress(
-                        progress_subscribers,
-                        ProgressUpdate::new(count, n_submodules),
-                    );
-                }
+                advance_progress(progress_subscribers, &completed, n_submodules);
                 if let Some(pb) = &progress_bar {
                     pb.inc(1);
                 }
@@ -133,10 +124,6 @@ impl WatchServer {
                 (relative_path, modules_path, status)
             })
             .collect();
-        broadcast_progress(
-            &self.progress_subscribers,
-            ProgressUpdate::new(n_submodules, n_submodules),
-        );
 
         status_guard.clear();
         self.pending_rescan.clear_and_resize(results.len());
