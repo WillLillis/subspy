@@ -43,8 +43,7 @@ pub fn request_reindex(root_path: &Path, display_progress: bool) -> IpcResult<()
     let msg_len = bincode::encode_into_slice(&req, &mut msg, BINCODE_CFG)?;
     write_full_message_fixed(&mut conn, &msg[..msg_len])?;
 
-    let progress_bar =
-        display_progress.then(|| create_progress_bar(0, "Reindexing in progress..."));
+    let mut progress_bar = None;
     // Indexing { u32, u32 } = 12 bytes fixint, so use a stack buffer.
     let mut buffer = [0u8; 12];
     // TODO: This would be better as a `try` block if that's ever stabilized
@@ -64,9 +63,11 @@ pub fn request_reindex(root_path: &Path, display_progress: bool) -> IpcResult<()
                 .into());
             }
             Ok((ServerMessage::Indexing { curr, total }, _)) => {
-                if let Some(pb) = &progress_bar {
-                    pb.set_position(u64::from(curr));
+                if display_progress {
+                    let pb = progress_bar
+                        .get_or_insert_with(|| create_progress_bar(0, "Reindexing in progress..."));
                     pb.set_length(u64::from(total));
+                    pb.set_position(u64::from(curr));
                 }
                 if curr == total {
                     break Ok(());
@@ -82,9 +83,6 @@ pub fn request_reindex(root_path: &Path, display_progress: bool) -> IpcResult<()
             pb.finish_with_message("Reindex complete");
         } else {
             pb.abandon();
-            // The bar leaves the cursor on its line, so start the caller's error
-            // on the next one.
-            eprintln!();
         }
     }
 
@@ -256,7 +254,7 @@ pub fn recv_status_response(
     conn: &mut BufReader<IpcStream>,
     display_progress: bool,
 ) -> IpcResult<(Vec<(GitPath, StatusSummary)>, u32)> {
-    let progress_bar = display_progress.then(|| create_progress_bar(0, "Indexing in progress..."));
+    let mut progress_bar = None;
     let mut buffer = Vec::with_capacity(4096); // empirically ~2 KiB on a test repo
     // TODO: This would be better as a `try` block if that's ever stabilized
     let result = loop {
@@ -272,7 +270,11 @@ pub fn recv_status_response(
         match resp_msg {
             ServerMessage::Status { statuses, total } => break Ok((statuses, total)),
             ServerMessage::Indexing { curr, total } => {
-                if let Some(pb) = &progress_bar {
+                if display_progress {
+                    // Created on the first update, so a request that fails before
+                    // any update draws no bar.
+                    let pb = progress_bar
+                        .get_or_insert_with(|| create_progress_bar(0, "Indexing in progress..."));
                     pb.set_length(u64::from(total));
                     pb.set_position(u64::from(curr));
                 }
