@@ -2,7 +2,10 @@
 //! broadcasts indexing progress) and the client handler (which forwards the
 //! pending update to subscribed clients).
 
-use std::sync::Mutex;
+use std::sync::{
+    Mutex,
+    atomic::{AtomicU32, Ordering},
+};
 
 use bincode::{BorrowDecode, Encode};
 use rustc_hash::FxHashMap;
@@ -41,6 +44,24 @@ pub(super) type ProgressSubscribers = Mutex<FxHashMap<u32, Option<ProgressEvent>
 #[inline]
 pub(super) fn broadcast_progress(subscribers: &ProgressSubscribers, progress_val: ProgressUpdate) {
     broadcast(subscribers, ProgressEvent::Update(progress_val));
+}
+
+/// Records one more completed item in `completed` and makes the new count the
+/// pending update for every subscriber.
+///
+/// # Panics
+///
+/// Panics if the mutex has been poisoned.
+pub(super) fn advance_progress(
+    subscribers: &ProgressSubscribers,
+    completed: &AtomicU32,
+    total: u32,
+) {
+    let mut subscribers = subscribers.lock().expect("Subscribers mutex poisoned");
+    let curr = completed.fetch_add(1, Ordering::Relaxed) + 1;
+    for pending in subscribers.values_mut() {
+        *pending = Some(ProgressEvent::Update(ProgressUpdate::new(curr, total)));
+    }
 }
 
 /// Tells every subscriber that the indexing pass it waited on failed, replacing
