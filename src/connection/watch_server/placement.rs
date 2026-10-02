@@ -272,6 +272,6 @@ mod tests {
         server.place_tree_watch().unwrap();
         server.workdir_to_index.clear();
         server.place_tripwires();
-        assert!(server.tripwires.is_empty());
+        assert_eq!(server.tripwires, [] as [PathBuf; 0]);
     }
 }
