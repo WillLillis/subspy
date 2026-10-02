@@ -313,7 +313,7 @@ fn run_subspy_short(project: &ProjectPath, opts: OutputOpts) -> Vec<u8> {
         opts,
         || {
             Ok(if with_submodules {
-                compute_local_statuses(&project.repo_root)?
+                compute_local_statuses(&project.repo_root)?.0
             } else {
                 Vec::new()
             })

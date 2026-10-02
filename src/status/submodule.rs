@@ -300,17 +300,19 @@ pub fn apply_ignore_submodules(
 }
 
 /// Computes submodule statuses locally via git2 without the watch server, for
-/// every gitlink in the index, the same set the watch server reports.
+/// every gitlink in the index. Returns the statuses that are not clean and
+/// the number of gitlinks.
 ///
 /// # Errors
 ///
 /// Returns `git2::Error` if the repository or its index cannot be read.
 pub fn compute_local_statuses(
     root_path: &Path,
-) -> Result<Vec<(GitPath, StatusSummary)>, git2::Error> {
+) -> Result<(Vec<(GitPath, StatusSummary)>, usize), git2::Error> {
     use rayon::prelude::*;
 
     let paths = substatus::gitlink_paths(&Repository::open(root_path)?)?;
+    let total = paths.len();
     let tl_repo = thread_local::ThreadLocal::new();
 
     let statuses: Vec<_> = paths
@@ -326,7 +328,7 @@ pub fn compute_local_statuses(
         .filter(|(_, s)| *s != StatusSummary::clean())
         .collect();
 
-    Ok(statuses)
+    Ok((statuses, total))
 }
 
 #[cfg(test)]
@@ -386,11 +388,12 @@ mod tests {
         git(&["-C", &root_str, "commit", "-m", "add submodule"]);
         Repo::new(&root).migrate_refs(ref_format);
 
-        let statuses = compute_local_statuses(&root).unwrap();
+        let (statuses, total) = compute_local_statuses(&root).unwrap();
         assert!(
             statuses.is_empty(),
             "clean repo should have no dirty submodules"
         );
+        assert_eq!(total, 1);
     }
 
     #[apply(formats)]
@@ -426,7 +429,8 @@ mod tests {
         // Dirty the submodule
         std::fs::write(root.join("my_sub").join("new.txt"), "untracked\n").unwrap();
 
-        let statuses = compute_local_statuses(&root).unwrap();
+        let (statuses, total) = compute_local_statuses(&root).unwrap();
+        assert_eq!(total, 1);
         assert_eq!(statuses.len(), 1);
         assert_eq!(statuses[0].0, "my_sub");
         assert!(statuses[0].1.contains(StatusSummary::UNTRACKED_CONTENT));
@@ -449,7 +453,7 @@ mod tests {
             .submodule("sub_b")
             .build();
         let assert_statuses = |expected: &[(&str, StatusSummary)]| {
-            let statuses = compute_local_statuses(harness.root().path()).unwrap();
+            let (statuses, _) = compute_local_statuses(harness.root().path()).unwrap();
             let expected: Vec<_> = expected
                 .iter()
                 .map(|(path, status)| (GitPath::from(*path), *status))
