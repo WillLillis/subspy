@@ -53,6 +53,8 @@ pub enum IpcError {
     VersionMismatch(#[from] VersionMismatchError),
     #[error("indexing failed")]
     IndexingFailed,
+    #[error("message length {len} exceeds buffer size {max}")]
+    MessageLength { len: usize, max: usize },
 }
 
 pub type IpcResult<T> = Result<T, IpcError>;
