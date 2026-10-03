@@ -16,7 +16,7 @@ use interprocess::local_socket::{
 };
 use rustc_hash::FxHasher;
 
-use super::{BINCODE_CFG, IpcResult};
+use super::{BINCODE_CFG, IpcError, IpcResult};
 
 pub(super) const SOCKET_NAME_PREFIX: &str = "subspy-";
 pub(super) const SOCKET_NAME_SUFFIX: &str = ".sock";
@@ -172,23 +172,22 @@ pub fn write_full_message_fixed(
 ///
 /// # Errors
 ///
-/// Returns [`std::io::Error`] if reading fails.
-///
-/// # Panics
-///
-/// Debug-panics if the incoming message length exceeds `N`.
+/// Returns [`IpcError::IO`] if reading fails, or [`IpcError::MessageLength`] if the
+/// incoming message is longer than `N`.
 pub fn read_full_message_fixed<const N: usize>(
     conn: &mut BufReader<IpcStream>,
     buffer: &mut [u8; N],
-) -> std::io::Result<usize> {
+) -> IpcResult<usize> {
     let mut len_buf = [0u8; 4];
     conn.read_exact(&mut len_buf)?;
     let msg_len = u32::from_le_bytes(len_buf) as usize;
-    debug_assert!(
-        msg_len <= N,
-        "Message length {msg_len} exceeds buffer size {N}"
-    );
-    conn.read_exact(&mut buffer[..msg_len])?;
+    let Some(payload) = buffer.get_mut(..msg_len) else {
+        return Err(IpcError::MessageLength {
+            len: msg_len,
+            max: N,
+        });
+    };
+    conn.read_exact(payload)?;
     Ok(msg_len)
 }
 

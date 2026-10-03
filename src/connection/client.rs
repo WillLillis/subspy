@@ -50,7 +50,7 @@ pub fn request_reindex(root_path: &Path, display_progress: bool) -> IpcResult<()
     let result = loop {
         let msg_len = match read_full_message_fixed(&mut conn, &mut buffer) {
             Ok(n) => n,
-            Err(e) => break Err(e.into()),
+            Err(e) => break Err(e),
         };
         match bincode::borrow_decode_from_slice::<ServerMessage, _>(&buffer[..msg_len], BINCODE_CFG)
         {
@@ -146,8 +146,8 @@ pub(crate) fn request_shutdown_endpoint(
 
     // VersionMismatch { u8 } = 5 bytes is the largest possible response.
     let mut buffer = [0u8; 5];
-    let msg_len = read_full_message_fixed(&mut conn, &mut buffer)
-        .map_err(|e| ShutdownEndpointError::Exchange(e.into()))?;
+    let msg_len =
+        read_full_message_fixed(&mut conn, &mut buffer).map_err(ShutdownEndpointError::Exchange)?;
     let (resp, _): (ServerMessage, usize) =
         bincode::borrow_decode_from_slice(&buffer[..msg_len], BINCODE_CFG)
             .map_err(|e| ShutdownEndpointError::Exchange(e.into()))?;
