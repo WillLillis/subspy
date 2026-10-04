@@ -2,7 +2,6 @@
 //! and reading responses.
 
 use std::{
-    ffi::OsStr,
     io::BufReader,
     path::Path,
     time::{Duration, Instant},
@@ -15,8 +14,7 @@ use crate::{
     StatusSummary,
     connection::{
         BINCODE_CFG, ClientMessage, ClientRequest, DebugState, IPC_VERSION, IpcError, IpcResult,
-        IpcStream, ServerMessage, ShutdownEndpointError, VersionMismatchError, ipc_connect,
-        ipc_socket_path,
+        IpcStream, ServerMessage, VersionMismatchError, ipc_connect, ipc_socket_path,
         protocol::{DEBUG_REQUEST, SHUTDOWN_REQUEST},
         read_full_message, read_full_message_fixed, server_not_started, set_recv_timeout,
         write_full_message_fixed,
@@ -126,31 +124,23 @@ pub fn request_shutdown(root_path: &Path) -> IpcResult<()> {
     Ok(())
 }
 
-/// Sends a shutdown request to an endpoint returned by `discover_ipc_endpoints`,
-/// handing the response back for the caller to report.
+/// Sends a shutdown request over `conn`.
 ///
 /// # Errors
 ///
-/// Returns `Err` if the endpoint is unreachable, or if encoding or decoding fails.
-pub(crate) fn request_shutdown_endpoint(
-    endpoint: &OsStr,
-) -> Result<ServerMessage, ShutdownEndpointError> {
+/// Returns `Err` if the exchange fails or times out, or if encoding or decoding fails.
+pub(crate) fn request_shutdown_endpoint(conn: IpcStream) -> IpcResult<ServerMessage> {
     const ENDPOINT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 
-    let conn = ipc_connect(endpoint).map_err(ShutdownEndpointError::Connect)?;
-    set_recv_timeout(&conn, Some(ENDPOINT_SHUTDOWN_TIMEOUT))
-        .map_err(|e| ShutdownEndpointError::Exchange(e.into()))?;
+    set_recv_timeout(&conn, Some(ENDPOINT_SHUTDOWN_TIMEOUT))?;
     let mut conn = BufReader::new(conn);
-    write_full_message_fixed(&mut conn, &SHUTDOWN_REQUEST)
-        .map_err(|e| ShutdownEndpointError::Exchange(e.into()))?;
+    write_full_message_fixed(&mut conn, &SHUTDOWN_REQUEST)?;
 
     // VersionMismatch { u8 } = 5 bytes is the largest possible response.
     let mut buffer = [0u8; 5];
-    let msg_len =
-        read_full_message_fixed(&mut conn, &mut buffer).map_err(ShutdownEndpointError::Exchange)?;
+    let msg_len = read_full_message_fixed(&mut conn, &mut buffer)?;
     let (resp, _): (ServerMessage, usize) =
-        bincode::borrow_decode_from_slice(&buffer[..msg_len], BINCODE_CFG)
-            .map_err(|e| ShutdownEndpointError::Exchange(e.into()))?;
+        bincode::borrow_decode_from_slice(&buffer[..msg_len], BINCODE_CFG)?;
 
     Ok(resp)
 }

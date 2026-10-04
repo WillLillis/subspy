@@ -25,7 +25,7 @@ pub use discovery::discover_ipc_endpoints;
 pub use protocol::{ClientMessage, ClientRequest, DebugState, ServerMessage};
 pub use transport::{
     IpcListener, IpcStream, cleanup_socket, create_listener, encode_and_write, ipc_connect,
-    ipc_socket_path, read_full_message, read_full_message_fixed, server_not_started,
+    ipc_socket_path, peer_pid, read_full_message, read_full_message_fixed, server_not_started,
     set_recv_timeout, uses_filesystem_sockets, write_full_message_fixed,
 };
 
@@ -59,15 +59,6 @@ pub enum IpcError {
 
 pub type IpcResult<T> = Result<T, IpcError>;
 
-/// Errors from a shutdown request to a discovered endpoint.
-#[derive(Debug, Error)]
-pub(crate) enum ShutdownEndpointError {
-    #[error(transparent)]
-    Connect(std::io::Error),
-    #[error(transparent)]
-    Exchange(IpcError),
-}
-
 /// Error returned when the client and server IPC versions do not match.
 #[derive(Clone, Debug, Error)]
 pub struct VersionMismatchError {
@@ -80,7 +71,7 @@ impl std::fmt::Display for VersionMismatchError {
         write!(
             f,
             "IPC version mismatch: client is version {}, server is version {}.\n\
-             Kill the server process and retry.",
+             Run `subspy stop --all` and retry.",
             self.client_version, self.server_version,
         )
     }

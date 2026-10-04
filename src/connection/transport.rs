@@ -17,6 +17,7 @@ use interprocess::local_socket::{
 use rustc_hash::FxHasher;
 
 use super::{BINCODE_CFG, IpcError, IpcResult};
+use crate::proc::Pid;
 
 pub(super) const SOCKET_NAME_PREFIX: &str = "subspy-";
 pub(super) const SOCKET_NAME_SUFFIX: &str = ".sock";
@@ -277,6 +278,91 @@ pub fn ipc_connect(sock_path: &OsStr) -> std::io::Result<IpcStream> {
     {
         IpcStream::connect(sock_path)
     }
+}
+
+/// Returns the ID of the process at the other end of `stream`, or `None` if the
+/// platform does not report it.
+///
+/// # Errors
+///
+/// Returns [`std::io::Error`] if reading the peer's credentials fails.
+#[cfg(all(unix, not(target_os = "macos")))]
+pub fn peer_pid(stream: &IpcStream) -> std::io::Result<Option<Pid>> {
+    use interprocess::local_socket::traits::StreamCommon as _;
+    Ok(stream.peer_creds()?.pid())
+}
+
+/// Returns the ID of the process at the other end of `stream`.
+///
+/// # Errors
+///
+/// Returns [`std::io::Error`] if `getsockopt(LOCAL_PEERPID)` fails.
+///
+/// # Panics
+///
+/// Panics if `getsockopt(LOCAL_PEERPID)` does not return a whole process ID.
+#[cfg(target_os = "macos")]
+pub fn peer_pid(stream: &IpcStream) -> std::io::Result<Option<Pid>> {
+    use std::os::fd::AsRawFd as _;
+
+    let IpcStream::UdSocket(stream) = stream;
+    let mut pid: Pid = 0;
+    let mut len = size_of::<Pid>() as libc::socklen_t;
+    // SAFETY: `pid` and `len` describe a writable `pid_t`, which is what
+    // `LOCAL_PEERPID` writes.
+    let ret = unsafe {
+        libc::getsockopt(
+            stream.inner().as_raw_fd(),
+            libc::SOL_LOCAL,
+            libc::LOCAL_PEERPID,
+            (&raw mut pid).cast(),
+            &raw mut len,
+        )
+    };
+    if ret == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    assert_eq!(len as usize, size_of::<Pid>());
+    Ok(Some(pid))
+}
+
+/// Returns the ID of the process at the other end of `stream`.
+///
+/// # Errors
+///
+/// Returns [`std::io::Error`] if `SIO_AF_UNIX_GETPEERPID` fails.
+///
+/// # Panics
+///
+/// Panics if `SIO_AF_UNIX_GETPEERPID` does not return a whole process ID.
+#[cfg(target_os = "windows")]
+pub fn peer_pid(stream: &IpcStream) -> std::io::Result<Option<Pid>> {
+    use std::os::windows::io::AsRawSocket as _;
+
+    use windows_sys::Win32::Networking::WinSock::{SIO_AF_UNIX_GETPEERPID, SOCKET_ERROR, WSAIoctl};
+
+    let mut pid: Pid = 0;
+    let mut returned: u32 = 0;
+    // SAFETY: the output buffer is a writable `u32`, which is what
+    // `SIO_AF_UNIX_GETPEERPID` writes, and the call is synchronous.
+    let ret = unsafe {
+        WSAIoctl(
+            stream.as_raw_socket() as usize,
+            SIO_AF_UNIX_GETPEERPID,
+            std::ptr::null(),
+            0,
+            (&raw mut pid).cast(),
+            size_of::<Pid>() as u32,
+            &raw mut returned,
+            std::ptr::null_mut(),
+            None,
+        )
+    };
+    if ret == SOCKET_ERROR {
+        return Err(std::io::Error::last_os_error());
+    }
+    assert_eq!(returned as usize, size_of::<Pid>());
+    Ok(Some(pid))
 }
 
 /// Creates a new listener for incoming client connections to the watch server for `root_dir`.

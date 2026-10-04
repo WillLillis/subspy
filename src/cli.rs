@@ -129,7 +129,8 @@ pub struct Stop {
     /// The directory to shutdown a watcher for
     #[arg(index = 1, conflicts_with = "all")]
     pub dir: Option<PathBuf>,
-    /// Best-effort shutdown of every watch server on this machine
+    /// Stop every discoverable watch server, terminating those that do not
+    /// acknowledge shutdown
     #[arg(short, long)]
     pub all: bool,
 }
