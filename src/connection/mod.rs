@@ -71,7 +71,7 @@ impl std::fmt::Display for VersionMismatchError {
         write!(
             f,
             "IPC version mismatch: client is version {}, server is version {}.\n\
-             Run `subspy stop --all` and retry.",
+             Run `subspy stop` for the affected repository and retry.",
             self.client_version, self.server_version,
         )
     }

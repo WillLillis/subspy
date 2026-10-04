@@ -309,8 +309,9 @@ Submodules that contain submodules of their own are not recursed into.
 another release may reject the request or fail to respond. SubSpy reads the peer
 PID from the connected socket and attempts to terminate that process. On platforms
 with filesystem sockets, it also removes stale sockets and sockets left after
-termination. The version-mismatch error suggests `stop --all` because a daemon
-spawned by the shim may run under the shim's name.
+termination. `stop` uses the same fallback for the selected repository. The
+version-mismatch error suggests `stop` because a daemon spawned by the shim may
+run under the shim's name.
 
 ## Testing
 

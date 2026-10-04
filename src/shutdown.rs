@@ -6,9 +6,9 @@ use thiserror::Error;
 
 use crate::{
     connection::{
-        IpcError, ServerMessage,
-        client::{request_shutdown, request_shutdown_endpoint},
-        discover_ipc_endpoints, ipc_connect, peer_pid, server_not_started, uses_filesystem_sockets,
+        IpcError, IpcStream, ServerMessage, client::request_shutdown_endpoint,
+        discover_ipc_endpoints, ipc_connect, ipc_socket_path, peer_pid, server_not_started,
+        uses_filesystem_sockets,
     },
     proc::{Pid, terminate_process},
 };
@@ -23,6 +23,8 @@ pub enum ShutdownError {
     Discovery(#[source] std::io::Error),
     #[error("{failed} watch server(s) could not be stopped")]
     Incomplete { failed: usize },
+    #[error(transparent)]
+    Stop(#[from] StopError),
 }
 
 /// How [`stop_endpoint`] stopped the server at an endpoint.
@@ -36,9 +38,9 @@ enum Stopped {
     Terminated { pid: Pid },
 }
 
-/// Why [`stop_endpoint`] could not stop the server at an endpoint.
+/// Why a watch server endpoint could not be stopped.
 #[derive(Debug, Error)]
-enum StopError {
+pub enum StopError {
     #[error(transparent)]
     Connect(std::io::Error),
     #[error("could not remove the socket: {0}")]
@@ -55,14 +57,26 @@ enum StopError {
     },
 }
 
-/// Issues a shutdown request to the watch server for `root_path`.
+/// Stops the watch server for `root_path`.
 ///
 /// # Errors
 ///
-/// Returns `Err` if connecting to the server, encoding the request,
-/// or receiving the acknowledgement fails.
+/// Returns `Err` if the server cannot be reached or stopped.
 pub fn shutdown(root_path: &Path) -> ShutdownResult<()> {
-    Ok(request_shutdown(root_path)?)
+    let endpoint = ipc_socket_path(root_path);
+    let conn = ipc_connect(&endpoint).map_err(IpcError::from)?;
+    match stop_connected_endpoint(&endpoint, conn)? {
+        Stopped::ShutDown => println!(
+            "Successfully shutdown watch server for {}",
+            root_path.display()
+        ),
+        Stopped::Terminated { pid } => println!(
+            "Terminated watch server (pid {pid}) for {}",
+            root_path.display()
+        ),
+        Stopped::StaleSocketRemoved => unreachable!(),
+    }
+    Ok(())
 }
 
 /// Stops every watch server discoverable on this machine.
@@ -116,6 +130,11 @@ fn stop_endpoint(endpoint: &OsStr) -> Result<Stopped, StopError> {
         }
         Err(error) => return Err(StopError::Connect(error)),
     };
+    stop_connected_endpoint(endpoint, conn)
+}
+
+/// Stops a connected server, terminating it if shutdown is not acknowledged.
+fn stop_connected_endpoint(endpoint: &OsStr, conn: IpcStream) -> Result<Stopped, StopError> {
     let pid = peer_pid(&conn);
 
     let response = request_shutdown_endpoint(conn);
