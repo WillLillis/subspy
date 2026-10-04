@@ -5,6 +5,14 @@
 
 use std::process::Command;
 
+/// A process ID as the platform represents it.
+#[cfg(unix)]
+pub type Pid = libc::pid_t;
+
+/// A process ID as the platform represents it.
+#[cfg(target_os = "windows")]
+pub type Pid = u32;
+
 #[cfg(target_os = "windows")]
 mod windows_flags {
     // https://learn.microsoft.com/en-us/windows/win32/procthread/process-creation-flags
@@ -58,4 +66,73 @@ pub fn configure_hidden_console(cmd: &mut Command) {
     use std::os::windows::process::CommandExt as _;
     use windows_flags::CREATE_NO_WINDOW;
     cmd.creation_flags(CREATE_NO_WINDOW);
+}
+
+/// Sends `SIGTERM` to the process with ID `pid`.
+///
+/// # Errors
+///
+/// Returns [`std::io::Error`] if the signal cannot be sent.
+///
+/// # Panics
+///
+/// Panics if `pid` is not positive.
+#[cfg(unix)]
+pub fn terminate_process(pid: Pid) -> std::io::Result<()> {
+    assert!(pid > 0, "invalid process ID {pid}");
+    // SAFETY: `kill` has no memory-safety preconditions.
+    if unsafe { libc::kill(pid, libc::SIGTERM) } == -1 {
+        let error = std::io::Error::last_os_error();
+        // If the process didn't already exit
+        if error.raw_os_error() != Some(libc::ESRCH) {
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
+/// Terminates the process with ID `pid`.
+///
+/// # Errors
+///
+/// Returns [`std::io::Error`] if the process cannot be opened or terminated.
+///
+/// # Panics
+///
+/// Panics if closing the process handle fails.
+#[cfg(target_os = "windows")]
+pub fn terminate_process(pid: Pid) -> std::io::Result<()> {
+    use windows_sys::Win32::{
+        Foundation::{CloseHandle, ERROR_INVALID_PARAMETER},
+        System::Threading::{OpenProcess, PROCESS_TERMINATE, TerminateProcess},
+    };
+
+    /// How `OpenProcess` reports the ID of a process that no longer exists.
+    const NO_SUCH_PROCESS: i32 = ERROR_INVALID_PARAMETER.cast_signed();
+
+    // SAFETY: `OpenProcess` has no memory-safety preconditions.
+    let process = unsafe { OpenProcess(PROCESS_TERMINATE, 0, pid) };
+    if process.is_null() {
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() == Some(NO_SUCH_PROCESS) {
+            return Ok(());
+        }
+        return Err(error);
+    }
+    // SAFETY: `OpenProcess` returned a non-null handle, so it is open with the
+    // `PROCESS_TERMINATE` access requested above.
+    let result = if unsafe { TerminateProcess(process, 1) } == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    };
+    // SAFETY: `process` is the open handle `OpenProcess` returned, and this is the
+    // only place that closes it.
+    let closed = unsafe { CloseHandle(process) };
+    assert!(
+        closed != 0,
+        "closing the process handle failed: {}",
+        std::io::Error::last_os_error()
+    );
+    result
 }

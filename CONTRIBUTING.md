@@ -305,6 +305,13 @@ path but useful when no server is desired (e.g. CI or one-off checks).
 **No nested submodule support.** SubSpy must be run from the top-level repository.
 Submodules that contain submodules of their own are not recursed into.
 
+**`stop --all` handles servers that do not acknowledge shutdown.** A server from
+another release may reject the request or fail to respond. SubSpy reads the peer
+PID from the connected socket and attempts to terminate that process. On platforms
+with filesystem sockets, it also removes stale sockets and sockets left after
+termination. The version-mismatch error suggests `stop --all` because a daemon
+spawned by the shim may run under the shim's name.
+
 ## Testing
 
 SubSpy's correctness depends on the watch server tracking every filesystem and git state
