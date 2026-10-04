@@ -9,7 +9,7 @@ use std::{
 use log::error;
 use notify::{EventKind, event::ModifyKind};
 
-use super::classify::{TreeAction, event_is_idle_activity};
+use super::classify::TreeAction;
 use super::debounce::{DebounceKind, ReindexDebounce};
 use super::trace::wtrace;
 
@@ -173,16 +173,7 @@ impl WatchServer {
         loop {
             crossbeam_channel::select! {
                 recv(idle_rx) -> res => match res? {
-                    // Arming a recursive watch makes notify walk the tree, and
-                    // its own `opendir` calls come back as one `Access(Open)`
-                    // per directory (~9k on boost). Waking on those would
-                    // re-park and re-arm forever, so the parked loop applies the
-                    // same setup-noise filter as the park transition.
-                    Ok(event) => {
-                        if event_is_idle_activity(&event) {
-                            return Ok(HandleEventsExit::Wake);
-                        }
-                    }
+                    Ok(_) => return Ok(HandleEventsExit::Wake),
                     Err(error) => {
                         error!("Idle watcher error: {error}");
                         wtrace!(IdleWatcherError);

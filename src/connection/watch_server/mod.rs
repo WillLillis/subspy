@@ -45,7 +45,7 @@ use crate::{
     watch::WatchResult,
 };
 
-use classify::{EventType, event_is_idle_activity};
+use classify::EventType;
 use event_loop::HandleEventsExit;
 use layout::GitLayout;
 use update::InFlightTracker;
@@ -356,21 +356,12 @@ impl WatchServer {
                 HandleEventsExit::Park => {
                     let idle_watch = self.place_idle_watch()?;
 
-                    // Arming the idle watcher above walks the tree, and inotify
-                    // delivers each of those `opendir` calls to every watch on
-                    // the same directory - including the hot watchers, which are
-                    // still armed. Filtering by relevance keeps that self-inflicted
-                    // `Access(Open)` burst from reading as real activity. A
-                    // watcher error still counts: the hot loop reindexes on those.
+                    // The hot watchers are still armed here. If either has queued
+                    // activity, keep them instead of parking across that change.
                     let hot_activity = [&self.git_watch, &self.tree_watch]
                         .into_iter()
                         .flatten()
-                        .any(|watch| {
-                            watch
-                                .receiver
-                                .try_iter()
-                                .any(|res| res.map_or(true, |event| event_is_idle_activity(&event)))
-                        });
+                        .any(|watch| watch.receiver.try_iter().next().is_some());
 
                     if hot_activity {
                         // The timeout raced with filesystem activity. Keep the
