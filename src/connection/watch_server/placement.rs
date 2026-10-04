@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use log::error;
-use notify::Watcher as _;
+use notify::{EventKindMask, Watcher as _};
 use rustc_hash::FxHashSet;
 
 use super::trace::wtrace;
@@ -24,7 +24,8 @@ impl WatchServer {
             move |res: Result<notify::Event, notify::Error>| {
                 _ = tx.send(res);
             },
-            notify::Config::default(),
+            notify::Config::default()
+                .with_event_kinds(EventKindMask::CORE | EventKindMask::ACCESS_CLOSE),
         )?;
 
         Ok(SharedWatch {

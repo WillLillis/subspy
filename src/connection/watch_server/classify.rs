@@ -53,14 +53,6 @@ pub(super) const fn event_is_relevant(event: &notify::Event) -> bool {
     )
 }
 
-/// Determines whether an event should wake a parked server.
-///
-/// Recursive watch registration reports the watcher's own directory opens as
-/// `Access(Open)`, and should be ignored.
-pub(super) const fn event_is_idle_activity(event: &notify::Event) -> bool {
-    !matches!(event.kind, EventKind::Access(AccessKind::Open(_)))
-}
-
 /// Whether `event` is a rename by its [`kind`](`notify::Event::kind`).
 const fn event_is_rename(event: &notify::Event) -> bool {
     matches!(event.kind, EventKind::Modify(ModifyKind::Name(_)))
