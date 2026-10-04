@@ -519,11 +519,9 @@ fn setup_submod_renamed_renames_disabled(h: &TestHarness) {
 /// subspy's defaults so the two sides agree without explicit redundant flags.
 fn git_status_args(opts: OutputOpts) -> Vec<String> {
     let mut a: Vec<String> = Vec::new();
-    // `-c` globals must precede the subcommand.
-    if !opts.quote_path {
-        a.push("-c".into());
-        a.push("core.quotepath=false".into());
-    }
+    a.push("-c".into());
+    a.push(format!("core.quotepath={}", opts.quote_path));
+
     a.push("status".into());
     match opts.format {
         OutputFormat::Porcelain(PorcelainVersion::V1) => a.push("--porcelain".into()),
