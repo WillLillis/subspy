@@ -115,11 +115,8 @@ struct WatchServer {
     /// Submodule watcher indices needing a re-read, drained by the event loop
     /// ([`Self::handle_events`]) on its next turn.
     ///
-    /// A reindex that replaces the submodule watchers marks every submodule, because
-    /// those watchers are armed _after_ [`Self::populate_status_map`] reads statuses,
-    /// and whatever the previous watchers had queued is dropped with them. This
-    /// causes a replacing reindex to publish stale status, so they must be refreshed
-    /// to converge to a correct answer.
+    /// [`Self::populate_status_map`] marks each submodule whose status read
+    /// failed.
     pending_rescan: BitSet,
 
     // Cache paths used in hot loops to avoid repeated `PathBuf` allocations.

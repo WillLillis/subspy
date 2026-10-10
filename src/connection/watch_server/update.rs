@@ -243,9 +243,9 @@ impl WatchServer {
     /// Spawns a re-read for every submodule marked in [`Self::pending_rescan`],
     /// clearing it.
     ///
-    /// An indexing pass marks every slot, so a status read that failed during the
-    /// pass gets another try here. Any failures that occur during this re-read arm
-    /// their own retries, so statuses eventually converge.
+    /// An indexing pass marks each slot whose status read failed, so the read gets
+    /// another try here. Any failures that occur during this re-read arm their own
+    /// retries, so statuses eventually converge.
     pub(super) fn drain_pending_rescans(
         &mut self,
         in_flight: &Arc<(Mutex<InFlightTracker>, Condvar)>,
