@@ -573,12 +573,13 @@ retry (event loop marks the in-flight task), new task spawn (event loop creates 
 task after the rename), and `SubmoduleLockRelease` safety net (for aborted git
 operations).
 
-The reindex has no such retries, and reads each submodule *before* arming the replacement
-watchers, so events the old watchers had queued are lost with them. Both gaps route
-through `pending_rescan`: a replacing reindex marks every submodule, a failed read marks
-its own slot, and the event loop drains the set through the incremental path before it
-starts selecting. A failed read also publishes `UNREADABLE` rather than leaving the entry
-absent, which a client would render as clean.
+The reindex has no such retries. It places every tripwire and submodule watch before its
+first read, so a change during the reads still reaches the event loop, and a workdir that
+appears after its own watch found nothing trips a tripwire that schedules another reindex.
+A failed read still needs another try, so a replacing reindex marks every submodule in
+`pending_rescan`, and the event loop drains the set through the incremental path before
+it starts selecting. A failed read also publishes `UNREADABLE` rather than leaving the
+entry absent, which a client would render as clean.
 
 ### Event ordering across platforms
 

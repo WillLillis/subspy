@@ -181,14 +181,15 @@ impl WatchServer {
     }
 
     /// Registers non-recursive tripwire watches on the tree watcher for the
-    /// ancestor directories of every submodule. The repository root is excluded
-    /// because the tree watcher always watches it. Expects a freshly placed
-    /// tree watcher: roots are registered from scratch, not reconciled.
-    pub(super) fn place_tripwires(&mut self) {
+    /// ancestor directories of every root-relative submodule workdir in
+    /// `workdirs`. The repository root is excluded because the tree watcher
+    /// always watches it. Expects a freshly placed tree watcher: roots are
+    /// registered from scratch, not reconciled.
+    pub(super) fn place_tripwires<'a>(&mut self, workdirs: impl IntoIterator<Item = &'a Path>) {
         // Deduplicate root-relative ancestor paths across submodules sharing
         // parents, then sort for deterministic placement and debug output.
         let mut desired = FxHashSet::default();
-        for workdir in self.workdir_to_index.keys() {
+        for workdir in workdirs {
             desired.extend(
                 workdir
                     .ancestors()
@@ -240,12 +241,11 @@ mod tests {
         let mut server = WatchServer::new(root, &layout, rx);
         server.place_tree_watch().unwrap();
 
-        server.workdir_to_index.insert(PathBuf::from("libs/a"), 0);
-        server
-            .workdir_to_index
-            .insert(PathBuf::from("libs/numeric/b"), 1);
-        server.workdir_to_index.insert(PathBuf::from("vendor/c"), 2);
-        server.place_tripwires();
+        server.place_tripwires([
+            Path::new("libs/a"),
+            Path::new("libs/numeric/b"),
+            Path::new("vendor/c"),
+        ]);
         assert_eq!(
             server.tripwires,
             vec![
@@ -258,21 +258,17 @@ mod tests {
         // A replacing reindex rebuilds the tree watcher and re-places tripwires
         // from the new submodule set.
         server.place_tree_watch().unwrap();
-        server.workdir_to_index.clear();
-        server.workdir_to_index.insert(PathBuf::from("vendor/c"), 0);
-        server.place_tripwires();
+        server.place_tripwires([Path::new("vendor/c")]);
         assert_eq!(server.tripwires, vec![PathBuf::from("vendor")]);
 
         // A missing ancestor directory is skipped rather than aborting placement.
         server.place_tree_watch().unwrap();
-        server.workdir_to_index.insert(PathBuf::from("ghost/x"), 1);
-        server.place_tripwires();
+        server.place_tripwires([Path::new("vendor/c"), Path::new("ghost/x")]);
         assert_eq!(server.tripwires, vec![PathBuf::from("vendor")]);
 
         // No submodules leaves only the always-on root watch.
         server.place_tree_watch().unwrap();
-        server.workdir_to_index.clear();
-        server.place_tripwires();
+        server.place_tripwires([] as [&Path; 0]);
         assert_eq!(server.tripwires, [] as [PathBuf; 0]);
     }
 }

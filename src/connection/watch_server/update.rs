@@ -243,11 +243,9 @@ impl WatchServer {
     /// Spawns a re-read for every submodule marked in [`Self::pending_rescan`],
     /// clearing it.
     ///
-    /// A reindex that replaced the submodule watchers read their statuses _before_
-    /// arming the new ones, and dropped whatever the old ones had queued. Because
-    /// of this ordering, any event in that gap is lost, leading to stale or absent
-    /// statuses. This re-read corrects those failures. Any failures that occur during
-    /// this re-read arm their own retries, so statuses eventually converge.
+    /// An indexing pass marks every slot, so a status read that failed during the
+    /// pass gets another try here. Any failures that occur during this re-read arm
+    /// their own retries, so statuses eventually converge.
     pub(super) fn drain_pending_rescans(
         &mut self,
         in_flight: &Arc<(Mutex<InFlightTracker>, Condvar)>,
