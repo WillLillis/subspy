@@ -173,8 +173,8 @@ impl WatchServer {
                 statuses.insert(relative_path.clone(), status);
             } else {
                 statuses.insert(relative_path.clone(), StatusSummary::UNREADABLE);
+                self.pending_rescan.insert(i);
             }
-            self.pending_rescan.insert(i);
             // Preserve `.git/modules/<name>` event routing when the status
             // read fails. Deleted workdirs regain this entry after a restoring
             // reindex resolves the gitlink.
