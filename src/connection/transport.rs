@@ -373,19 +373,10 @@ pub fn peer_pid(stream: &IpcStream) -> std::io::Result<Option<Pid>> {
 ///
 /// # Errors
 ///
-/// Returns `std::io::Error` if the listener cannot be created.
-pub fn create_listener(root_dir: &Path) -> std::io::Result<IpcListener> {
+/// Returns [`IpcError::SocketInUse`] if the socket for `root_dir` is in use, or
+/// [`IpcError::IO`] if the listener cannot be created.
+pub fn create_listener(root_dir: &Path) -> IpcResult<IpcListener> {
     let sock_path = ipc_socket_path(root_dir);
-    let addr_in_use_err = || {
-        std::io::Error::new(
-            std::io::ErrorKind::AddrInUse,
-            format!(
-                "Could not start watch server because the socket file is occupied. \
-                 Is there already a watcher placed on {}?",
-                root_dir.display()
-            ),
-        )
-    };
 
     #[cfg(not(target_os = "windows"))]
     {
@@ -401,10 +392,10 @@ pub fn create_listener(root_dir: &Path) -> std::io::Result<IpcListener> {
                     let name = ipc_name(&sock_path)?;
                     Ok(ListenerOptions::new().name(name).create_sync()?)
                 } else {
-                    Err(addr_in_use_err())
+                    Err(IpcError::SocketInUse(root_dir.to_path_buf()))
                 }
             }
-            Err(e) => Err(e),
+            Err(e) => Err(e.into()),
         }
     }
     #[cfg(target_os = "windows")]
@@ -418,10 +409,10 @@ pub fn create_listener(root_dir: &Path) -> std::io::Result<IpcListener> {
                 {
                     Ok(uds_windows::UnixListener::bind(&sock_path)?)
                 } else {
-                    Err(addr_in_use_err())
+                    Err(IpcError::SocketInUse(root_dir.to_path_buf()))
                 }
             }
-            Err(e) => Err(e),
+            Err(e) => Err(e.into()),
         }
     }
 }

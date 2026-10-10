@@ -232,11 +232,11 @@ impl WatchServer {
     ///
     /// # Errors
     ///
-    /// Returns [`std::io::Error`] if the thread cannot be created.
+    /// Returns `Err` if the listener or its thread cannot be created.
     fn spawn_listener(
         &self,
         control_tx: crossbeam_channel::Sender<ControlMessage>,
-    ) -> std::io::Result<(Arc<AtomicBool>, JoinHandle<()>)> {
+    ) -> WatchResult<(Arc<AtomicBool>, JoinHandle<()>)> {
         let listener = create_listener(&self.root_path)?;
         let statuses = Arc::clone(&self.submod_statuses);
         let subscribers = Arc::clone(&self.progress_subscribers);

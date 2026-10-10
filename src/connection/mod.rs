@@ -7,6 +7,7 @@
 //! paths.
 
 use std::{
+    path::PathBuf,
     sync::{Mutex, MutexGuard, TryLockError},
     time::{Duration, Instant},
 };
@@ -57,6 +58,8 @@ pub enum IpcError {
     MessageLength { len: usize, max: usize },
     #[error("unexpected response from server: {0:?}")]
     UnexpectedResponse(ServerMessage),
+    #[error("watch server socket for {} is in use", .0.display())]
+    SocketInUse(PathBuf),
 }
 
 pub type IpcResult<T> = Result<T, IpcError>;
