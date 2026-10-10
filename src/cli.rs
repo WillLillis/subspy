@@ -1,7 +1,12 @@
 //! CLI argument definitions, subcommand dispatch, error types, and
 //! repository path resolution.
 
-use std::{env::current_dir, io, io::IsTerminal as _, path::PathBuf, time::Duration};
+use std::{
+    env::current_dir,
+    io::{self, IsTerminal as _},
+    path::PathBuf,
+    time::Duration,
+};
 
 use clap::{Args, Subcommand, ValueEnum};
 use thiserror::Error;
@@ -241,6 +246,10 @@ pub enum RunError {
         path: PathBuf,
         error: std::io::Error,
     },
+    #[error("{} is not inside a git repository", .0.display())]
+    NotInRepository(PathBuf),
+    #[error("A watch server needs a top-level repository with a .gitmodules file ({})", .0.display())]
+    UnsupportedRepository(PathBuf),
     #[error("A watch server needs .git to be a directory, but it's a gitlink to an external git directory ({})", _0.display())]
     Gitlink(PathBuf),
     #[error(transparent)]
@@ -257,19 +266,6 @@ pub enum RunError {
     Home(#[from] etcetera::HomeDirError),
     #[error(transparent)]
     Clap(#[from] clap::Error),
-}
-
-impl RunError {
-    /// Builds a [`RunError::ProjectPath`] for repository kinds outside the supported
-    /// top-level superproject and linked-worktree shapes.
-    fn server_path(path: PathBuf) -> Self {
-        Self::ProjectPath {
-            path,
-            error: io::Error::other(
-                "Path must be inside a non-recursive git repository with a .gitmodules file",
-            ),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -524,8 +520,8 @@ impl ProjectPath {
     ///
     /// # Errors
     ///
-    /// Returns [`RunError::Gitlink`] for an external gitdir and [`RunError::ProjectPath`]
-    /// for other unsupported repository kinds.
+    /// Returns [`RunError::Gitlink`] for an external gitdir and
+    /// [`RunError::UnsupportedRepository`] for other unsupported repository kinds.
     pub fn require_with_submodules(self) -> RunResult<PathBuf> {
         if self.kind.server_eligible() {
             return Ok(self.repo_root);
@@ -541,7 +537,7 @@ impl ProjectPath {
             | RepoKind::Submodule
             | RepoKind::SubmoduleWithSubmodules
             | RepoKind::Worktree
-            | RepoKind::WorktreeWithSubmodules => RunError::server_path(self.repo_root),
+            | RepoKind::WorktreeWithSubmodules => RunError::UnsupportedRepository(self.repo_root),
         })
     }
 }
@@ -636,11 +632,7 @@ pub fn get_project_path(path: Option<PathBuf>) -> RunResult<ProjectPath> {
         }
         current_path = match current_path.parent() {
             Some(p) => p,
-            None => Err(RunError::ProjectPath {
-                #[allow(clippy::redundant_clone)] // false positive
-                path: path.clone(),
-                error: io::Error::other("Path must be inside a git repository"),
-            })?,
+            None => return Err(RunError::NotInRepository(path)),
         }
     }
 }
@@ -728,7 +720,7 @@ mod tests {
     #[test]
     fn nonexistent_path_errors() {
         let result = get_project_path(Some(PathBuf::from("/nonexistent/path/xyz")));
-        assert!(result.is_err());
+        assert!(matches!(result, Err(RunError::ProjectPath { .. })));
     }
 
     #[test]
@@ -736,7 +728,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         // Empty directory, no .git anywhere
         let result = get_project_path(Some(tmp.path().to_path_buf()));
-        assert!(result.is_err());
+        assert!(matches!(result, Err(RunError::NotInRepository(_))));
     }
 
     #[test]
@@ -964,7 +956,7 @@ mod tests {
         };
         assert!(matches!(
             bare_worktree.require_with_submodules(),
-            Err(RunError::ProjectPath { .. })
+            Err(RunError::UnsupportedRepository(_))
         ));
     }
 }
