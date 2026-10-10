@@ -170,7 +170,7 @@ impl std::fmt::Display for StatusSummary {
 fn create_progress_bar(len: u64, prefix: impl Into<Cow<'static, str>>) -> indicatif::ProgressBar {
     ProgressBar::new(len)
         .with_style(
-            ProgressStyle::with_template("{prefix:.cyan.bold}: {wide_bar:} {pos}/{len} {msg}")
+            ProgressStyle::with_template("{prefix:.cyan.bold}: {wide_bar:} {percent}% {msg}")
                 .unwrap(),
         )
         .with_prefix(prefix)
