@@ -128,13 +128,18 @@ impl WatchServer {
             //    leaves its slot index in `pending_retries`. The handler checks
             //    this set and re-fires the status read.
             let mut cleaned_up = false;
+            #[expect(
+                clippy::significant_drop_tightening,
+                reason = "`map` borrows from the guard"
+            )]
             let publish_status = |status| {
                 if !cancel.load(Ordering::Relaxed) {
                     let mut guard = statuses.lock().expect("StatusMap mutex poisoned");
-                    if let Some(entry) = guard.get_mut(&relative_path) {
+                    let map = guard.as_mut().unwrap();
+                    if let Some(entry) = map.get_mut(&relative_path) {
                         *entry = status;
                     } else {
-                        guard.insert(relative_path.clone(), status);
+                        map.insert(relative_path.clone(), status);
                     }
                 }
             };

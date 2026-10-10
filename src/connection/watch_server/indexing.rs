@@ -35,7 +35,7 @@ impl WatchServer {
         &mut self,
         submodule_paths: Vec<GitPath>,
         display_progress: bool,
-        mut status_guard: MutexGuard<'_, BTreeMap<GitPath, StatusSummary>>,
+        mut status_guard: MutexGuard<'_, Option<BTreeMap<GitPath, StatusSummary>>>,
     ) -> WatchResult<()> {
         use std::sync::atomic::AtomicU32;
 
@@ -125,7 +125,7 @@ impl WatchServer {
             })
             .collect();
 
-        status_guard.clear();
+        let mut statuses = BTreeMap::new();
         self.pending_rescan.clear_and_resize(results.len());
         self.modules_path_to_index.clear();
         self.workdir_to_index.clear();
@@ -136,9 +136,9 @@ impl WatchServer {
         // and the paths arrive in index order.
         for (i, (relative_path, modules_path, status)) in results.into_iter().enumerate() {
             if let Ok(status) = status {
-                status_guard.insert(relative_path.clone(), status);
+                statuses.insert(relative_path.clone(), status);
             } else {
-                status_guard.insert(relative_path.clone(), StatusSummary::UNREADABLE);
+                statuses.insert(relative_path.clone(), StatusSummary::UNREADABLE);
             }
             self.pending_rescan.insert(i);
             // Preserve `.git/modules/<name>` event routing when the status
@@ -163,6 +163,7 @@ impl WatchServer {
             }
             self.submodules.push(relative_path);
         }
+        *status_guard = Some(statuses);
         drop(status_guard);
 
         // Tripwires depend only on the submodule set, so (re)place them alongside

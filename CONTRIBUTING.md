@@ -144,6 +144,8 @@ The server checks `version` against `IPC_VERSION` and responds with
 
 A reindex request receives `Indexing` progress until `curr == total`, or
 `IndexingFailed` when the pass fails. The server keeps serving its last indexed state.
+A status request receives `IndexingFailed` when there is no indexed state, because the
+server's initial pass failed.
 
 Small fixed-size messages (status requests, shutdown ack, etc.) use stack buffers and
 `write_full_message_fixed` for single-syscall writes. Large variable-size messages

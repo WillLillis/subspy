@@ -38,8 +38,12 @@ impl WatchServer {
             .map(|p| p.display().to_string())
             .collect();
 
-        let submodule_statuses = try_lock_for(&self.submod_statuses, DEBUG_LOCK_TIMEOUT)
-            .map(|guard| guard.iter().map(|(k, v)| (format!("{k:?}"), *v)).collect());
+        let submodule_statuses =
+            try_lock_for(&self.submod_statuses, DEBUG_LOCK_TIMEOUT).and_then(|guard| {
+                guard
+                    .as_ref()
+                    .map(|map| map.iter().map(|(k, v)| (format!("{k:?}"), *v)).collect())
+            });
 
         let in_flight_tasks = in_flight.and_then(|in_flight| {
             try_lock_for(&in_flight.0, DEBUG_LOCK_TIMEOUT).map(|guard| {

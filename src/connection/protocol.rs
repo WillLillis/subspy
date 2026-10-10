@@ -75,7 +75,8 @@ pub enum ServerMessage {
     VersionMismatch {
         server_version: u8,
     },
-    /// Ends a reindex request whose indexing pass failed.
+    /// Ends a reindex request whose indexing pass failed, or answers a status
+    /// request when no indexing pass has completed.
     IndexingFailed,
 }
 
