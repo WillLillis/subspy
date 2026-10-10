@@ -168,7 +168,7 @@ pub fn write_full_message_fixed(
 
 /// Reads a length-prefixed message into a stack buffer of size `N`.
 ///
-/// Returns the payload length in bytes. The caller caller accesses it
+/// Returns the payload length in bytes. The caller accesses it
 /// through `&buffer[..len]`.
 ///
 /// # Errors

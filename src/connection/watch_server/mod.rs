@@ -473,7 +473,7 @@ impl WatchServer {
 ///
 /// # Errors
 ///
-/// Returns `Err` if resolving or reading the reposiory, setting up IPC or filesystem
+/// Returns `Err` if resolving or reading the repository, setting up IPC or filesystem
 /// watchers, receiving watcher events, or spawning the listener thread fails.
 ///
 /// # Panics

@@ -62,7 +62,7 @@ fn join_with_timeout(handle: JoinHandle<()>) -> Option<std::thread::Result<()>> 
     Some(handle.join())
 }
 
-/// Asks the server for `root` to shut down an returns its reply.
+/// Asks the server for `root` to shut down and returns its reply.
 fn shutdown_server(root: &Path) -> IpcResult<ServerMessage> {
     request_shutdown(ipc_connect(&ipc_socket_path(root))?)
 }
