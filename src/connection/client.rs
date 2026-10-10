@@ -8,7 +8,6 @@ use std::{
 };
 
 use indicatif::{ProgressBar, ProgressStyle};
-use log::error;
 
 use crate::{
     StatusSummary,
@@ -27,8 +26,9 @@ use crate::{
 ///
 /// # Errors
 ///
-/// Returns `Err` if client-server communication or bincode encoding fails, and
-/// [`IpcError::IndexingFailed`] when the server's indexing pass fails.
+/// Returns `Err` if client-server communication or bincode encoding fails or an
+/// unexpected message is received, and [`IpcError::IndexingFailed`] when the
+/// server's indexing pass fails.
 pub fn request_reindex(root_path: &Path, display_progress: bool) -> IpcResult<()> {
     let sock_path = ipc_socket_path(root_path);
     let conn = ipc_connect(&sock_path)?;
@@ -71,7 +71,7 @@ pub fn request_reindex(root_path: &Path, display_progress: bool) -> IpcResult<()
                 }
             }
             Ok((ServerMessage::IndexingFailed, _)) => break Err(IpcError::IndexingFailed),
-            Ok(_) => break Ok(()),
+            Ok((other, _)) => break Err(IpcError::UnexpectedResponse(other)),
         }
     };
 
@@ -237,13 +237,7 @@ pub fn recv_status_response(
                 .into());
             }
             ServerMessage::IndexingFailed => break Err(IpcError::IndexingFailed),
-            other => {
-                break Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!("Unexpected response from server during status request: {other:?}"),
-                )
-                .into());
-            }
+            other => break Err(IpcError::UnexpectedResponse(other)),
         }
         buffer.clear();
     };
@@ -263,7 +257,8 @@ pub fn recv_status_response(
 ///
 /// # Errors
 ///
-/// Returns `Err` if client-server communication or bincode encoding/decoding fails.
+/// Returns `Err` if client-server communication or bincode encoding/decoding fails
+/// or an unexpected message is received.
 pub fn request_debug(root_path: &Path) -> IpcResult<DebugState> {
     let sock_path = ipc_socket_path(root_path);
     let conn = ipc_connect(&sock_path)?;
@@ -281,12 +276,6 @@ pub fn request_debug(root_path: &Path) -> IpcResult<DebugState> {
             client_version: IPC_VERSION,
             server_version,
         })?,
-        other => {
-            error!("Unexpected response from server during debug request: {other:?}");
-            Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "Unexpected response from server",
-            ))?
-        }
+        other => Err(IpcError::UnexpectedResponse(other)),
     }
 }

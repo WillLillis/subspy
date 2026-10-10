@@ -55,6 +55,8 @@ pub enum IpcError {
     IndexingFailed,
     #[error("message length {len} exceeds buffer size {max}")]
     MessageLength { len: usize, max: usize },
+    #[error("unexpected response from server: {0:?}")]
+    UnexpectedResponse(ServerMessage),
 }
 
 pub type IpcResult<T> = Result<T, IpcError>;
