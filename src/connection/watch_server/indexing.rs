@@ -60,6 +60,41 @@ impl WatchServer {
         broadcast_progress(&self.progress_subscribers, ProgressUpdate::new(0, total));
 
         let completed = AtomicU32::new(0);
+
+        // Place every watch before reading any status, so a change during the
+        // reads reaches the event loop. Tripwires go first, because a workdir
+        // that appears after its own watch found nothing is seen only by a
+        // tripwire, which schedules a reindex.
+        self.place_tripwires(
+            submodule_paths
+                .iter()
+                .filter_map(|path| path.to_path().ok()),
+        );
+        self.workdir_to_index.clear();
+        for (i, relative_path) in submodule_paths.iter().enumerate() {
+            // A path this platform cannot represent names nothing on disk, so
+            // its slot has no watch or route.
+            if let Ok(rel) = relative_path.to_path() {
+                let full_path = self.root_path.join(rel);
+                if let Err(e) = self.watch_submodule(&full_path) {
+                    broadcast_indexing_failed(&self.progress_subscribers);
+                    return Err(e.into());
+                }
+                wtrace!(|s| WatchSubmod {
+                    index: i,
+                    path: s.intern_path(&full_path),
+                });
+                // Record the (root-relative) workdir->slot mapping even when the
+                // status read fails. Path routing must still be able to find a
+                // submodule by prefix.
+                self.workdir_to_index.insert(rel.to_path_buf(), i);
+            }
+            advance_progress(&self.progress_subscribers, &completed, total);
+            if let Some(pb) = &progress_bar {
+                pb.inc(1);
+            }
+        }
+
         let root_path = &self.root_path;
         let progress_subscribers = &self.progress_subscribers;
         let tl_repo = thread_local::ThreadLocal::new();
@@ -128,7 +163,6 @@ impl WatchServer {
         let mut statuses = BTreeMap::new();
         self.pending_rescan.clear_and_resize(results.len());
         self.modules_path_to_index.clear();
-        self.workdir_to_index.clear();
         self.submodules.clear();
         // Every submodule occupies a slot in this loop regardless of whether
         // its status read succeeded. This keeps slot `i` aligned with `results`
@@ -147,35 +181,10 @@ impl WatchServer {
             if let Some(modules_path) = modules_path {
                 self.modules_path_to_index.insert(modules_path, i);
             }
-            // A path this platform cannot represent names nothing on disk, so
-            // its slot has no watch or route.
-            if let Ok(rel) = relative_path.to_path() {
-                let full_path = self.root_path.join(rel);
-                if let Err(e) = self.watch_submodule(&full_path) {
-                    broadcast_indexing_failed(&self.progress_subscribers);
-                    return Err(e.into());
-                }
-                wtrace!(|s| WatchSubmod {
-                    index: i,
-                    path: s.intern_path(&full_path),
-                });
-                // Record the (root-relative) workdir->slot mapping even when the
-                // status read failed. Path routing must still be able to find a
-                // submodule by prefix.
-                self.workdir_to_index.insert(rel.to_path_buf(), i);
-            }
             self.submodules.push(relative_path);
-            advance_progress(&self.progress_subscribers, &completed, total);
-            if let Some(pb) = &progress_bar {
-                pb.inc(1);
-            }
         }
         *status_guard = Some(statuses);
         drop(status_guard);
-
-        // Tripwires depend only on the submodule set, so (re)place them alongside
-        // the submodule watches
-        self.place_tripwires();
 
         advance_progress(&self.progress_subscribers, &completed, total);
         if let Some(pb) = &progress_bar {
