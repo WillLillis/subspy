@@ -1,13 +1,13 @@
 //! The `stop` subcommand: sends shutdown requests to watch servers.
 
-use std::{ffi::OsStr, path::Path};
+use std::{ffi::OsStr, path::Path, time::Duration};
 
 use thiserror::Error;
 
 use crate::{
     connection::{
-        IpcError, IpcStream, ServerMessage, client::request_shutdown_endpoint,
-        discover_ipc_endpoints, ipc_connect, ipc_socket_path, peer_pid, server_not_started,
+        IpcError, IpcStream, ServerMessage, client::request_shutdown, discover_ipc_endpoints,
+        ipc_connect, ipc_socket_path, peer_pid, server_not_started, set_recv_timeout,
         uses_filesystem_sockets,
     },
     proc::{Pid, terminate_process},
@@ -135,9 +135,15 @@ fn stop_endpoint(endpoint: &OsStr) -> Result<Stopped, StopError> {
 
 /// Stops a connected server, terminating it if shutdown is not acknowledged.
 fn stop_connected_endpoint(endpoint: &OsStr, conn: IpcStream) -> Result<Stopped, StopError> {
+    /// How long a server has to acknowledge shutdown before it is terminated.
+    const ACK_TIMEOUT: Duration = Duration::from_secs(1);
+
     let pid = peer_pid(&conn);
 
-    let response = request_shutdown_endpoint(conn);
+    let response = match set_recv_timeout(&conn, Some(ACK_TIMEOUT)) {
+        Ok(()) => request_shutdown(conn),
+        Err(e) => Err(e.into()),
+    };
     if matches!(&response, Ok(ServerMessage::ShutdownAck)) {
         return Ok(Stopped::ShutDown);
     }

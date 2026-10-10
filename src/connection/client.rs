@@ -16,8 +16,7 @@ use crate::{
         BINCODE_CFG, ClientMessage, ClientRequest, DebugState, IPC_VERSION, IpcError, IpcResult,
         IpcStream, ServerMessage, VersionMismatchError, ipc_connect, ipc_socket_path,
         protocol::{DEBUG_REQUEST, SHUTDOWN_REQUEST},
-        read_full_message, read_full_message_fixed, server_not_started, set_recv_timeout,
-        write_full_message_fixed,
+        read_full_message, read_full_message_fixed, server_not_started, write_full_message_fixed,
     },
     create_progress_bar,
     git::path::GitPath,
@@ -87,52 +86,12 @@ pub fn request_reindex(root_path: &Path, display_progress: bool) -> IpcResult<()
     result
 }
 
-/// Sends a shutdown request to the watch server for `root_path`.
+/// Sends a shutdown request over `conn` and returns the server's response.
 ///
 /// # Errors
 ///
-/// Returns `Err` if client-server communication or bincode encoding/decoding fails.
-pub fn request_shutdown(root_path: &Path) -> IpcResult<()> {
-    let sock_path = ipc_socket_path(root_path);
-    let conn = ipc_connect(&sock_path)?;
-    let mut conn = BufReader::new(conn);
-    write_full_message_fixed(&mut conn, &SHUTDOWN_REQUEST)?;
-
-    // Wait for the watch server to acknowledge the shutdown.
-    // VersionMismatch { u8 } = 5 bytes is the largest possible response.
-    let mut buffer = [0u8; 5];
-    let msg_len = read_full_message_fixed(&mut conn, &mut buffer)?;
-    let (resp, _): (ServerMessage, usize) =
-        bincode::borrow_decode_from_slice(&buffer[..msg_len], BINCODE_CFG)?;
-
-    match resp {
-        ServerMessage::ShutdownAck => {
-            println!(
-                "Successfully shutdown watch server for {}",
-                root_path.display()
-            );
-        }
-        ServerMessage::VersionMismatch { server_version } => {
-            Err(VersionMismatchError {
-                client_version: IPC_VERSION,
-                server_version,
-            })?;
-        }
-        other => error!("Unexpected response from server during shutdown: {other:?}"),
-    }
-
-    Ok(())
-}
-
-/// Sends a shutdown request over `conn`.
-///
-/// # Errors
-///
-/// Returns `Err` if the exchange fails or times out, or if encoding or decoding fails.
-pub(crate) fn request_shutdown_endpoint(conn: IpcStream) -> IpcResult<ServerMessage> {
-    const ENDPOINT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
-
-    set_recv_timeout(&conn, Some(ENDPOINT_SHUTDOWN_TIMEOUT))?;
+/// Returns `Err` if the exchange fails, or if encoding or decoding fails.
+pub fn request_shutdown(conn: IpcStream) -> IpcResult<ServerMessage> {
     let mut conn = BufReader::new(conn);
     write_full_message_fixed(&mut conn, &SHUTDOWN_REQUEST)?;
 

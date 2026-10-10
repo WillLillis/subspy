@@ -6,7 +6,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use subspy::git::configure_git2;
+use subspy::{
+    connection::{IpcResult, ServerMessage},
+    git::configure_git2,
+};
 
 use git2::{Repository, Signature, Time};
 use subspy::{
@@ -57,6 +60,11 @@ fn join_with_timeout(handle: JoinHandle<()>) -> Option<std::thread::Result<()>> 
         std::thread::sleep(Duration::from_millis(20));
     }
     Some(handle.join())
+}
+
+/// Asks the server for `root` to shut down an returns its reply.
+fn shutdown_server(root: &Path) -> IpcResult<ServerMessage> {
+    request_shutdown(ipc_connect(&ipc_socket_path(root))?)
 }
 
 // Identity / time pins used by every fixture commit so SHAs are
@@ -395,7 +403,8 @@ impl TestHarness {
     /// Shut down the watch server and wait for the thread to exit.
     pub fn shutdown(&mut self) {
         if let Some(handle) = self.server_thread.take() {
-            request_shutdown(self.root.path()).expect("Shutdown request failed");
+            let reply = shutdown_server(self.root.path()).expect("Shutdown request failed");
+            assert_eq!(reply, ServerMessage::ShutdownAck);
             match join_with_timeout(handle) {
                 Some(result) => result.expect("Watch server thread panicked"),
                 None => panic!(
@@ -442,7 +451,7 @@ impl Drop for TestHarness {
         // Best-effort shutdown. Ignore a thread panic (the test may already be
         // unwinding), but bound the wait.
         let wedged = if let Some(handle) = self.server_thread.take() {
-            let _ = request_shutdown(self.root.path());
+            let _ = shutdown_server(self.root.path());
             join_with_timeout(handle).is_none()
         } else {
             false
