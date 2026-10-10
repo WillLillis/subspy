@@ -12,7 +12,9 @@ use super::trace::wtrace;
 use crate::{
     DOT_GIT, StatusSummary,
     connection::{
-        progress::{ProgressUpdate, advance_progress, broadcast_progress},
+        progress::{
+            ProgressUpdate, advance_progress, broadcast_indexing_failed, broadcast_progress,
+        },
         watch_server::WatchServer,
     },
     create_progress_bar,
@@ -51,13 +53,11 @@ impl WatchServer {
         info!("Indexing project at {}", self.root_path.display());
         let n_submodules = submodule_paths.len() as u32;
         wtrace!(Reindexing { n: n_submodules });
-        let progress_bar = display_progress
-            .then(|| create_progress_bar(u64::from(n_submodules), "Indexing submodules"));
+        let total = 2 * n_submodules + 1;
+        let progress_bar =
+            display_progress.then(|| create_progress_bar(u64::from(total), "Indexing submodules"));
 
-        broadcast_progress(
-            &self.progress_subscribers,
-            ProgressUpdate::new(0, n_submodules),
-        );
+        broadcast_progress(&self.progress_subscribers, ProgressUpdate::new(0, total));
 
         let completed = AtomicU32::new(0);
         let root_path = &self.root_path;
@@ -116,7 +116,7 @@ impl WatchServer {
                         }
                     };
 
-                advance_progress(progress_subscribers, &completed, n_submodules);
+                advance_progress(progress_subscribers, &completed, total);
                 if let Some(pb) = &progress_bar {
                     pb.inc(1);
                 }
@@ -151,7 +151,10 @@ impl WatchServer {
             // its slot has no watch or route.
             if let Ok(rel) = relative_path.to_path() {
                 let full_path = self.root_path.join(rel);
-                self.watch_submodule(&full_path)?;
+                if let Err(e) = self.watch_submodule(&full_path) {
+                    broadcast_indexing_failed(&self.progress_subscribers);
+                    return Err(e.into());
+                }
                 wtrace!(|s| WatchSubmod {
                     index: i,
                     path: s.intern_path(&full_path),
@@ -162,6 +165,10 @@ impl WatchServer {
                 self.workdir_to_index.insert(rel.to_path_buf(), i);
             }
             self.submodules.push(relative_path);
+            advance_progress(&self.progress_subscribers, &completed, total);
+            if let Some(pb) = &progress_bar {
+                pb.inc(1);
+            }
         }
         *status_guard = Some(statuses);
         drop(status_guard);
@@ -170,6 +177,7 @@ impl WatchServer {
         // the submodule watches
         self.place_tripwires();
 
+        advance_progress(&self.progress_subscribers, &completed, total);
         if let Some(pb) = &progress_bar {
             pb.finish();
         }

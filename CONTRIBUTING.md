@@ -143,8 +143,11 @@ The server checks `version` against `IPC_VERSION` and responds with
 `ServerMessage::VersionMismatch` on mismatch, keeping the server alive for other clients.
 
 A reindex request receives `Indexing` progress until `curr == total`, or
-`IndexingFailed` when the pass fails. The server keeps serving its last indexed state.
-A status request receives `IndexingFailed` when there is no indexed state, because the
+`IndexingFailed` when the pass fails. The count has a step for every status read,
+every submodule watch, and the final install, so it reaches `total` only once the
+pass is installed. After a failed index read the server keeps serving its last
+indexed state, and after any other failure it exits. A status request receives
+`IndexingFailed` when there is no indexed state, because the
 server's initial pass failed.
 
 Small fixed-size messages (status requests, shutdown ack, etc.) use stack buffers and
