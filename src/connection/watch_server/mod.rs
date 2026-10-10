@@ -55,8 +55,8 @@ use super::progress::{ProgressSubscribers, broadcast_indexing_failed};
 
 const IDLE_SERVER_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// The submodule status map
-pub(super) type StatusMap = Mutex<BTreeMap<GitPath, StatusSummary>>;
+/// The submodule status map, `None` until an indexing pass installs one.
+pub(super) type StatusMap = Mutex<Option<BTreeMap<GitPath, StatusSummary>>>;
 
 /// Message receiver type for a watcher
 type WatchReceiver = crossbeam_channel::Receiver<Result<notify::Event, notify::Error>>;
@@ -216,7 +216,7 @@ impl WatchServer {
             root_reftable_path,
             root_common_reftable_path,
             control_rx,
-            submod_statuses: Arc::new(Mutex::new(BTreeMap::new())),
+            submod_statuses: Arc::new(Mutex::new(None)),
             progress_subscribers: Arc::new(Mutex::new(FxHashMap::default())),
             last_watcher_error: None,
             modules_path_to_index: FxHashMap::default(),
@@ -333,7 +333,7 @@ impl WatchServer {
     fn watch(
         &mut self,
         display_progress: bool,
-        status_guard: MutexGuard<'_, BTreeMap<GitPath, StatusSummary>>,
+        status_guard: MutexGuard<'_, Option<BTreeMap<GitPath, StatusSummary>>>,
     ) -> WatchResult<()> {
         const READ_RETRY_LIMIT: u32 = 16;
 

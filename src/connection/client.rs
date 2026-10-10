@@ -179,7 +179,7 @@ fn connect_to_server(root_path: &Path, display_progress: bool) -> IpcResult<BufR
 ///
 /// # Errors
 ///
-/// Returns error if the ipc channel cannot be created or the request cannot be sent.
+/// Returns `Err` if the ipc channel cannot be created or the request cannot be sent.
 pub fn send_status_request(
     root_path: &Path,
     display_progress: bool,
@@ -197,8 +197,9 @@ pub fn send_status_request(
 ///
 /// # Errors
 ///
-/// Returns error if communication over the channel fails or an unexpected message
-/// is received.
+/// Returns `Err` if communication over the channel fails or an unexpected message
+/// is received, and [`IpcError::IndexingFailed`] when the server has no indexed state
+/// to serve.
 pub fn recv_status_response(
     conn: &mut BufReader<IpcStream>,
     display_progress: bool,
@@ -235,6 +236,7 @@ pub fn recv_status_response(
                 }
                 .into());
             }
+            ServerMessage::IndexingFailed => break Err(IpcError::IndexingFailed),
             other => {
                 break Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,

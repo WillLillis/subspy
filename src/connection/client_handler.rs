@@ -149,10 +149,15 @@ fn handle_status_request(
 /// Returns `Err` if writing to `conn` fails.
 fn encode_status_response(
     conn: &mut BufReader<IpcStream>,
-    guard: MutexGuard<'_, BTreeMap<GitPath, StatusSummary>>,
+    guard: MutexGuard<'_, Option<BTreeMap<GitPath, StatusSummary>>>,
     buf: &mut Vec<u8>,
 ) -> WatchResult<()> {
-    encode_status_into(&guard, buf);
+    let Some(map) = guard.as_ref() else {
+        drop(guard);
+        write_full_message_fixed(conn, &INDEXING_FAILED)?;
+        return Ok(());
+    };
+    encode_status_into(map, buf);
     drop(guard);
     conn.get_mut().write_all(buf)?;
     Ok(())
@@ -304,7 +309,7 @@ fn get_status_guard_with_progress<'a>(
     client_pid: u32,
     statuses: &'a StatusMap,
     subscribers: &ProgressSubscribers,
-) -> WatchResult<MutexGuard<'a, BTreeMap<GitPath, StatusSummary>>> {
+) -> WatchResult<MutexGuard<'a, Option<BTreeMap<GitPath, StatusSummary>>>> {
     loop {
         if let Some(g) = try_lock(statuses) {
             return Ok(g);
