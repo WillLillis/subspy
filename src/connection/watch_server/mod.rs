@@ -366,8 +366,7 @@ impl WatchServer {
                         self.place_tree_watch()?;
                         self.read_gitlink_paths()
                     } else {
-                        self.git_watch = None;
-                        self.tree_watch = None;
+                        self.tear_down_hot_watchers();
                         self.submodules.clear();
                         self.tripwires.clear();
                         self.pending_rescan.clear_and_resize(0);
