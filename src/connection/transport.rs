@@ -334,7 +334,7 @@ pub fn peer_pid(stream: &IpcStream) -> std::io::Result<Option<Pid>> {
 ///
 /// # Panics
 ///
-/// Panics if `SIO_AF_UNIX_GETPEERPID` does not return a whole process ID.
+/// Panics if `SIO_AF_UNIX_GETPEERPID` succeeds without writing a PID.
 #[cfg(target_os = "windows")]
 pub fn peer_pid(stream: &IpcStream) -> std::io::Result<Option<Pid>> {
     use std::os::windows::io::AsRawSocket as _;
@@ -361,7 +361,9 @@ pub fn peer_pid(stream: &IpcStream) -> std::io::Result<Option<Pid>> {
     if ret == SOCKET_ERROR {
         return Err(std::io::Error::last_os_error());
     }
-    assert_eq!(returned as usize, size_of::<Pid>());
+    // The AF_UNIX provider writes the ID but reports 0 bytes returned. No
+    // process has ID 0.
+    assert_ne!(pid, 0);
     Ok(Some(pid))
 }
 
