@@ -45,7 +45,7 @@ impl WatchServer {
                     .map(|map| map.iter().map(|(k, v)| (format!("{k:?}"), *v)).collect())
             });
 
-        let in_flight_tasks = in_flight.and_then(|in_flight| {
+        let in_flight_tasks = in_flight.map_or(Some(Vec::new()), |in_flight| {
             try_lock_for(&in_flight.0, DEBUG_LOCK_TIMEOUT).map(|guard| {
                 guard
                     .tasks
