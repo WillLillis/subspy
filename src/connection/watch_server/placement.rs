@@ -68,8 +68,8 @@ impl WatchServer {
         }
     }
 
-    /// Places the idle watcher for the parked state: a single recursive watch
-    /// over the whole repository.
+    /// Places the idle watcher for the parked state: a recursive watch over the
+    /// whole repository, plus the git directories when they live outside it.
     ///
     /// # Errors
     ///
@@ -79,6 +79,9 @@ impl WatchServer {
         watch
             .watcher
             .watch(&self.root_path, notify::RecursiveMode::Recursive)?;
+        if !self.root_git_path.starts_with(&self.root_path) {
+            self.watch_git_dirs(&mut watch.watcher)?;
+        }
 
         Ok(watch)
     }
@@ -92,12 +95,22 @@ impl WatchServer {
     /// Returns [`notify::Error`] if watcher creation or path registration fails.
     pub(super) fn place_git_watch(&mut self) -> notify::Result<()> {
         let mut watch = Self::build_watcher()?;
-        if let Err(e) = watch
-            .watcher
-            .watch(&self.root_git_path, notify::RecursiveMode::Recursive)
-        {
+        self.watch_git_dirs(&mut watch.watcher)?;
+        self.git_watch = Some(watch);
+        Ok(())
+    }
+
+    /// Adds the git directory to `watcher` as a recursive watch root, plus the
+    /// shared refs directory and reftable stack when a linked worktree keeps
+    /// them outside it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`notify::Error`] if path registration fails.
+    fn watch_git_dirs(&self, watcher: &mut ServerWatcher) -> notify::Result<()> {
+        if let Err(e) = watcher.watch(&self.root_git_path, notify::RecursiveMode::Recursive) {
             error!(
-                "Failed to place git watch at `{}`: {e}",
+                "Failed to watch git directory `{}`: {e}",
                 self.root_git_path.display()
             );
             return Err(e);
@@ -114,9 +127,7 @@ impl WatchServer {
             .parent()
             .unwrap_or(self.root_refs_heads_path.as_path());
         if !common_refs.starts_with(&self.root_git_path)
-            && let Err(e) = watch
-                .watcher
-                .watch(common_refs, notify::RecursiveMode::Recursive)
+            && let Err(e) = watcher.watch(common_refs, notify::RecursiveMode::Recursive)
         {
             error!(
                 "Failed to watch common-dir refs at `{}`: {e}",
@@ -130,9 +141,7 @@ impl WatchServer {
         let common_reftable = &self.root_common_reftable_path;
         if !common_reftable.starts_with(&self.root_git_path)
             && common_reftable.is_dir()
-            && let Err(e) = watch
-                .watcher
-                .watch(common_reftable, notify::RecursiveMode::NonRecursive)
+            && let Err(e) = watcher.watch(common_reftable, notify::RecursiveMode::NonRecursive)
         {
             error!(
                 "Failed to watch common-dir reftable stack at `{}`: {e}",
@@ -141,7 +150,6 @@ impl WatchServer {
             return Err(e);
         }
 
-        self.git_watch = Some(watch);
         Ok(())
     }
 
