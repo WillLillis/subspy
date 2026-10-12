@@ -2,7 +2,6 @@
 //! responses, progress broadcasting, and reindex coordination.
 
 use std::{
-    cell::RefCell,
     collections::BTreeMap,
     io::{BufReader, Write as _},
     sync::{Arc, MutexGuard},
@@ -27,10 +26,6 @@ use super::{
     try_lock,
     watch_server::{ControlMessage, StatusMap},
 };
-
-thread_local! {
-    static ENCODE_BUF: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
-}
 
 /// Handles a client connection on a dedicated OS thread and logs per-connection errors.
 #[expect(
@@ -115,10 +110,7 @@ fn handle_status_request(
 ) -> WatchResult<()> {
     // An immediately available status map avoids 2 progress subscriber mutex locks/unlocks
     if let Some(guard) = try_lock(statuses) {
-        return ENCODE_BUF.with_borrow_mut(|buf| -> WatchResult<()> {
-            encode_status_response(&mut conn, guard, buf)?;
-            Ok(())
-        });
+        return encode_status_response(&mut conn, guard);
     }
 
     // Slow path: indexing in progress, subscribe for progress updates.
@@ -130,12 +122,7 @@ fn handle_status_request(
     remove_progress_client(client_pid, subscribers);
     let guard = result?;
 
-    ENCODE_BUF.with_borrow_mut(|buf| -> WatchResult<()> {
-        encode_status_response(&mut conn, guard, buf)?;
-        Ok(())
-    })?;
-
-    Ok(())
+    encode_status_response(&mut conn, guard)
 }
 
 /// Encodes a `ServerMessage::Status` response from the status map guard
@@ -150,28 +137,32 @@ fn handle_status_request(
 fn encode_status_response(
     conn: &mut BufReader<IpcStream>,
     guard: MutexGuard<'_, Option<BTreeMap<GitPath, StatusSummary>>>,
-    buf: &mut Vec<u8>,
 ) -> WatchResult<()> {
     let Some(map) = guard.as_ref() else {
         drop(guard);
         write_full_message_fixed(conn, &INDEXING_FAILED)?;
         return Ok(());
     };
-    encode_status_into(map, buf);
+    let buf = encode_status(map);
     drop(guard);
-    conn.get_mut().write_all(buf)?;
+    conn.get_mut().write_all(&buf)?;
     Ok(())
 }
 
-/// Encodes a length-prefixed `ServerMessage::Status` into `buf` directly from
-/// the status map, avoiding path clones.
+/// Encodes a length-prefixed `ServerMessage::Status` from the status map.
 ///
-/// The payload after the length prefix is byte-identical to bincode's derived
-/// `Encode` for `ServerMessage::Status { statuses, total }`.
-fn encode_status_into(map: &BTreeMap<GitPath, StatusSummary>, buf: &mut Vec<u8>) {
+/// The payload after the length prefix is identical to bincode's derived `Encode`
+/// for `ServerMessage::Status { statuses, total }`.
+fn encode_status(map: &BTreeMap<GitPath, StatusSummary>) -> Vec<u8> {
     let total = map.len() as u32;
 
-    buf.clear();
+    let mut buf = Vec::with_capacity(
+        MSG_PREFIX_LEN
+            + size_of::<u32>()
+            + size_of::<u64>()
+            + size_of::<u32>()
+            + map.len() * (size_of::<u64>() + size_of::<u8>()),
+    );
     buf.extend_from_slice(&[0u8; MSG_PREFIX_LEN]); // length prefix placeholder
 
     // variant discriminant: Status = 0
@@ -202,6 +193,7 @@ fn encode_status_into(map: &BTreeMap<GitPath, StatusSummary>, buf: &mut Vec<u8>)
     // Backfill the length prefix
     let msg_len = (buf.len() - MSG_PREFIX_LEN) as u32;
     buf[..MSG_PREFIX_LEN].copy_from_slice(&msg_len.to_le_bytes());
+    buf
 }
 
 /// Handles a client's reindex request after the control signal has been sent to
@@ -328,11 +320,10 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     /// Builds a reference encoding using bincode's derived Encode, and compares
-    /// it against our manual `encode_status_into`.
+    /// it against our manual `encode_status`.
     fn assert_encoding_matches(map: &BTreeMap<GitPath, StatusSummary>) {
         // Manual encoding
-        let mut manual_buf = Vec::new();
-        encode_status_into(map, &mut manual_buf);
+        let manual_buf = encode_status(map);
 
         // Derived encoding: replicate the old clone+encode path
         let total = map.len() as u32;
@@ -415,8 +406,7 @@ mod tests {
         map.insert(path.clone(), StatusSummary::MODIFIED_CONTENT);
         assert_encoding_matches(&map);
 
-        let mut buf = Vec::new();
-        encode_status_into(&map, &mut buf);
+        let buf = encode_status(&map);
         let (decoded, _) = bincode::borrow_decode_from_slice::<ServerMessage, _>(
             &buf[MSG_PREFIX_LEN..],
             BINCODE_CFG,
