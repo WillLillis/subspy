@@ -1,6 +1,10 @@
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    time::{Duration, Instant},
+};
 
-use log::error;
+use crossbeam_channel::RecvTimeoutError;
+use log::{error, warn};
 use notify::{EventKindMask, Watcher as _};
 use rustc_hash::FxHashSet;
 
@@ -32,6 +36,36 @@ impl WatchServer {
             receiver: rx,
             watcher,
         })
+    }
+
+    /// Drops the hot watchers and waits until notify has stopped their watches.
+    pub(super) fn tear_down_hot_watchers(&mut self) {
+        /// How long teardown may take.
+        const TEARDOWN_TIMEOUT: Duration = Duration::from_millis(500);
+
+        let receivers = [self.git_watch.take(), self.tree_watch.take()].map(|watch| {
+            watch.map(|SharedWatch { receiver, watcher }| {
+                drop(watcher);
+                receiver
+            })
+        });
+        // Each watcher's event handler holds the only sender of its event channel,
+        // and notify drops the handler once it has stopped the watcher's watches.
+        // Events that arrive meanwhile are discarded, so callers must place the idle
+        // watcher first.
+        let deadline = Instant::now() + TEARDOWN_TIMEOUT;
+        for receiver in receivers.iter().flatten() {
+            loop {
+                match receiver.recv_deadline(deadline) {
+                    Ok(_) => {}
+                    Err(RecvTimeoutError::Disconnected) => break,
+                    Err(RecvTimeoutError::Timeout) => {
+                        warn!("Hot watcher teardown did not finish within {TEARDOWN_TIMEOUT:?}");
+                        return;
+                    }
+                }
+            }
+        }
     }
 
     /// Places the idle watcher for the parked state: a single recursive watch
