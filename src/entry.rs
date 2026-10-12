@@ -83,6 +83,8 @@ where
 
     match command {
         Commands::Start(watch_options) => {
+            #[cfg(all(target_os = "linux", target_env = "gnu"))]
+            pin_malloc_trim_threshold();
             init_server_thread_pool();
             let result = watch_options.run();
             if let Err(ref err) = result {
@@ -115,6 +117,22 @@ fn init_server_thread_pool() {
     let _ = rayon::ThreadPoolBuilder::new()
         .num_threads(threads)
         .build_global();
+}
+
+/// Stops glibc from raising its trim threshold after it frees a large block.
+/// A raised threshold leaves each rayon worker's arena holding the memory a
+/// reindex freed, so a parked server stays as large as a hot one. Setting the
+/// threshold disables that adjustment (`mallopt(3)`), which also keeps large
+/// blocks mmapped, so `free` returns them at once. Must run before the first
+/// indexing pass.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn pin_malloc_trim_threshold() {
+    /// glibc's own default.
+    const TRIM_THRESHOLD: i32 = 128 * 1024;
+
+    // SAFETY: `mallopt` has no memory-safety preconditions.
+    let set = unsafe { libc::mallopt(libc::M_TRIM_THRESHOLD, TRIM_THRESHOLD) };
+    assert_eq!(set, 1, "mallopt(M_TRIM_THRESHOLD) failed");
 }
 
 /// Sets up logging and, for the watch server, the panic hook. The watch
