@@ -383,6 +383,12 @@ impl WatchServer {
                         unsafe {
                             libc::malloc_trim(0);
                         }
+                        // The Windows heap decides on its own whether to decommit
+                        // freed blocks, and after a pass it often keeps them
+                        // committed, so without this a parked server can measure
+                        // as large as a hot one.
+                        #[cfg(target_os = "windows")]
+                        decommit_free_heap_memory();
                         exit_reason = self.handle_parked(&idle_watch)?;
                         continue;
                     }
@@ -461,6 +467,50 @@ impl WatchServer {
 
         Ok(())
     }
+}
+
+/// Decommits the free memory of the process heap, which Rust's allocator and the
+/// C runtime's `malloc` both use.
+#[cfg(target_os = "windows")]
+fn decommit_free_heap_memory() {
+    use windows_sys::Win32::System::{
+        Memory::{GetProcessHeap, HeapLock, HeapOptimizeResources, HeapSetInformation, HeapUnlock},
+        SystemServices::{
+            HEAP_OPTIMIZE_RESOURCES_CURRENT_VERSION, HEAP_OPTIMIZE_RESOURCES_INFORMATION,
+        },
+    };
+
+    let info = HEAP_OPTIMIZE_RESOURCES_INFORMATION {
+        Version: HEAP_OPTIMIZE_RESOURCES_CURRENT_VERSION,
+        Flags: 0,
+    };
+    // SAFETY: `GetProcessHeap` has no memory-safety preconditions.
+    let heap = unsafe { GetProcessHeap() };
+    // HeapOptimizeResources does nothing when another thread holds the heap lock.
+    // Holding the lock here makes other threads wait instead.
+    // SAFETY: `heap` is the process heap.
+    assert!(
+        unsafe { HeapLock(heap) } != 0,
+        "HeapLock failed: {}",
+        std::io::Error::last_os_error()
+    );
+    // SAFETY: `info` is initialized as the docs require and outlives the call.
+    let ok = unsafe {
+        HeapSetInformation(
+            heap,
+            HeapOptimizeResources,
+            (&raw const info).cast(),
+            size_of::<HEAP_OPTIMIZE_RESOURCES_INFORMATION>(),
+        )
+    };
+    let error = std::io::Error::last_os_error();
+    // SAFETY: this thread locked `heap` above.
+    assert!(
+        unsafe { HeapUnlock(heap) } != 0,
+        "HeapUnlock failed: {}",
+        std::io::Error::last_os_error()
+    );
+    assert!(ok != 0, "HeapOptimizeResources failed: {error}");
 }
 
 /// Runs the watch server for the working tree at `root_dir`.
