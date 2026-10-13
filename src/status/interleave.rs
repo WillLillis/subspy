@@ -43,24 +43,12 @@ pub(super) enum Row<'a> {
     Sub(SubRow<'a>),
 }
 
-/// The pathname git/libgit2 order a tracked-change file entry by. libgit2 sorts
-/// by the destination path, but `StatusEntry::path_bytes` returns the *old*
-/// path for a rename, so read the delta's new-file path directly to stay
-/// consistent with the file stream's order (and git's).
-pub(super) fn entry_sort_key<'e>(entry: &'e StatusEntry<'_>) -> &'e [u8] {
-    entry
-        .head_to_index()
-        .or_else(|| entry.index_to_workdir())
-        .and_then(|delta| delta.new_file().path_bytes())
-        .unwrap_or_else(|| entry.path_bytes())
-}
-
 /// Calls `on_row` for each row in git's path order, merging the already
 /// path ordered `files` with `submods`. `files` stays lazy, while `submods`
-/// is bounded by the submodule count and is sorted in place. Paths are compared
+/// is bounded by the submodule count and is sorted in place.
 ///
 /// `files` must already be filtered to the entries that render in this section
-/// and follow libgit2's native destination path order. A  filtered [`git2::Statuses::iter`].
+/// and follow libgit2's path order. A filtered [`git2::Statuses::iter`]
 /// satisfies both requirements.
 pub(super) fn for_each_merged<'a, E>(
     files: impl Iterator<Item = StatusEntry<'a>>,
@@ -78,7 +66,7 @@ pub(super) fn for_each_merged<'a, E>(
             (Some(file), Some(sub)) => {
                 // File and submodule paths are disjoint, eliminating exact ties.
                 // Emit the submodule when it sorts first.
-                if sub.key() < entry_sort_key(&file) {
+                if sub.key() < file.path_bytes() {
                     on_row(Row::Sub(sub))?;
                     pending_file = Some(file);
                     pending_sub = submods.next();

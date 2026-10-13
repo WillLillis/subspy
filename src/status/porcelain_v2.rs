@@ -28,7 +28,7 @@ use super::{
     relativize::Relativizer,
     tracked::{
         EntryModesAndOids, SyntheticOrdinary, SyntheticRename, TrackedOrSubRow, TrackedRow,
-        extract_modes_and_oids, for_each_tracked_row, normalized_tracked_rows, rename_similarity,
+        extract_modes_and_oids, for_each_tracked_row, normalized_tracked_rows,
     },
     unborn_branch_name, upstream_status,
 };
@@ -128,8 +128,6 @@ pub fn display_porcelain_v2(
                 if st.contains(git2::Status::CONFLICTED) {
                     conflicted.push(entry);
                     Ok(())
-                } else if st.intersects(git2::Status::INDEX_RENAMED | git2::Status::WT_RENAMED) {
-                    write_renamed(repo, &entry, st, out, &render_opts)
                 } else {
                     write_ordinary(&entry, st, out, &render_opts)
                 }
@@ -259,14 +257,9 @@ fn write_branch_headers(
 }
 
 /// Maps a `git2::Status` to the XY index/worktree characters used in porcelain v2.
-///
-/// `RENAMED` is checked before `MODIFIED`: git2 sets both on a rename that also
-/// changes content, and git's `2` line reports `R` (not `M`) in that column.
 const fn regular_xy(st: git2::Status) -> (char, char) {
     let x = if st.contains(git2::Status::INDEX_NEW) {
         'A'
-    } else if st.contains(git2::Status::INDEX_RENAMED) {
-        'R'
     } else if st.contains(git2::Status::INDEX_MODIFIED) {
         'M'
     } else if st.contains(git2::Status::INDEX_DELETED) {
@@ -276,9 +269,7 @@ const fn regular_xy(st: git2::Status) -> (char, char) {
     } else {
         '.'
     };
-    let y = if st.contains(git2::Status::WT_RENAMED) {
-        'R'
-    } else if st.contains(git2::Status::WT_MODIFIED) {
+    let y = if st.contains(git2::Status::WT_MODIFIED) {
         'M'
     } else if st.contains(git2::Status::WT_DELETED) {
         'D'
@@ -356,8 +347,8 @@ fn sub_field(m_head: u32, m_idx: u32, m_work: u32) -> &'static str {
     }
 }
 
-/// Writes a non-rename, non-conflict tracked entry as a porcelain v2
-/// `1` line: `1 XY <sub> <m_head> <m_idx> <m_work> <h_head> <h_idx> PATH`.
+/// Writes a non-conflict tracked entry as a porcelain v2 `1` line:
+/// `1 XY <sub> <m_head> <m_idx> <m_work> <h_head> <h_idx> PATH`.
 fn write_ordinary(
     entry: &git2::StatusEntry<'_>,
     st: git2::Status,
@@ -415,68 +406,10 @@ fn write_synthetic_ordinary(
     out.write_all(line_terminator(render_opts.null_terminate).as_bytes())
 }
 
-/// Writes a rename entry as a porcelain v2 `2` line:
+/// Writes a rename as a porcelain v2 `2` line:
 /// `2 XY <sub> <modes> <oids> R<score> NEW<sep>OLD`. The separator
 /// between paths is TAB (`\t`) without `-z` and NUL (`\0`) with `-z`,
-/// per `git-status(1)`. The similarity is computed locally with the
-/// clean-room scorer in [`rename_score`].
-fn write_renamed(
-    repo: &Repository,
-    entry: &git2::StatusEntry<'_>,
-    st: git2::Status,
-    out: &mut impl Write,
-    render_opts: &RenderOpts<'_>,
-) -> Result<(), io::Error> {
-    let (x, y) = regular_xy(st);
-    // For renames, both paths come from the diff delta - `entry.path()` is
-    // the entry's key, which is just the old path again.
-    let delta = if st.contains(git2::Status::INDEX_RENAMED) {
-        entry.head_to_index()
-    } else {
-        entry.index_to_workdir()
-    };
-    let old_path = delta
-        .as_ref()
-        .and_then(|d| d.old_file().path_bytes())
-        .unwrap_or(b"");
-    let new_path = delta
-        .as_ref()
-        .and_then(|d| d.new_file().path_bytes())
-        .unwrap_or(b"");
-    let EntryModesAndOids {
-        m_head,
-        m_idx,
-        m_work,
-        h_head,
-        h_idx,
-    } = extract_modes_and_oids(entry, st);
-    let sub = sub_field(m_head, m_idx, m_work);
-    let score = rename_similarity(repo, h_head, h_idx);
-    write!(
-        out,
-        "2 {x}{y} {sub} {m_head:06o} {m_idx:06o} {m_work:06o} {h_head} {h_idx} R{score} ",
-    )?;
-    render_opts.rel.write_quoted(
-        out,
-        new_path,
-        render_opts.null_terminate,
-        render_opts.quote_mode,
-    )?;
-    // Path separator: NUL with -z, TAB without.
-    out.write_all(if render_opts.null_terminate {
-        b"\0"
-    } else {
-        b"\t"
-    })?;
-    render_opts.rel.write_quoted(
-        out,
-        old_path,
-        render_opts.null_terminate,
-        render_opts.quote_mode,
-    )?;
-    out.write_all(line_terminator(render_opts.null_terminate).as_bytes())
-}
-
+/// per `git-status(1)`.
 fn write_synthetic_rename(
     row: &SyntheticRename,
     out: &mut impl Write,

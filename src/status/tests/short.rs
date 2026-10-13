@@ -126,8 +126,8 @@ const CASES: &[Case] = &[
         setup: Setup::Plain(setup_moved_modified_unstaged),
         branch: false,
     },
-    // Same move staged: `R  file.txt -> renamed.txt`. git2 sets RENAMED+MODIFIED;
-    // the X char must be `R`, not `M` (guards the XY ordering fix).
+    // Same move staged: `R  file.txt -> renamed.txt`. The content change must
+    // not turn the X char into `M`.
     Case {
         name: "moved_modified_staged",
         setup: Setup::Plain(setup_moved_modified_staged),

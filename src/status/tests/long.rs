@@ -119,8 +119,7 @@ const CASES: &[Case] = &[
         name: "moved_modified_unstaged",
         setup: Setup::Plain(setup_moved_modified_unstaged),
     },
-    // Same move staged: must read `renamed:`, not `modified:` (guards the
-    // long-label ordering fix: RENAMED outranks MODIFIED).
+    // Same move staged: must read `renamed:`, not `modified:`.
     Case {
         name: "moved_modified_staged",
         setup: Setup::Plain(setup_moved_modified_staged),

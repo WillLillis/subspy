@@ -147,10 +147,9 @@ pub fn setup_below_git_rename_threshold_staged(root: &Path) {
 }
 
 /// The same sub-threshold staged move, but the new file is then modified again
-/// in the worktree. libgit2 keeps this as one `INDEX_RENAMED | WT_MODIFIED`
-/// entry; subspy splits it (clean-room score below 50) into `D old` + `A new`,
-/// and the added side must keep the worktree-modified `y` so git's `AM new.txt`
-/// is reproduced (not `A` with a blank worktree column).
+/// in the worktree. subspy leaves it split (clean-room score below 50) into
+/// `D old` + `A new`, and the added side must keep the worktree-modified `y` so
+/// git's `AM new.txt` is reproduced (not `A` with a blank worktree column).
 pub fn setup_below_git_rename_threshold_staged_wt_modified(root: &Path) {
     Repo::init(root)
         .write("old.txt", "line-00\n")
@@ -447,9 +446,8 @@ pub fn setup_moved_modified_unstaged(root: &Path) {
 }
 
 /// The same plain move + edit, then `git add`. It is now a staged rename whose
-/// content also changed, so git2 sets both `INDEX_RENAMED` and `INDEX_MODIFIED`.
-/// git renders this as `renamed:` / `R`, never `modified:` / `M`; guards the
-/// XY-character and long-label ordering (RENAMED must outrank MODIFIED).
+/// content also changed. git renders this as `renamed:` / `R`, never
+/// `modified:` / `M`.
 pub fn setup_moved_modified_staged(root: &Path) {
     setup_moved_modified_unstaged(root);
     Repo::new(root).add_all();

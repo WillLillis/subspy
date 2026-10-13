@@ -99,8 +99,6 @@ pub(super) fn display_xy_lines(
         TrackedOrSubRow::File(TrackedRow::Entry(entry, st)) => {
             if st.contains(git2::Status::CONFLICTED) {
                 write_conflict(&entry, &conflicts, out, rel, null_terminate, style)
-            } else if st.intersects(git2::Status::INDEX_RENAMED | git2::Status::WT_RENAMED) {
-                write_renamed(&entry, st, out, rel, null_terminate, style)
             } else {
                 write_ordinary(&entry, st, out, rel, null_terminate, style)
             }
@@ -185,15 +183,9 @@ pub(super) fn display_xy_lines(
 
 /// Maps a `git2::Status` to its XY index/worktree characters. Space
 /// (not `.`) for the unmodified slot, matching the v1/short wire format.
-///
-/// `RENAMED` is checked before `MODIFIED`: git2 sets both on a rename that
-/// also changes content, and git renders that as `R` (the modification is
-/// part of the rename), never `M`.
 const fn regular_xy(st: git2::Status) -> (char, char) {
     let x = if st.contains(git2::Status::INDEX_NEW) {
         'A'
-    } else if st.contains(git2::Status::INDEX_RENAMED) {
-        'R'
     } else if st.contains(git2::Status::INDEX_MODIFIED) {
         'M'
     } else if st.contains(git2::Status::INDEX_DELETED) {
@@ -203,9 +195,7 @@ const fn regular_xy(st: git2::Status) -> (char, char) {
     } else {
         ' '
     };
-    let y = if st.contains(git2::Status::WT_RENAMED) {
-        'R'
-    } else if st.contains(git2::Status::WT_MODIFIED) {
+    let y = if st.contains(git2::Status::WT_MODIFIED) {
         'M'
     } else if st.contains(git2::Status::WT_DELETED) {
         'D'
@@ -324,7 +314,7 @@ fn ordinary_colors(style: &LineStyle) -> (Option<Style>, Option<Style>) {
         .map_or((None, None), |p| (Some(p.updated), Some(p.changed)))
 }
 
-/// Writes a non-rename, non-conflict tracked entry as `XY PATH<term>`.
+/// Writes a non-conflict tracked entry as `XY PATH<term>`.
 fn write_ordinary(
     entry: &git2::StatusEntry<'_>,
     st: git2::Status,
@@ -338,48 +328,6 @@ fn write_ordinary(
     write_xy_prefix(out, XyChar::new(x, x_color), XyChar::new(y, y_color))?;
     write_path(out, entry.path_bytes(), rel, null_terminate, style)?;
     out.write_all(line_terminator(null_terminate).as_bytes())
-}
-
-/// Writes a rename. Without `-z`: `XY <old> -> <new>`, each path quoted
-/// independently. With `-z`: `XY <new>\0<old>\0` (per `git-status(1)`'s
-/// `-z` rename form: path first, no arrow, no quoting).
-fn write_renamed(
-    entry: &git2::StatusEntry<'_>,
-    st: git2::Status,
-    out: &mut impl Write,
-    rel: &Relativizer<'_>,
-    null_terminate: bool,
-    style: &LineStyle,
-) -> io::Result<()> {
-    let (x, y) = regular_xy(st);
-    let (x_color, y_color) = ordinary_colors(style);
-
-    let delta = if st.contains(git2::Status::INDEX_RENAMED) {
-        entry.head_to_index()
-    } else {
-        entry.index_to_workdir()
-    };
-    let old_path = delta
-        .as_ref()
-        .and_then(|d| d.old_file().path_bytes())
-        .unwrap_or(b"");
-    let new_path = delta
-        .as_ref()
-        .and_then(|d| d.new_file().path_bytes())
-        .unwrap_or(b"");
-
-    write_xy_prefix(out, XyChar::new(x, x_color), XyChar::new(y, y_color))?;
-    if null_terminate {
-        out.write_all(new_path)?;
-        out.write_all(b"\0")?;
-        out.write_all(old_path)?;
-        out.write_all(b"\0")
-    } else {
-        write_path(out, old_path, rel, false, style)?;
-        out.write_all(b" -> ")?;
-        write_path(out, new_path, rel, false, style)?;
-        out.write_all(b"\n")
-    }
 }
 
 /// Maps porcelain-v2's `.` unmodified slot (used by the shared synthetic rows)
@@ -403,8 +351,10 @@ fn write_synthetic_ordinary_line(
     write_xy_path(out, x, y, &row.path, rel, null_terminate, style)
 }
 
-/// Writes a synthetic rename (a subspy-paired staged add/delete) the same way as
-/// a libgit2 rename: `XY <old> -> <new>` (or `XY <new>\0<old>\0` under `-z`).
+/// Writes a synthetic rename (a subspy-paired staged add/delete). Without `-z`:
+/// `XY <old> -> <new>`, each path quoted independently. With `-z`:
+/// `XY <new>\0<old>\0` (per `git-status(1)`'s `-z` rename form: path first, no
+/// arrow, no quoting).
 fn write_synthetic_rename_line(
     row: &SyntheticRename,
     out: &mut impl Write,

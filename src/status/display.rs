@@ -129,10 +129,6 @@ const fn has_status_info(st: StatusSummary) -> bool {
 
 /// Prints the "Changes to be committed:" section for staged files, submodules,
 /// renames, and deleted submodule paths. Returns `true` if anything was printed.
-#[expect(
-    clippy::too_many_lines,
-    reason = "interleaves files with three submodule row kinds, each rendered inline"
-)]
 fn print_staged_changes(
     tracked_rows: Vec<TrackedRow<'_>>,
     submodule_statuses: &[(GitPath, StatusSummary)],
@@ -161,43 +157,22 @@ fn print_staged_changes(
 
     for_each_tracked_row(tracked_rows, submods, |row| match row {
         TrackedOrSubRow::File(TrackedRow::Entry(entry, st)) => {
-            // RENAMED before MODIFIED: git2 sets both on a rename that also
-            // changes content, and git labels it `renamed:`, not `modified:`.
             let istatus = match st {
                 s if s.contains(git2::Status::INDEX_NEW) => "new file:   ",
-                s if s.contains(git2::Status::INDEX_RENAMED) => "renamed:    ",
                 s if s.contains(git2::Status::INDEX_MODIFIED) => "modified:   ",
                 s if s.contains(git2::Status::INDEX_DELETED) => "deleted:    ",
                 s if s.contains(git2::Status::INDEX_TYPECHANGE) => "typechange: ",
                 // Worktree-only entry rendered by the unstaged section.
                 _ => return Ok(()),
             };
-            let Some(index) = entry.head_to_index() else {
-                return Ok(());
-            };
             if !header {
                 writeln!(out, "{staged_header}")?;
                 header = true;
             }
-            let old_path = index.old_file().path_bytes();
-            let new_path = index.new_file().path_bytes();
-            match (old_path, new_path) {
-                (Some(old), Some(new)) if old != new => {
-                    paint_into(out, GREEN, |out| {
-                        write!(out, "\t{istatus}")?;
-                        rel.write_to(out, old)?;
-                        out.write_all(b" -> ")?;
-                        rel.write_to(out, new)
-                    })?;
-                }
-                (old, new) => {
-                    let path = old.or(new).unwrap();
-                    paint_into(out, GREEN, |out| {
-                        write!(out, "\t{istatus}")?;
-                        rel.write_to(out, path)
-                    })?;
-                }
-            }
+            paint_into(out, GREEN, |out| {
+                write!(out, "\t{istatus}")?;
+                rel.write_to(out, entry.path_bytes())
+            })?;
             writeln!(out)
         }
         TrackedOrSubRow::File(TrackedRow::SyntheticOrdinary(row)) => {
@@ -297,10 +272,7 @@ fn print_unstaged_changes(
         path_filter.keeps(e.path_bytes())
             && !st.contains(git2::Status::CONFLICTED)
             && st.intersects(
-                git2::Status::WT_MODIFIED
-                    | git2::Status::WT_DELETED
-                    | git2::Status::WT_RENAMED
-                    | git2::Status::WT_TYPECHANGE,
+                git2::Status::WT_MODIFIED | git2::Status::WT_DELETED | git2::Status::WT_TYPECHANGE,
             )
     });
     let submods: Vec<SubRow<'_>> = submodule_statuses
@@ -311,17 +283,10 @@ fn print_unstaged_changes(
 
     for_each_merged(files, submods, |row| match row {
         Row::File(entry) => {
-            let Some(workdir) = entry.index_to_workdir() else {
-                return Ok(());
-            };
-            // RENAMED before MODIFIED, matching the staged section above. (git
-            // does not detect unstaged worktree renames, so WT_RENAMED does not
-            // arise in practice, but keep the ordering consistent and correct.)
             // An intent-to-add path is unstaged but reads as a new file, not a
             // modification: git hides its index entry while the file exists.
             let is_intent_to_add = corrections.intent_to_add.contains(entry.path_bytes());
             let istatus = match effective_status(entry.status(), entry.path_bytes(), corrections) {
-                Some(s) if s.contains(git2::Status::WT_RENAMED) => "renamed:    ",
                 Some(s) if s.contains(git2::Status::WT_DELETED) => "deleted:    ",
                 Some(_) if is_intent_to_add => "new file:   ",
                 Some(s) if s.contains(git2::Status::WT_MODIFIED) => "modified:   ",
@@ -332,25 +297,10 @@ fn print_unstaged_changes(
                 writeln!(out, "{unstaged_header}")?;
                 header = true;
             }
-            let old_path = workdir.old_file().path_bytes();
-            let new_path = workdir.new_file().path_bytes();
-            match (old_path, new_path) {
-                (Some(old), Some(new)) if old != new => {
-                    paint_into(out, RED, |out| {
-                        write!(out, "\t{istatus}")?;
-                        rel.write_to(out, old)?;
-                        out.write_all(b" -> ")?;
-                        rel.write_to(out, new)
-                    })?;
-                }
-                (old, new) => {
-                    let path = old.or(new).unwrap();
-                    paint_into(out, RED, |out| {
-                        write!(out, "\t{istatus}")?;
-                        rel.write_to(out, path)
-                    })?;
-                }
-            }
+            paint_into(out, RED, |out| {
+                write!(out, "\t{istatus}")?;
+                rel.write_to(out, entry.path_bytes())
+            })?;
             writeln!(out)
         }
         Row::Sub(SubRow::Modified(submod_path, submod_status)) => {

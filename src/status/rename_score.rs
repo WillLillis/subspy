@@ -101,40 +101,6 @@ impl Ord for Similarity {
     }
 }
 
-/// Similarity between two precomputed signatures: copied bytes (spans common to
-/// both, weighted by length) over the larger blob. Non-destructive, so a
-/// `Signature` is reusable across pairings.
-#[must_use]
-pub(super) fn score_sigs(old: &Signature, new: &Signature) -> Similarity {
-    let max_size = (old.size.max(new.size)) as u64;
-    if max_size == 0 {
-        return Similarity::EXACT;
-    }
-
-    // copied = sum over spans in both of min(old_count, new_count) * span_len.
-    // Iterate the smaller map and probe the larger by the `(hash, len)` key.
-    let (small, large) = if old.spans.len() <= new.spans.len() {
-        (&old.spans, &new.spans)
-    } else {
-        (&new.spans, &old.spans)
-    };
-    let mut copied = 0u64;
-    for (key, &count) in small {
-        if let Some(&other) = large.get(key) {
-            copied += u64::from(count.min(other)) * u64::from(key.1);
-        }
-    }
-
-    Similarity { copied, max_size }
-}
-
-/// Convenience for a single comparison (no signature reuse): builds both
-/// signatures, then returns the displayed percent.
-#[must_use]
-pub(super) fn score(old: &[u8], new: &[u8]) -> u8 {
-    score_sigs(&Signature::new(old), &Signature::new(new)).percent()
-}
-
 /// For every deletion, the [`Similarity`] to each addition that shares at least
 /// one span - the only additions that can score above zero. An inverted index
 /// over the additions' spans turns the `deletions x additions` matrix git walks
@@ -280,9 +246,18 @@ impl Iterator for Spans<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::score;
+    use super::{Signature, overlapping_pairs};
 
     use pretty_assertions::assert_eq;
+
+    /// One pair's displayed similarity from [`overlapping_pairs`], the inexact
+    /// pass's scorer. A pair with no shared span is never a candidate, which
+    /// reads as 0.
+    fn score(old: &[u8], new: &[u8]) -> u8 {
+        overlapping_pairs(&[Some(Signature::new(old))], &[Some(Signature::new(new))])
+            .first()
+            .map_or(0, |&(_, _, similarity)| similarity.percent())
+    }
 
     fn numbered_lines(prefix: &str, count: usize) -> Vec<u8> {
         let mut bytes = Vec::new();
@@ -293,8 +268,7 @@ mod tests {
     }
 
     #[test]
-    fn scores_exact_and_empty_renames() {
-        assert_eq!(score(b"", b""), 100);
+    fn scores_identical_and_disjoint_blobs() {
         assert_eq!(score(b"one", b"one"), 100);
         assert_eq!(score(b"one", b"two"), 0);
     }

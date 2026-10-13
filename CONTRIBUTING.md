@@ -84,7 +84,7 @@ each with its own renderer. Long stands alone; short + porcelain v1 share an
 | `quote.rs` | Path quoting primitives (`needs_quoting`, `write_escaped`, `QuoteMode::{Standard, QuoteSpace}`) consumed by `Relativizer::write_quoted` |
 | `conflict.rs` | Shared conflict-index parsing for XY-line and porcelain v2 entries |
 | `tracked.rs` | Rename reconciliation: `normalized_tracked_rows` builds the shared `TrackedRow` stream (exact + inexact rename pairing in git's order) that all four renderers consume |
-| `rename_score.rs` | Clean-room git rename-similarity scoring (`Signature`, `Similarity`, `score_sigs`, inverted-index `overlapping_pairs`) |
+| `rename_score.rs` | Clean-room git rename-similarity scoring (`Signature`, `Similarity`, inverted-index `overlapping_pairs`) |
 | `config.rs` | `ConfigDefaults`: the git config keys that supply output defaults when no flag sets them, plus detection of settings subspy cannot honor |
 | `effective_status/` | Where libgit2's `Status` disagrees with git's, one divergence per file (case collisions, skip-worktree, intent-to-add) behind a single `effective_status` entry point |
 | `case.rs` | Shared `core.ignorecase` comparison policy, resolved once per request and handed to every consumer |

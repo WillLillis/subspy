@@ -112,6 +112,16 @@ fn setup_multiple_renames(root: &Path) {
         .mv("beta.txt", "beta_renamed.txt");
 }
 
+/// A moved empty file. Every empty file is the empty blob, so the exact pass
+/// pairs it, and similarity scoring never sees it.
+fn setup_empty_file_renamed(root: &Path) {
+    Repo::init(root)
+        .write("empty.txt", "")
+        .add_all()
+        .commit("init")
+        .mv("empty.txt", "moved.txt");
+}
+
 /// Three moves whose content also changed, so only the inexact pass can pair
 /// them. Their 3x3 matrix exceeds a rename limit of 2; the exact pass runs
 /// unlimited and would otherwise hide the limit's effect.
@@ -289,6 +299,7 @@ const CASES: &[Case] = &[
     plain("path with non-ASCII", setup_path_with_non_ascii),
     plain("path with backslash", setup_path_with_backslash),
     plain("multiple renames", setup_multiple_renames),
+    plain("empty file renamed", setup_empty_file_renamed),
     // Basename-preserving cross-dir moves (git's basename tie-break) and a set
     // of byte-identical files renamed at once (git's parallel-sorted exact
     // pairing). Both are pairings libgit2 got wrong; subspy reconciles to match.

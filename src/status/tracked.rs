@@ -16,11 +16,7 @@ use rustc_hash::FxHashMap;
 
 use crate::git::diff_file_mode;
 
-use super::{
-    StatusEntries,
-    interleave::{SubRow, entry_sort_key},
-    rename_score,
-};
+use super::{StatusEntries, interleave::SubRow, rename_score};
 
 /// git's limit when neither renameLimit key is set.
 const DEFAULT_RENAME_LIMIT: usize = 1000;
@@ -76,7 +72,7 @@ pub(super) enum TrackedRow<'a> {
 impl TrackedRow<'_> {
     fn key(&self) -> &[u8] {
         match self {
-            Self::Entry(entry, _) => entry_sort_key(entry),
+            Self::Entry(entry, _) => entry.path_bytes(),
             Self::SyntheticOrdinary(row) => &row.path,
             Self::SyntheticRename(row) => &row.new.path,
         }
@@ -674,30 +670,10 @@ pub(super) fn extract_modes_and_oids(
     }
 }
 
-/// Similarity score from 0 to 100 between two blob OIDs for one rename pair.
-/// Equal OIDs short-circuit to 100. An unreadable blob also returns 100,
-/// treating the pair as a pure rename.
-pub(super) fn rename_similarity(repo: &Repository, old_oid: git2::Oid, new_oid: git2::Oid) -> u8 {
-    if old_oid == new_oid {
-        return 100;
-    }
-
-    let Ok(old_blob) = repo.find_blob(old_oid) else {
-        return 100;
-    };
-    let Ok(new_blob) = repo.find_blob(new_oid) else {
-        return 100;
-    };
-
-    rename_score::score(old_blob.content(), new_blob.content())
-}
-
 /// Porcelain v2 worktree status char (the `y` of a `1`/`2` line) for a kept
 /// rename: `.` unless the renamed file also has worktree changes.
 const fn worktree_y(st: git2::Status) -> char {
-    if st.contains(git2::Status::WT_RENAMED) {
-        'R'
-    } else if st.contains(git2::Status::WT_MODIFIED) {
+    if st.contains(git2::Status::WT_MODIFIED) {
         'M'
     } else if st.contains(git2::Status::WT_DELETED) {
         'D'
