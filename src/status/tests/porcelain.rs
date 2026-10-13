@@ -1021,6 +1021,27 @@ fn symlink_rename_pairing(ref_format: RefFormat) {
     }
 }
 
+/// Symlink typechanges under `core.filemode=false`, where libgit2 reports
+/// worktree modes outside git's set.
+#[cfg(unix)]
+#[apply(formats)]
+fn typechange_without_filemode(ref_format: RefFormat) {
+    let case = plain(
+        "typechange without filemode",
+        setup_typechange_without_filemode,
+    );
+    for version in [PorcelainVersion::V1, PorcelainVersion::V2] {
+        let opts = opts_with(
+            version,
+            false,
+            false,
+            UntrackedFiles::Normal,
+            IgnoredFiles::No,
+        );
+        run_case(&case, opts, ref_format);
+    }
+}
+
 #[apply(formats)]
 fn v2_ignored_untracked_all(ref_format: RefFormat) {
     let opts = opts_with(

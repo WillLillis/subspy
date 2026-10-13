@@ -3,7 +3,7 @@
 pub mod path;
 pub mod substatus;
 
-use git2::{Config, Repository, RepositoryOpenFlags};
+use git2::{Binding as _, Config, Repository, RepositoryOpenFlags};
 use rustc_hash::FxHashMap;
 
 use std::path::Path;
@@ -11,6 +11,19 @@ use std::path::Path;
 use crate::status::IgnoreSubmodules;
 
 use path::GitPath;
+
+/// The file-type bits of a mode.
+const MODE_TYPE_MASK: u32 = 0o170_000;
+/// The file-type bits of a regular file, executable or not.
+const MODE_TYPE_REGULAR: u32 = 0o100_000;
+/// The owner's execute bit, which makes a regular file executable to git.
+const MODE_OWNER_EXECUTE: u32 = 0o100;
+const MODE_TREE: u32 = 0o040_000;
+const MODE_BLOB: u32 = 0o100_644;
+const MODE_BLOB_GROUP_WRITABLE: u32 = 0o100_664;
+const MODE_BLOB_EXECUTABLE: u32 = 0o100_755;
+const MODE_SYMLINK: u32 = 0o120_000;
+const MODE_GITLINK: u32 = 0o160_000;
 
 /// Configures global libgit2 options for subspy's read-only, local-only use case.
 ///
@@ -57,6 +70,31 @@ pub fn path_from_bytes(bytes: &[u8]) -> Result<&Path, std::str::Utf8Error> {
     #[cfg(not(unix))]
     {
         std::str::from_utf8(bytes).map(Path::new)
+    }
+}
+
+/// The mode on `file`'s side of a diff delta.
+#[must_use]
+pub fn diff_file_mode(file: &git2::DiffFile<'_>) -> u32 {
+    // SAFETY: `file` borrows the diff that owns the pointed-to `git_diff_file`.
+    let mode = u32::from(unsafe { (*file.raw()).mode });
+    match mode {
+        // git2's set, with `0` for an absent side.
+        #[rustfmt::skip]
+        0 | MODE_TREE | MODE_BLOB | MODE_BLOB_GROUP_WRITABLE | MODE_BLOB_EXECUTABLE
+        | MODE_SYMLINK | MODE_GITLINK => mode,
+        _ => canon_mode(mode),
+    }
+}
+
+/// git's `canon_mode`: the mode git records for a file of `mode`'s type.
+const fn canon_mode(mode: u32) -> u32 {
+    match mode & MODE_TYPE_MASK {
+        MODE_TYPE_REGULAR if mode & MODE_OWNER_EXECUTE != 0 => MODE_BLOB_EXECUTABLE,
+        MODE_TYPE_REGULAR => MODE_BLOB,
+        MODE_TREE => MODE_TREE,
+        MODE_SYMLINK => MODE_SYMLINK,
+        _ => MODE_GITLINK,
     }
 }
 

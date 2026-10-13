@@ -14,7 +14,10 @@ use std::{
     io::{self, Write},
 };
 
-use crate::{StatusSummary, git::path::GitPath};
+use crate::{
+    StatusSummary,
+    git::{diff_file_mode, path::GitPath},
+};
 
 use super::{
     Divergence, PorcelainOpts, StatusEntries, StatusResult, UpstreamStatus,
@@ -566,7 +569,7 @@ fn write_conflict(
     } else {
         let m_work = entry
             .index_to_workdir()
-            .map_or(0u32, |d| u32::from(d.new_file().mode()));
+            .map_or(0u32, |d| diff_file_mode(&d.new_file()));
         ('N', '.', '.', '.', m_work)
     };
     write!(

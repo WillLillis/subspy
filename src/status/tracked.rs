@@ -14,6 +14,8 @@
 use git2::Repository;
 use rustc_hash::FxHashMap;
 
+use crate::git::diff_file_mode;
+
 use super::{
     StatusEntries,
     interleave::{SubRow, entry_sort_key},
@@ -584,7 +586,7 @@ fn push_synthetic_add(rows: &mut Vec<TrackedRow<'_>>, new: RenameSide) {
 
 fn added_side(entry: &git2::StatusEntry<'_>) -> Option<RenameSide> {
     let delta = entry.head_to_index()?;
-    let mode = u32::from(delta.new_file().mode());
+    let mode = diff_file_mode(&delta.new_file());
     Some(RenameSide {
         path: delta.new_file().path_bytes()?.to_vec(),
         mode,
@@ -598,7 +600,7 @@ fn deleted_side(entry: &git2::StatusEntry<'_>) -> Option<RenameSide> {
     let delta = entry.head_to_index()?;
     Some(RenameSide {
         path: delta.old_file().path_bytes()?.to_vec(),
-        mode: u32::from(delta.old_file().mode()),
+        mode: diff_file_mode(&delta.old_file()),
         oid: delta.old_file().id(),
         // A deletion is the rename source: no worktree row of its own.
         wt_y: '.',
@@ -613,7 +615,7 @@ fn deleted_side(entry: &git2::StatusEntry<'_>) -> Option<RenameSide> {
 fn workdir_mode(entry: &git2::StatusEntry<'_>, index_mode: u32) -> u32 {
     entry
         .index_to_workdir()
-        .map_or(index_mode, |d| u32::from(d.new_file().mode()))
+        .map_or(index_mode, |d| diff_file_mode(&d.new_file()))
 }
 
 /// File modes and blob OIDs for the HEAD/index/workdir versions of a
@@ -638,16 +640,16 @@ pub(super) fn extract_modes_and_oids(
 ) -> EntryModesAndOids {
     let m_idx = entry
         .head_to_index()
-        .map(|d| u32::from(d.new_file().mode()))
+        .map(|d| diff_file_mode(&d.new_file()))
         .or_else(|| {
             entry
                 .index_to_workdir()
-                .map(|d| u32::from(d.old_file().mode()))
+                .map(|d| diff_file_mode(&d.old_file()))
         })
         .unwrap_or(0);
     let m_head = entry
         .head_to_index()
-        .map_or(m_idx, |d| u32::from(d.old_file().mode()));
+        .map_or(m_idx, |d| diff_file_mode(&d.old_file()));
     // A path that is also untracked owns its worktree file through the separate
     // untracked row, so this row has no workdir side of its own.
     let m_work = if st.contains(git2::Status::WT_NEW) {
@@ -655,7 +657,7 @@ pub(super) fn extract_modes_and_oids(
     } else {
         entry
             .index_to_workdir()
-            .map_or(m_idx, |d| u32::from(d.new_file().mode()))
+            .map_or(m_idx, |d| diff_file_mode(&d.new_file()))
     };
     // Mode 0 means libgit2 saw no worktree file. If the correction layer
     // cleared the deletion anyway the file is sparse-excluded, not deleted,

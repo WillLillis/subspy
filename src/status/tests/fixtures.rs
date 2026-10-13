@@ -388,6 +388,23 @@ pub fn setup_symlink_similar_targets(root: &Path) {
     repo.add_all();
 }
 
+/// A regular file turned into a symlink and a symlink turned into a regular
+/// file, under `core.filemode=false`. libgit2 keeps the index entries'
+/// permission bits on both worktree sides, where git reports the canonical
+/// mode for each file's new type.
+#[cfg(unix)]
+pub fn setup_typechange_without_filemode(root: &Path) {
+    let repo = Repo::init(root);
+    repo.write("file", "a\n");
+    std::os::unix::fs::symlink("file", root.join("link")).unwrap();
+    repo.add_all().commit("initial");
+    repo.run_git(&["config", "core.filemode", "false"]);
+    std::fs::remove_file(root.join("file")).unwrap();
+    std::os::unix::fs::symlink("link", root.join("file")).unwrap();
+    std::fs::remove_file(root.join("link")).unwrap();
+    repo.write("link", "plain\n");
+}
+
 /// Long enough that two targets differing in their last component still score
 /// far above the similarity threshold, so a fixture that means to test the
 /// non-regular rule is not passing for want of shared content.
