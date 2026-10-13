@@ -309,7 +309,7 @@ fn collect_initial_tracked_rows<'a>(
             // changed in the worktree (`INDEX_NEW | WT_MODIFIED`, etc.) is still
             // a rename destination for git. `added_side` carries the worktree
             // state so it renders correctly whether or not it pairs.
-            if let Some(side) = added_side(&entry) {
+            if let Some(side) = added_side(&entry, st) {
                 additions.push(side);
             } else {
                 rows.push(TrackedRow::Entry(entry, st));
@@ -584,15 +584,17 @@ fn push_synthetic_add(rows: &mut Vec<TrackedRow<'_>>, new: RenameSide) {
     }));
 }
 
-fn added_side(entry: &git2::StatusEntry<'_>) -> Option<RenameSide> {
-    let delta = entry.head_to_index()?;
-    let mode = diff_file_mode(&delta.new_file());
+/// `st` is the row's [`super::effective_status`] result, so a masked worktree
+/// deletion stays out of the worktree column.
+fn added_side(entry: &git2::StatusEntry<'_>, st: git2::Status) -> Option<RenameSide> {
+    let path = entry.head_to_index()?.new_file().path_bytes()?.to_vec();
+    let modes = extract_modes_and_oids(entry, st);
     Some(RenameSide {
-        path: delta.new_file().path_bytes()?.to_vec(),
-        mode,
-        oid: delta.new_file().id(),
-        wt_y: worktree_y(entry.status()),
-        wt_mode: workdir_mode(entry, mode),
+        path,
+        mode: modes.m_idx,
+        oid: modes.h_idx,
+        wt_y: worktree_y(st),
+        wt_mode: modes.m_work,
     })
 }
 
@@ -606,16 +608,6 @@ fn deleted_side(entry: &git2::StatusEntry<'_>) -> Option<RenameSide> {
         wt_y: '.',
         wt_mode: 0,
     })
-}
-
-/// Workdir file mode (`m_work`) for an entry's index->workdir side: the new
-/// file's mode, falling back to `index_mode` when the file is unchanged in the
-/// worktree. `0` when the workdir copy was deleted (libgit2 reports a zero
-/// mode), matching git.
-fn workdir_mode(entry: &git2::StatusEntry<'_>, index_mode: u32) -> u32 {
-    entry
-        .index_to_workdir()
-        .map_or(index_mode, |d| diff_file_mode(&d.new_file()))
 }
 
 /// File modes and blob OIDs for the HEAD/index/workdir versions of a

@@ -238,11 +238,16 @@ const CASES: &[Case] = &[
     // libgit2 reports `WT_DELETED` for a sparse-excluded (skip-worktree) path
     // that is absent from the worktree; git reports nothing. The second case
     // pins that a real staged change on such a path still renders as `M `,
-    // so the deletion is masked rather than the row dropped.
+    // so the deletion is masked rather than the row dropped. The third pins
+    // the same for a staged add, which renders as `A `.
     plain("skip-worktree absent", setup_skip_worktree_absent),
     plain(
         "skip-worktree absent + staged change",
         setup_skip_worktree_absent_with_staged_change,
+    ),
+    plain(
+        "skip-worktree absent + staged new file",
+        setup_skip_worktree_absent_staged_new,
     ),
     // libgit2 has no notion of INTENT_TO_ADD, so it reports the entry as a
     // staged add plus a worktree modification. Git hides the index entry and

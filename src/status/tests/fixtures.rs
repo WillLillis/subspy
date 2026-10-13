@@ -647,6 +647,17 @@ pub fn setup_skip_worktree_absent_with_staged_change(root: &Path) {
     std::fs::remove_file(root.join("a.txt")).unwrap();
 }
 
+/// A staged new file that is then flagged skip-worktree and removed. git prints
+/// the staged add alone (`A `), so the masked deletion must not reach the
+/// worktree column of the add.
+pub fn setup_skip_worktree_absent_staged_new(root: &Path) {
+    let repo = Repo::init(root);
+    repo.write("a.txt", "a\n").add_all().commit("initial");
+    repo.write("new.txt", "new\n").add("new.txt");
+    repo.run_git(&["update-index", "--skip-worktree", "new.txt"]);
+    std::fs::remove_file(root.join("new.txt")).unwrap();
+}
+
 /// Staged, unstaged, and untracked changes at once, so every long-format
 /// section header renders in one snapshot.
 pub fn setup_all_sections(root: &Path) {
