@@ -261,12 +261,14 @@ fn intent_to_add_row(entry: &git2::StatusEntry<'_>, st: git2::Status) -> Synthet
 }
 
 /// Whether `st` is a tracked change the normalized stream renders as a file
-/// row: not clean, not untracked, not ignored. Conflicts pass this filter
-/// (they render as entry rows). `st` is the row's
-/// [`super::effective_status`] result, so rows libgit2 invented have already
-/// been dropped before this is reached.
+/// row: any bit besides untracked and ignored, which render in sections of
+/// their own. A staged deletion whose file is still on disk carries both
+/// kinds. Conflicts pass this filter (they render as entry rows). `st` is the
+/// row's [`super::effective_status`] result, so rows libgit2 invented have
+/// already been dropped before this is reached.
 fn is_tracked_change(st: git2::Status) -> bool {
-    st != git2::Status::CURRENT && st != git2::Status::WT_NEW && !st.contains(git2::Status::IGNORED)
+    !st.difference(git2::Status::WT_NEW | git2::Status::IGNORED)
+        .is_empty()
 }
 
 /// git's `too_many_rename_candidates`: the inexact rename matrix is too big when
@@ -310,10 +312,11 @@ fn collect_initial_tracked_rows<'a>(
             } else {
                 rows.push(TrackedRow::Entry(entry, st));
             }
-        } else if st == git2::Status::INDEX_DELETED {
-            // A rename source is a clean index deletion with no worktree presence,
-            // so an exact match suffices. `git rm --cached` produces
-            // `INDEX_DELETED | WT_NEW` and stays an ordinary entry.
+        } else if st.contains(git2::Status::INDEX_DELETED) {
+            // `.contains`, not `==`: git pairs renames between HEAD and the
+            // index, whatever the worktree holds. After `git rm --cached` the
+            // file stays on disk as `INDEX_DELETED | WT_NEW`, and its untracked
+            // row renders separately.
             if let Some(side) = deleted_side(&entry) {
                 deletions.push(side);
             } else {

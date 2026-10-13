@@ -122,6 +122,32 @@ fn setup_empty_file_renamed(root: &Path) {
         .mv("empty.txt", "moved.txt");
 }
 
+/// A file dropped from the index with `git rm --cached` and staged again under
+/// a new name. git pairs the two as a rename, and the file left on disk is
+/// also listed as untracked.
+fn setup_rm_cached_then_renamed(root: &Path) {
+    let r = Repo::init(root);
+    r.write("old.txt", "line one\nline two\nline three\n")
+        .add_all()
+        .commit("init")
+        .write("new.txt", "line one\nline two\nline three\n")
+        .add("new.txt");
+    r.run_git(&["rm", "-q", "--cached", "old.txt"]);
+}
+
+/// A file dropped from the index with `git rm --cached` and then ignored. git
+/// still reports the staged deletion, and `--ignored` also lists the file on
+/// disk.
+fn setup_rm_cached_then_ignored(root: &Path) {
+    let r = Repo::init(root);
+    r.write("old.txt", "x\n")
+        .write("keep.txt", "k\n")
+        .add_all()
+        .commit("init");
+    r.run_git(&["rm", "-q", "--cached", "old.txt"]);
+    r.write(".gitignore", "old.txt\n");
+}
+
 /// Three moves whose content also changed, so only the inexact pass can pair
 /// them. Their 3x3 matrix exceeds a rename limit of 2; the exact pass runs
 /// unlimited and would otherwise hide the limit's effect.
@@ -300,6 +326,11 @@ const CASES: &[Case] = &[
     plain("path with backslash", setup_path_with_backslash),
     plain("multiple renames", setup_multiple_renames),
     plain("empty file renamed", setup_empty_file_renamed),
+    plain(
+        "rm --cached, then staged under a new name",
+        setup_rm_cached_then_renamed,
+    ),
+    plain("rm --cached, then ignored", setup_rm_cached_then_ignored),
     // Basename-preserving cross-dir moves (git's basename tie-break) and a set
     // of byte-identical files renamed at once (git's parallel-sorted exact
     // pairing). Both are pairings libgit2 got wrong; subspy reconciles to match.
