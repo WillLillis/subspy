@@ -1,8 +1,8 @@
 //! Config-supplied defaults for `git status` output.
 //!
-//! git treats these keys as defaults that an explicit flag replaces, so they
-//! are resolved where argv is parsed rather than inside the status pipeline.
-//! Both binaries share [`ConfigDefaults::read`] so the two agree.
+//! git treats these keys as defaults that an explicit flag replaces, so
+//! [`super::StatusFlags::resolve`] applies them before the status pipeline
+//! runs. Every entry point resolves its options through it, so they agree.
 
 use std::path::Path;
 

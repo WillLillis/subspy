@@ -21,11 +21,13 @@ use crate::{
     cli::ProjectPath,
     status::{
         IgnoreSubmodules, IgnoredFiles, OutputFormat, OutputOpts, PorcelainOpts, PorcelainVersion,
-        StatusError, UntrackedFiles, assemble_status, compute_local_statuses,
-        porcelain_v1::display_porcelain_v1, porcelain_v2::display_porcelain_v2,
+        StatusError, UntrackedFiles, compute_local_statuses, porcelain_v1::display_porcelain_v1,
+        porcelain_v2::display_porcelain_v2,
     },
     test_support::formats,
 };
+
+use super::assemble_status;
 
 use super::fixtures::*;
 

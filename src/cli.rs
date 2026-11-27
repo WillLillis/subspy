@@ -21,8 +21,8 @@ use crate::{
     reindex::{ReindexError, reindex},
     shutdown::{ShutdownError, shutdown, shutdown_all},
     status::{
-        ConfigDefaults, IgnoreSubmodules, IgnoredFiles, OutputFormat, OutputOpts, PorcelainVersion,
-        ResolvedStatusRequest, StatusError, UntrackedFiles, status,
+        ConfigDefaults, IgnoreSubmodules, IgnoredFiles, OutputFormat, PorcelainVersion,
+        ResolvedStatusRequest, StatusError, StatusFlags, StatusSource, UntrackedFiles, status,
     },
     watch::{WatchError, spawn_daemon},
 };
@@ -346,100 +346,66 @@ impl Stop {
 }
 
 impl Status {
-    /// Translates the mutually-exclusive `--short` / `--porcelain` flags
-    /// to the internal `OutputFormat`. Clap rejects the
-    /// `short && porcelain.is_some()` combination at parse time.
-    /// The format an explicit flag selects, else the one `status.short` asks
-    /// for, else long.
-    #[expect(clippy::fn_params_excessive_bools, reason = "matches git")]
-    const fn output_format(
-        short: bool,
-        long: bool,
-        porcelain: Option<PorcelainVersion>,
-        null_terminate: bool,
-        config_short: bool,
-    ) -> OutputFormat {
-        if short {
-            OutputFormat::Short
-        } else if let Some(v) = porcelain {
-            OutputFormat::Porcelain(v)
-        } else if long {
-            OutputFormat::Long
-        } else if null_terminate {
-            // Bare `-z` implies porcelain v1's NUL-delimited machine output, matching
-            // `git status -z`. The shim  also routes `git status -z` through this path.
-            OutputFormat::Porcelain(PorcelainVersion::V1)
-        } else if config_short {
-            OutputFormat::Short
+    /// The options this invocation set explicitly. clap keeps the format flags,
+    /// and each `--x`/`--no-x` pair, mutually exclusive.
+    const fn flags(&self) -> StatusFlags {
+        let format = if self.short {
+            Some(OutputFormat::Short)
+        } else if let Some(version) = self.porcelain {
+            Some(OutputFormat::Porcelain(version))
+        } else if self.long {
+            Some(OutputFormat::Long)
         } else {
-            OutputFormat::Long
+            None
+        };
+        StatusFlags {
+            format,
+            null_terminate: self.null_terminate,
+            ignore_submodules: self.ignore_submodules,
+            untracked_files: self.untracked_files,
+            ignored_files: self.ignored,
+            branch: self.branch,
+            ahead_behind: flag_pair(self.ahead_behind, self.no_ahead_behind),
+            quote_path: self.quote_path,
+            show_stash: flag_pair(self.show_stash, self.no_show_stash),
         }
     }
 
     /// Resolves the project path and executes the `status` subcommand, writing
-    /// output to `out`. CLI `main` passes buffered stdout. The shim passes a
-    /// `Vec<u8>` so it can discard partial output and fall back to the git on
-    /// path if anything fails.
+    /// output to `out` and any warnings to the log.
     ///
     /// # Errors
     ///
     /// Returns `Err` if the project path is invalid or the operation fails.
     pub fn run(self, out: &mut impl io::Write) -> RunResult<()> {
+        let flags = self.flags();
         // `effective_cwd` is the canonicalized `--dir` value or process cwd. It
         // is the baseline for status path formatting, matching `git -C <path>`.
         let project = get_project_path(self.dir)?;
-        // Config supplies the value for every option the user left unset.
-        let defaults = ConfigDefaults::read(&project.repo_root);
-        let format = Self::output_format(
-            self.short,
-            self.long,
-            self.porcelain,
-            self.null_terminate,
-            defaults.short,
-        );
-        // `status.branch` reaches the short format only. Porcelain headers stay
-        // behind an explicit `--branch`, as in git.
-        let branch = self.branch || (defaults.branch && format == OutputFormat::Short);
-        let display_progress = std::io::stderr().is_terminal();
-        // `status.aheadBehind` reaches the long format only. Porcelain keeps
-        // real counts unless `--no-ahead-behind` asks otherwise, as in git.
-        let ahead_behind = if self.ahead_behind {
-            true
-        } else if self.no_ahead_behind {
-            false
-        } else {
-            format != OutputFormat::Long || defaults.ahead_behind
-        };
-        // clap keeps the two stash flags mutually exclusive, so neither being
-        // present is what hands the decision to `status.showStash`.
-        let show_stash = if self.show_stash {
-            true
-        } else if self.no_show_stash {
-            false
-        } else {
-            defaults.show_stash
-        };
-        Ok(status(
+        let warnings = status(
             ResolvedStatusRequest {
                 project: &project,
                 no_server: self.no_server,
-                display_progress,
-                output: OutputOpts {
-                    format,
-                    null_terminate: self.null_terminate,
-                    ignore_submodules: self.ignore_submodules.unwrap_or(defaults.ignore_submodules),
-                    untracked_files: self.untracked_files.unwrap_or(defaults.untracked_files),
-                    ignored_files: self.ignored.unwrap_or_default(),
-                    branch,
-                    ahead_behind,
-                    quote_path: self.quote_path.unwrap_or(defaults.quote_path),
-                    show_stash,
-                    relative_paths: defaults.relative_paths,
-                    status_hints: defaults.status_hints,
-                },
+                display_progress: io::stderr().is_terminal(),
+                output: flags.resolve(ConfigDefaults::read(&project.repo_root)),
             },
             out,
-        )?)
+        )?;
+        for warning in warnings {
+            log::warn!("{warning}");
+        }
+        Ok(())
+    }
+}
+
+/// `Some(true)` for `--x`, `Some(false)` for `--no-x`, `None` for neither.
+const fn flag_pair(set: bool, unset: bool) -> Option<bool> {
+    if set {
+        Some(true)
+    } else if unset {
+        Some(false)
+    } else {
+        None
     }
 }
 
@@ -455,10 +421,9 @@ impl Prompt {
             return Ok(());
         }
         let timeout = Duration::from_millis(self.timeout_ms);
-        let use_server = !self.no_server && project.kind.server_eligible();
         prompt(
             &project.repo_root,
-            use_server,
+            StatusSource::new(project.kind, self.no_server),
             self.format.as_deref(),
             timeout,
         )?;
@@ -474,12 +439,11 @@ impl List {
     /// Returns `Err` if the project path is invalid or the operation fails.
     pub fn run(self) -> RunResult<()> {
         let project = get_project_path(self.dir)?;
-        let no_server = self.no_server || !project.kind.server_eligible();
         Ok(list(
             &project.repo_root,
             self.format.as_deref(),
             !self.no_header,
-            no_server,
+            StatusSource::new(project.kind, self.no_server),
         )?)
     }
 }

@@ -16,10 +16,12 @@ use crate::{
     git::path::GitPath,
     status::{
         IgnoreSubmodules, IgnoredFiles, LongOpts, OutputFormat, OutputOpts, UntrackedFiles,
-        assemble_status, compute_local_statuses, display::display_status,
+        compute_local_statuses, display::display_status,
     },
     test_support::formats,
 };
+
+use super::assemble_status;
 
 use super::fixtures::*;
 

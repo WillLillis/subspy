@@ -28,8 +28,8 @@ any time a change is detected in one of these locations. For sufficiently many s
 ### Installation
 
 Prebuilt archives for Windows x64, Linux x64, and macOS ARM64 are available from the
-[GitHub releases page](https://github.com/WillLillis/subspy/releases). Each archive contains both `subspy` (the standalone
-CLI) and `subspy-git` (the shim covered below).
+[GitHub releases page](https://github.com/WillLillis/subspy/releases). Each archive contains `subspy` (the standalone
+CLI), `subspy-git` (the git shim), and `subspy-mcp` (the MCP server for AI agents).
 
 If [`cargo-binstall`](https://github.com/cargo-bins/cargo-binstall) is installed, it can select and install the appropriate
 prebuilt archive:
@@ -51,6 +51,9 @@ The project can also be built and installed from source:
 > cd subspy
 > cargo install --path . --locked
 ```
+
+Builds from source include `subspy-mcp` by default. Add `--no-default-features` to either `cargo install` command to
+leave it out and skip compiling its dependencies.
 
 The project's current Minimum Supported Rust Version (MSRV) is 1.88.0.
 
@@ -133,6 +136,23 @@ To use it: open Git Extensions -> Settings -> Git -> Path to git, set the path t
 [SourceTree](https://www.atlassian.com/software/sourcetree) also calls `git status` many times as part of its regular operation.
 It requires a path to a full git _install_ directory (it resolves `cmd/git.exe` and a number of supporting files at fixed relative
 paths within it), not to a single binary, so the shim can't be slotted in. SourceTree is not supported.
+
+#### AI agents (`subspy-mcp`) (*Experimental*)
+
+The `subspy-mcp` binary is an [MCP](https://modelcontextprotocol.io) server that gives AI coding agents subspy's fast
+status. The agent's client launches it and talks to it over stdin/stdout. Like `subspy status`, it starts a watch server
+when one isn't running. It provides one read-only tool, `status`, which returns the output of `subspy status` in the
+long (default), short, or porcelain v2 format.
+
+To register it with Claude Code:
+
+```sh
+claude mcp add subspy -- subspy-mcp
+```
+
+Other MCP clients need the same command, `subspy-mcp`, with no arguments. Agents tend to reach for `git status` out of
+habit, so a line in your project's agent instructions (e.g. `CLAUDE.md` or `AGENTS.md`) pointing them at the tool
+helps.
 
 ### Outrageous Anecdotal Performance Claims
 

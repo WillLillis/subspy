@@ -19,8 +19,9 @@ use subspy::{
     cli::get_project_path,
     entry::{INTERNAL_FLAG, subspy_entry},
     status::{
-        ConfigDefaults, IgnoreSubmodules, IgnoredFiles, OutputFormat, OutputOpts, PorcelainVersion,
-        ResolvedStatusRequest, ShimStatusOutcome, StatusScope, UntrackedFiles, status_for_shim,
+        ConfigDefaults, IgnoreSubmodules, IgnoredFiles, OutputFormat, PorcelainVersion,
+        ResolvedStatusRequest, ShimStatusOutcome, StatusFlags, StatusScope, UntrackedFiles,
+        status_for_shim,
     },
 };
 
@@ -52,86 +53,10 @@ fn main() -> ExitCode {
 #[derive(Debug, Default, PartialEq, Eq)]
 struct Intercept {
     chdir: Option<PathBuf>,
-    /// `-c core.quotepath=<bool>` if seen, else `None` (use git's default).
-    quote_path: Option<bool>,
-    args: StatusArgs,
-}
-
-/// Mirrors the subset of `git status` flags subspy can serve. Kept separate
-/// from `cli::Status` so it stays comparable in tests and never leaks
-/// subspy-only flags into the shim's surface.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-struct StatusArgs {
     scope: StatusScope,
-    format: Option<FormatChoice>,
-    null_terminate: bool,
-    /// `None` when the flag is absent, which hands the decision to
-    /// `diff.ignoreSubmodules`.
-    ignore_submodules: Option<IgnoreSubmodules>,
-    untracked_files: Option<UntrackedFiles>,
-    /// `None` when the flag is absent (git's default: don't show ignored),
-    /// `Some(mode)` when the user passed `--ignored[=<mode>]`.
-    ignored_files: Option<IgnoredFiles>,
-    branch: bool,
-    /// `--ahead-behind` or `--no-ahead-behind`. `None` uses git's default (on).
-    /// This only affects formats that emit upstream ahead/behind info.
-    ahead_behind: Option<bool>,
-    /// `--show-stash` or `--no-show-stash`. `None` defers to `status.showStash`.
-    show_stash: Option<bool>,
-}
-
-/// User's explicit choice of `git status` output format. `None` in
-/// `StatusArgs::format` means the user didn't pass any format flag, in
-/// which case we render the default (long). Once set, a second
-/// format-affecting flag is treated as a conflict and dispatch falls
-/// back to forwarding so real git can emit its native error.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum FormatChoice {
-    Long,
-    Short,
-    Porcelain(PorcelainVersion),
-}
-
-struct ShimStatusRequest {
-    scope: StatusScope,
-    output: OutputOpts,
-}
-
-impl ShimStatusRequest {
-    /// Config supplies every option argv left unset, matching git's precedence.
-    /// Needs `defaults`, so it runs after the project path is resolved.
-    fn new(args: StatusArgs, quote_path: Option<bool>, defaults: ConfigDefaults) -> Self {
-        let format = match args.format {
-            Some(FormatChoice::Short) => OutputFormat::Short,
-            Some(FormatChoice::Porcelain(v)) => OutputFormat::Porcelain(v),
-            None if args.null_terminate => OutputFormat::Porcelain(PorcelainVersion::V1),
-            None if defaults.short => OutputFormat::Short,
-            Some(FormatChoice::Long) | None => OutputFormat::Long,
-        };
-        Self {
-            scope: args.scope,
-            output: OutputOpts {
-                format,
-                null_terminate: args.null_terminate,
-                ignore_submodules: args.ignore_submodules.unwrap_or(defaults.ignore_submodules),
-                untracked_files: args.untracked_files.unwrap_or(defaults.untracked_files),
-                ignored_files: args.ignored_files.unwrap_or_default(),
-                // `status.branch` reaches the short format only. Porcelain
-                // headers stay behind an explicit `--branch`, as in git.
-                branch: args.branch || (defaults.branch && format == OutputFormat::Short),
-                // `status.aheadBehind` reaches the long format only, so
-                // porcelain keeps real counts unless a flag says otherwise.
-                ahead_behind: args
-                    .ahead_behind
-                    .unwrap_or(format != OutputFormat::Long || defaults.ahead_behind),
-                // `-c core.quotepath=<bool>` beats the config file.
-                quote_path: quote_path.unwrap_or(defaults.quote_path),
-                show_stash: args.show_stash.unwrap_or(defaults.show_stash),
-                relative_paths: defaults.relative_paths,
-                status_hints: defaults.status_hints,
-            },
-        }
-    }
+    /// The subset of `git status` flags subspy can serve, plus any
+    /// `-c core.quotepath=<bool>`. Whatever they leave unset comes from config.
+    flags: StatusFlags,
 }
 
 /// Walk argv looking for an interceptable `status` invocation.
@@ -152,7 +77,7 @@ where
                 rest.next()?;
             }
             GlobalAction::StatusFollows => {
-                intercept.args = parse_status_args(&mut rest)?;
+                parse_status_args(&mut rest, &mut intercept)?;
                 return Some(intercept);
             }
         }
@@ -266,7 +191,7 @@ fn apply_minus_c(payload: &str, intercept: &mut Intercept) -> Result<(), Forward
         return Ok(());
     };
     if key.eq_ignore_ascii_case("core.quotepath") {
-        intercept.quote_path = Some(parse_git_bool(value).ok_or(Forward)?);
+        intercept.flags.quote_path = Some(parse_git_bool(value).ok_or(Forward)?);
     }
     Ok(())
 }
@@ -325,39 +250,38 @@ fn classify_long_global(
     Err(Forward)
 }
 
-/// Validate the args after `status`. Returns `None` if any flag is one
-/// subspy doesn't support, or if a positional pathspec follows.
-fn parse_status_args<I>(rest: &mut I) -> Option<StatusArgs>
+/// Records the args after `status` in `intercept`. Returns `None` if any flag
+/// is one subspy doesn't support, or if a positional pathspec follows.
+fn parse_status_args<I>(rest: &mut I, intercept: &mut Intercept) -> Option<()>
 where
     I: Iterator<Item = OsString>,
 {
-    let mut out = StatusArgs::default();
     let mut seen_double_dash = false;
-
     for os_arg in rest.by_ref() {
         // Non-UTF-8 bytes in an arg can't match any of our literal flag
         // names, so signal Forward (None) and let real git handle them.
         let arg = os_arg.to_str()?;
-        classify_status_arg(arg, &mut out, &mut seen_double_dash).ok()?;
+        classify_status_arg(arg, intercept, &mut seen_double_dash).ok()?;
     }
-    Some(out)
+    Some(())
 }
 
-/// Records the chosen output format. Repeating the same format is idempotent,
-/// matching `git status --long --long`. Conflicting choices forward to the real
-/// git for its native error.
-/// git rejects `--long` together with `-z`, so the pair forwards and lets git
-/// report it. Checked from both sides, since either flag can come first.
-fn set_null_terminate(out: &mut StatusArgs) -> Result<(), Forward> {
-    if out.format == Some(FormatChoice::Long) {
+/// Records `-z`. git rejects `--long` together with `-z`, so the pair forwards
+/// and lets git report it. Checked from both sides, since either flag can come
+/// first.
+fn set_null_terminate(out: &mut StatusFlags) -> Result<(), Forward> {
+    if out.format == Some(OutputFormat::Long) {
         return Err(Forward);
     }
     out.null_terminate = true;
     Ok(())
 }
 
-fn set_format(out: &mut StatusArgs, choice: FormatChoice) -> Result<(), Forward> {
-    if choice == FormatChoice::Long && out.null_terminate {
+/// Records the chosen output format. Repeating the same format is idempotent,
+/// matching `git status --long --long`. Conflicting choices, including `--long`
+/// after `-z`, forward to the real git for its native error.
+fn set_format(out: &mut StatusFlags, choice: OutputFormat) -> Result<(), Forward> {
+    if choice == OutputFormat::Long && out.null_terminate {
         return Err(Forward);
     }
     if let Some(existing) = out.format {
@@ -377,14 +301,14 @@ fn set_format(out: &mut StatusArgs, choice: FormatChoice) -> Result<(), Forward>
 /// for anything that should make dispatch fall back to forwarding.
 fn classify_status_arg(
     arg: &str,
-    out: &mut StatusArgs,
+    intercept: &mut Intercept,
     seen_double_dash: &mut bool,
 ) -> Result<(), Forward> {
     // Arguments after `--` are pathspecs. Accept `.` and `./` as cwd selectors,
     // forward everything else.
     if *seen_double_dash {
         return if matches!(arg, "." | "./") {
-            out.scope = StatusScope::Cwd;
+            intercept.scope = StatusScope::Cwd;
             Ok(())
         } else {
             Err(Forward)
@@ -395,7 +319,7 @@ fn classify_status_arg(
         return Ok(());
     }
     if matches!(arg, "." | "./") {
-        out.scope = StatusScope::Cwd;
+        intercept.scope = StatusScope::Cwd;
         return Ok(());
     }
     // Every other bare positional is an unsupported pathspec.
@@ -403,21 +327,23 @@ fn classify_status_arg(
         return Err(Forward);
     }
 
+    let out = &mut intercept.flags;
+
     // Format flags. `set_format` returns `Err(Forward)` on a conflict
     // (e.g. `--short --long`). Dispatch falls through and real git emits
     // its native error.
     if arg == "--porcelain" {
-        return set_format(out, FormatChoice::Porcelain(PorcelainVersion::V1));
+        return set_format(out, OutputFormat::Porcelain(PorcelainVersion::V1));
     }
     if let Some(v) = arg.strip_prefix("--porcelain=") {
         let version = parse_porcelain(v).ok_or(Forward)?;
-        return set_format(out, FormatChoice::Porcelain(version));
+        return set_format(out, OutputFormat::Porcelain(version));
     }
     if arg == "-s" || arg == "--short" {
-        return set_format(out, FormatChoice::Short);
+        return set_format(out, OutputFormat::Short);
     }
     if arg == "--long" {
-        return set_format(out, FormatChoice::Long);
+        return set_format(out, OutputFormat::Long);
     }
 
     if arg.starts_with('-') && !arg.starts_with("--") && arg.len() > 2 {
@@ -505,12 +431,12 @@ fn classify_status_arg(
 /// characters as its optional mode and therefore ends the bundle when bare. `-su`
 /// attached mode, so it consumes the rest of the bundle and must be last when
 /// means `-s -u`, while `-us` supplies the invalide mode `s`.
-fn parse_short_status_bundle(arg: &str, out: &mut StatusArgs) -> Result<(), Forward> {
+fn parse_short_status_bundle(arg: &str, out: &mut StatusFlags) -> Result<(), Forward> {
     let mut rest = arg.strip_prefix('-').ok_or(Forward)?;
     while let Some(flag) = rest.as_bytes().first().copied() {
         rest = &rest[1..];
         match flag {
-            b's' => set_format(out, FormatChoice::Short)?,
+            b's' => set_format(out, OutputFormat::Short)?,
             b'b' => out.branch = true,
             b'z' => set_null_terminate(out)?,
             b'u' => {
@@ -571,20 +497,18 @@ fn parse_ignored(s: &str) -> Option<IgnoredFiles> {
 fn shim_entry(intercept: Intercept) -> Option<ExitCode> {
     let Intercept {
         chdir,
-        quote_path,
-        args,
+        scope,
+        flags,
     } = intercept;
     let project = get_project_path(chdir).ok()?;
-    let status_args =
-        ShimStatusRequest::new(args, quote_path, ConfigDefaults::read(&project.repo_root));
     let mut buf: Vec<u8> = Vec::with_capacity(4 * 1024);
     let request = ResolvedStatusRequest {
         project: &project,
         no_server: false,
         display_progress: io::stderr().is_terminal(),
-        output: status_args.output,
+        output: flags.resolve(ConfigDefaults::read(&project.repo_root)),
     };
-    match status_for_shim(request, status_args.scope, &mut buf) {
+    match status_for_shim(request, scope, &mut buf) {
         Ok(ShimStatusOutcome::Rendered) => {
             use std::io::Write as _;
             io::stdout().lock().write_all(&buf).ok();
@@ -704,11 +628,11 @@ mod tests {
         args.iter().map(|s| OsString::from(*s)).collect()
     }
 
-    fn intercept_with(args: StatusArgs, chdir: Option<&str>) -> Intercept {
+    fn intercept_with(flags: StatusFlags, chdir: Option<&str>) -> Intercept {
         Intercept {
             chdir: chdir.map(PathBuf::from),
-            quote_path: None,
-            args,
+            scope: StatusScope::All,
+            flags,
         }
     }
 
@@ -724,8 +648,8 @@ mod tests {
         assert_eq!(
             got,
             intercept_with(
-                StatusArgs {
-                    format: Some(FormatChoice::Porcelain(PorcelainVersion::V2)),
+                StatusFlags {
+                    format: Some(OutputFormat::Porcelain(PorcelainVersion::V2)),
                     ..Default::default()
                 },
                 None,
@@ -737,45 +661,45 @@ mod tests {
     fn status_porcelain_no_value_defaults_to_v1() {
         let got = dispatch(&os(&["status", "--porcelain"])).unwrap();
         assert_eq!(
-            got.args.format,
-            Some(FormatChoice::Porcelain(PorcelainVersion::V1))
+            got.flags.format,
+            Some(OutputFormat::Porcelain(PorcelainVersion::V1))
         );
     }
 
     #[test]
     fn status_z_flag() {
         let got = dispatch(&os(&["status", "-z"])).unwrap();
-        assert!(got.args.null_terminate);
+        assert!(got.flags.null_terminate);
     }
 
     #[test]
     fn status_ignore_submodules_dirty() {
         let got = dispatch(&os(&["status", "--ignore-submodules=dirty"])).unwrap();
-        assert_eq!(got.args.ignore_submodules, Some(IgnoreSubmodules::Dirty));
+        assert_eq!(got.flags.ignore_submodules, Some(IgnoreSubmodules::Dirty));
     }
 
     #[test]
     fn status_ignore_submodules_no_value_means_all() {
         let got = dispatch(&os(&["status", "--ignore-submodules"])).unwrap();
-        assert_eq!(got.args.ignore_submodules, Some(IgnoreSubmodules::All));
+        assert_eq!(got.flags.ignore_submodules, Some(IgnoreSubmodules::All));
     }
 
     #[test]
     fn status_untracked_files_no_value_means_all_via_short() {
         let got = dispatch(&os(&["status", "-u"])).unwrap();
-        assert_eq!(got.args.untracked_files, Some(UntrackedFiles::All));
+        assert_eq!(got.flags.untracked_files, Some(UntrackedFiles::All));
     }
 
     #[test]
     fn status_untracked_files_no_value_means_all_via_long() {
         let got = dispatch(&os(&["status", "--untracked-files"])).unwrap();
-        assert_eq!(got.args.untracked_files, Some(UntrackedFiles::All));
+        assert_eq!(got.flags.untracked_files, Some(UntrackedFiles::All));
     }
 
     #[test]
     fn status_untracked_files_all_bundled_short() {
         let got = dispatch(&os(&["status", "-uall"])).unwrap();
-        assert_eq!(got.args.untracked_files, Some(UntrackedFiles::All));
+        assert_eq!(got.flags.untracked_files, Some(UntrackedFiles::All));
     }
 
     #[test]
@@ -790,13 +714,13 @@ mod tests {
         ] {
             let got = dispatch(&os(&["status", arg])).unwrap();
             assert_eq!(
-                got.args.format == Some(FormatChoice::Short),
+                got.flags.format == Some(OutputFormat::Short),
                 format,
                 "arg={arg}"
             );
-            assert_eq!(got.args.branch, branch, "arg={arg}");
-            assert_eq!(got.args.null_terminate, nul, "arg={arg}");
-            assert_eq!(got.args.untracked_files, untracked, "arg={arg}");
+            assert_eq!(got.flags.branch, branch, "arg={arg}");
+            assert_eq!(got.flags.null_terminate, nul, "arg={arg}");
+            assert_eq!(got.flags.untracked_files, untracked, "arg={arg}");
         }
     }
 
@@ -808,13 +732,13 @@ mod tests {
     #[test]
     fn status_untracked_files_long() {
         let got = dispatch(&os(&["status", "--untracked-files=no"])).unwrap();
-        assert_eq!(got.args.untracked_files, Some(UntrackedFiles::No));
+        assert_eq!(got.flags.untracked_files, Some(UntrackedFiles::No));
     }
 
     #[test]
     fn status_ignored_bare_is_traditional() {
         let got = dispatch(&os(&["status", "--ignored"])).unwrap();
-        assert_eq!(got.args.ignored_files, Some(IgnoredFiles::Traditional));
+        assert_eq!(got.flags.ignored_files, Some(IgnoredFiles::Traditional));
     }
 
     #[test]
@@ -828,7 +752,7 @@ mod tests {
     #[test]
     fn status_ignored_no() {
         let got = dispatch(&os(&["status", "--ignored=no"])).unwrap();
-        assert_eq!(got.args.ignored_files, Some(IgnoredFiles::No));
+        assert_eq!(got.flags.ignored_files, Some(IgnoredFiles::No));
     }
 
     #[test]
@@ -899,10 +823,10 @@ mod tests {
         .unwrap();
         assert_eq!(got.chdir, Some(PathBuf::from("/repo")));
         assert_eq!(
-            got.args.format,
-            Some(FormatChoice::Porcelain(PorcelainVersion::V2))
+            got.flags.format,
+            Some(OutputFormat::Porcelain(PorcelainVersion::V2))
         );
-        assert!(got.args.null_terminate);
+        assert!(got.flags.null_terminate);
     }
 
     #[test]
@@ -951,13 +875,13 @@ mod tests {
     #[test]
     fn status_ahead_behind_intercepts() {
         let got = dispatch(&os(&["status", "--ahead-behind"])).unwrap();
-        assert_eq!(got.args.ahead_behind, Some(true));
+        assert_eq!(got.flags.ahead_behind, Some(true));
     }
 
     #[test]
     fn status_no_ahead_behind_intercepts() {
         let got = dispatch(&os(&["status", "--no-ahead-behind"])).unwrap();
-        assert_eq!(got.args.ahead_behind, Some(false));
+        assert_eq!(got.flags.ahead_behind, Some(false));
     }
 
     #[test]
@@ -985,13 +909,13 @@ mod tests {
         ]))
         .unwrap();
         assert_eq!(
-            got.args.format,
-            Some(FormatChoice::Porcelain(PorcelainVersion::V1))
+            got.flags.format,
+            Some(OutputFormat::Porcelain(PorcelainVersion::V1))
         );
-        assert_eq!(got.args.ignore_submodules, Some(IgnoreSubmodules::Dirty));
-        assert_eq!(got.args.untracked_files, Some(UntrackedFiles::All));
-        assert_eq!(got.args.ahead_behind, Some(false));
-        assert_eq!(got.quote_path, Some(false));
+        assert_eq!(got.flags.ignore_submodules, Some(IgnoreSubmodules::Dirty));
+        assert_eq!(got.flags.untracked_files, Some(UntrackedFiles::All));
+        assert_eq!(got.flags.ahead_behind, Some(false));
+        assert_eq!(got.flags.quote_path, Some(false));
     }
 
     #[test]
@@ -1006,12 +930,12 @@ mod tests {
         ]))
         .unwrap();
         assert_eq!(
-            got.args.format,
-            Some(FormatChoice::Porcelain(PorcelainVersion::V2))
+            got.flags.format,
+            Some(OutputFormat::Porcelain(PorcelainVersion::V2))
         );
-        assert!(got.args.null_terminate);
-        assert_eq!(got.args.untracked_files, Some(UntrackedFiles::All));
-        assert_eq!(got.args.ignore_submodules, Some(IgnoreSubmodules::All));
+        assert!(got.flags.null_terminate);
+        assert_eq!(got.flags.untracked_files, Some(UntrackedFiles::All));
+        assert_eq!(got.flags.ignore_submodules, Some(IgnoreSubmodules::All));
     }
 
     #[test]
@@ -1025,12 +949,12 @@ mod tests {
         // statuses from cache.
         let got = dispatch(&os(&["status", "--porcelain=2", "-z", "--untracked-files"])).unwrap();
         assert_eq!(
-            got.args.format,
-            Some(FormatChoice::Porcelain(PorcelainVersion::V2))
+            got.flags.format,
+            Some(OutputFormat::Porcelain(PorcelainVersion::V2))
         );
-        assert!(got.args.null_terminate);
-        assert_eq!(got.args.untracked_files, Some(UntrackedFiles::All));
-        assert_eq!(got.args.ignore_submodules, None);
+        assert!(got.flags.null_terminate);
+        assert_eq!(got.flags.untracked_files, Some(UntrackedFiles::All));
+        assert_eq!(got.flags.ignore_submodules, None);
     }
 
     #[test]
@@ -1038,33 +962,33 @@ mod tests {
         // `-c core.quotepath=true` (separate value) and `-ccore.quotepath=true`
         // (attached) should both be recognized.
         let got = dispatch(&os(&["-ccore.quotepath=true", "status"])).unwrap();
-        assert_eq!(got.quote_path, Some(true));
+        assert_eq!(got.flags.quote_path, Some(true));
     }
 
     #[test]
     fn core_quotepath_separate_form() {
         let got = dispatch(&os(&["-c", "core.quotepath=true", "status"])).unwrap();
-        assert_eq!(got.quote_path, Some(true));
+        assert_eq!(got.flags.quote_path, Some(true));
     }
 
     #[test]
     fn other_dash_c_settings_pass_through() {
         // We don't care about `diff.mnemonicprefix`; just consume it.
         let got = dispatch(&os(&["-c", "diff.mnemonicprefix=false", "status"])).unwrap();
-        assert_eq!(got.quote_path, None);
+        assert_eq!(got.flags.quote_path, None);
     }
 
     #[test]
     fn core_quotepath_empty_is_false() {
         // git treats `core.quotepath=` (empty) as a false boolean.
         let got = dispatch(&os(&["-c", "core.quotepath=", "status"])).unwrap();
-        assert_eq!(got.quote_path, Some(false));
+        assert_eq!(got.flags.quote_path, Some(false));
     }
 
     #[test]
     fn show_stash_intercepts() {
         let got = dispatch(&os(&["status", "--show-stash"])).unwrap();
-        assert_eq!(got.args.show_stash, Some(true));
+        assert_eq!(got.flags.show_stash, Some(true));
     }
 
     #[test]
@@ -1109,8 +1033,8 @@ mod tests {
             assert_eq!(
                 got,
                 intercept_with(
-                    StatusArgs {
-                        format: Some(FormatChoice::Short),
+                    StatusFlags {
+                        format: Some(OutputFormat::Short),
                         ..Default::default()
                     },
                     None,
@@ -1122,16 +1046,15 @@ mod tests {
     #[test]
     fn status_long_intercepts() {
         let got = dispatch(&os(&["status", "--long"])).unwrap();
-        assert_eq!(got.args.format, Some(FormatChoice::Long));
+        assert_eq!(got.flags.format, Some(OutputFormat::Long));
     }
 
     #[test]
     fn status_long_intercept_runs_default_long_renderer() {
         // `--long` is the default renderer in the shim request too.
         let intercept = dispatch(&os(&["status", "--long"])).unwrap();
-        let request =
-            ShimStatusRequest::new(intercept.args, intercept.quote_path, ConfigDefaults::GIT);
-        assert!(matches!(request.output.format, OutputFormat::Long));
+        let output = intercept.flags.resolve(ConfigDefaults::GIT);
+        assert!(matches!(output.format, OutputFormat::Long));
     }
 
     #[test]
@@ -1184,34 +1107,34 @@ mod tests {
         // `git status --long --long` is accepted by git (idempotent), and
         // we mirror that.
         let got = dispatch(&os(&["status", "--long", "--long"])).unwrap();
-        assert_eq!(got.args.format, Some(FormatChoice::Long));
+        assert_eq!(got.flags.format, Some(OutputFormat::Long));
 
         let got = dispatch(&os(&["status", "--short", "--short"])).unwrap();
-        assert_eq!(got.args.format, Some(FormatChoice::Short));
+        assert_eq!(got.flags.format, Some(OutputFormat::Short));
 
         let got = dispatch(&os(&["status", "--porcelain", "--porcelain"])).unwrap();
         assert_eq!(
-            got.args.format,
-            Some(FormatChoice::Porcelain(PorcelainVersion::V1))
+            got.flags.format,
+            Some(OutputFormat::Porcelain(PorcelainVersion::V1))
         );
     }
 
     #[test]
     fn status_branch_long() {
         let got = dispatch(&os(&["status", "--branch"])).unwrap();
-        assert!(got.args.branch);
+        assert!(got.flags.branch);
     }
 
     #[test]
     fn status_branch_short() {
         let got = dispatch(&os(&["status", "-b"])).unwrap();
-        assert!(got.args.branch);
+        assert!(got.flags.branch);
     }
 
     #[test]
     fn status_branch_default_false() {
         let got = dispatch(&os(&["status"])).unwrap();
-        assert!(!got.args.branch);
+        assert!(!got.flags.branch);
     }
 
     #[test]
@@ -1231,14 +1154,14 @@ mod tests {
             &["status", "--", ".", "./"][..],
         ] {
             let got = dispatch(&os(argv)).unwrap();
-            assert_eq!(got.args.scope, StatusScope::Cwd, "argv={argv:?}");
+            assert_eq!(got.scope, StatusScope::Cwd, "argv={argv:?}");
         }
     }
 
     #[test]
     fn bare_double_dash_has_no_pathspec() {
         let got = dispatch(&os(&["status", "--"])).unwrap();
-        assert_eq!(got.args.scope, StatusScope::All);
+        assert_eq!(got.scope, StatusScope::All);
     }
 
     #[test]
@@ -1291,12 +1214,12 @@ mod tests {
         .unwrap();
         assert_eq!(got.chdir, None);
         assert_eq!(
-            got.args.format,
-            Some(FormatChoice::Porcelain(PorcelainVersion::V2))
+            got.flags.format,
+            Some(OutputFormat::Porcelain(PorcelainVersion::V2))
         );
-        assert!(got.args.null_terminate);
-        assert_eq!(got.args.untracked_files, Some(UntrackedFiles::All));
-        assert_eq!(got.args.ignore_submodules, Some(IgnoreSubmodules::All));
+        assert!(got.flags.null_terminate);
+        assert_eq!(got.flags.untracked_files, Some(UntrackedFiles::All));
+        assert_eq!(got.flags.ignore_submodules, Some(IgnoreSubmodules::All));
     }
 
     /// The sentinel is routed by `main()` before `dispatch()` ever sees it.
@@ -1358,7 +1281,7 @@ mod tests {
             "--ignore-submodules",
         ]))
         .unwrap();
-        assert_eq!(got.args.untracked_files, Some(UntrackedFiles::All));
-        assert_eq!(got.args.ignore_submodules, Some(IgnoreSubmodules::All));
+        assert_eq!(got.flags.untracked_files, Some(UntrackedFiles::All));
+        assert_eq!(got.flags.ignore_submodules, Some(IgnoreSubmodules::All));
     }
 }
