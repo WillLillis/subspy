@@ -153,7 +153,7 @@ pub fn submodule_status(repo: &Repository, rel: &GitPath) -> Result<StatusSummar
     opts.include_untracked(true)
         .recurse_untracked_dirs(false)
         .include_ignored(false);
-    for entry in sub.statuses(Some(&mut opts))?.iter() {
+    for entry in &sub.statuses(Some(&mut opts))? {
         let status = entry.status();
         if status.intersects(MODIFIED_FLAGS) {
             summary |= StatusSummary::MODIFIED_CONTENT;

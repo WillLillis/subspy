@@ -62,25 +62,20 @@ pub const fn uses_filesystem_sockets() -> bool {
 #[inline]
 #[must_use]
 pub fn server_not_started(error: &std::io::Error) -> bool {
-    if matches!(
+    #[cfg(target_os = "windows")]
+    {
+        if error.raw_os_error() == Some(windows_sys::Win32::Networking::WinSock::WSAEINVAL) {
+            return true;
+        }
+    }
+
+    matches!(
         error.kind(),
         std::io::ErrorKind::ConnectionRefused
             | std::io::ErrorKind::NotFound
             | std::io::ErrorKind::ConnectionReset
             | std::io::ErrorKind::ConnectionAborted
-    ) {
-        return true;
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        const WSAEINVAL: i32 = 10022;
-        if error.raw_os_error() == Some(WSAEINVAL) {
-            return true;
-        }
-    }
-
-    false
+    )
 }
 
 /// Sets the receive timeout on the IPC stream.
