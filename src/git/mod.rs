@@ -1,5 +1,6 @@
 //! Lightweight git helpers that bypass expensive libgit2 machinery.
 
+pub mod index;
 pub mod path;
 pub mod substatus;
 
@@ -24,6 +25,24 @@ const MODE_BLOB_GROUP_WRITABLE: u32 = 0o100_664;
 const MODE_BLOB_EXECUTABLE: u32 = 0o100_755;
 const MODE_SYMLINK: u32 = 0o120_000;
 const MODE_GITLINK: u32 = 0o160_000;
+
+/// The hash a repository names its objects with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ObjectFormat {
+    Sha1,
+    Sha256,
+}
+
+impl ObjectFormat {
+    /// The length of an object id, in bytes.
+    #[must_use]
+    pub const fn raw_len(self) -> usize {
+        match self {
+            Self::Sha1 => 20,
+            Self::Sha256 => 32,
+        }
+    }
+}
 
 /// Configures global libgit2 options for subspy's read-only, local-only use case.
 ///
