@@ -22,7 +22,7 @@ pub fn phantom_directories(
 ) -> FxHashSet<Vec<u8>> {
     let mut phantom = FxHashSet::default();
     let index = repo.index().ok();
-    for entry in non_submod.iter() {
+    for entry in non_submod {
         let path = entry.path_bytes();
         let Some(name) = path.strip_suffix(b"/") else {
             continue;

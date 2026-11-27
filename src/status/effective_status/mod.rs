@@ -40,7 +40,7 @@ impl Corrections {
         case: super::CaseSensitivity,
     ) -> Self {
         let (mut worktree_delete, mut index_new) = (false, false);
-        for entry in non_submod.iter() {
+        for entry in non_submod {
             let st = entry.status();
             worktree_delete |= st.contains(git2::Status::WT_DELETED);
             index_new |= st.contains(git2::Status::INDEX_NEW);
