@@ -1,7 +1,10 @@
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    sync::LazyLock,
+    sync::{
+        LazyLock,
+        mpsc::{self, RecvTimeoutError},
+    },
     thread::JoinHandle,
     time::{Duration, Instant},
 };
@@ -16,7 +19,10 @@ use subspy::{
     StatusSummary,
     connection::watch_server::watch,
     connection::{
-        client::{recv_status_response, request_reindex, request_shutdown, send_status_request},
+        client::{
+            recv_status_response, request_debug, request_reindex, request_shutdown,
+            send_status_request,
+        },
         ipc_connect, ipc_socket_path,
     },
     git::path::GitPath,
@@ -65,6 +71,27 @@ fn join_with_timeout(handle: JoinHandle<()>) -> Option<std::thread::Result<()>> 
 /// Asks the server for `root` to shut down and returns its reply.
 fn shutdown_server(root: &Path) -> IpcResult<ServerMessage> {
     request_shutdown(ipc_connect(&ipc_socket_path(root))?)
+}
+
+/// How long the harness waits for one exchange with the watch server.
+const EXCHANGE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Runs `exchange` on a thread of its own and waits up to [`EXCHANGE_TIMEOUT`]
+/// for it, returning `None` if it is still running then.
+fn within_timeout<T: Send + 'static>(exchange: impl FnOnce() -> T + Send + 'static) -> Option<T> {
+    let (tx, rx) = mpsc::channel();
+    let handle = std::thread::spawn(move || {
+        let _ = tx.send(exchange());
+    });
+    match rx.recv_timeout(EXCHANGE_TIMEOUT) {
+        Ok(value) => Some(value),
+        Err(RecvTimeoutError::Timeout) => None,
+        // The exchange panicked before sending its result.
+        Err(RecvTimeoutError::Disconnected) => match handle.join() {
+            Err(panic) => std::panic::resume_unwind(panic),
+            Ok(()) => unreachable!("the exchange thread sends before it returns"),
+        },
+    }
 }
 
 // Identity / time pins used by every fixture commit so SHAs are
@@ -260,11 +287,43 @@ impl TestHarness {
 
     /// Request the current status from the watch server.
     pub fn status(&self) -> Vec<(GitPath, StatusSummary)> {
-        let mut conn =
-            send_status_request(self.root.path(), false).expect("send_status_request failed");
-        recv_status_response(&mut conn, false)
-            .expect("recv_status_response failed")
-            .0
+        let root = self.root.path().to_path_buf();
+        self.exchange("status request", move || {
+            let mut conn = send_status_request(&root, false)?;
+            recv_status_response(&mut conn, false)
+        })
+        .expect("status request failed")
+        .0
+    }
+
+    /// Runs `exchange` with the watch server. If the server has not finished it
+    /// within [`EXCHANGE_TIMEOUT`], fails the test with the server's account of
+    /// its state, and teardown then dumps the trace, instead of the test
+    /// hanging until CI cancels the job.
+    fn exchange<T: Send + 'static>(
+        &self,
+        what: &str,
+        exchange: impl FnOnce() -> T + Send + 'static,
+    ) -> T {
+        within_timeout(exchange).unwrap_or_else(|| {
+            panic!(
+                "watch server did not finish a {what} within {EXCHANGE_TIMEOUT:?}\n{}",
+                self.debug_snapshot()
+            )
+        })
+    }
+
+    /// The server's state as `subspy debug` reports it, or why it couldn't be
+    /// read.
+    fn debug_snapshot(&self) -> String {
+        let root = self.root.path().to_path_buf();
+        match within_timeout(move || request_debug(&root)) {
+            Some(Ok(state)) => format!("server state:\n{state}"),
+            Some(Err(err)) => format!("debug request failed: {err}"),
+            None => format!(
+                "the server did not answer a debug request within {EXCHANGE_TIMEOUT:?} either"
+            ),
+        }
     }
 
     /// Poll status until it matches the expected predicate, or panic on timeout.
@@ -397,13 +456,18 @@ impl TestHarness {
 
     /// Request a reindex from the watch server.
     pub fn request_reindex(&self) {
-        request_reindex(self.root.path(), false).expect("Reindex request failed");
+        let root = self.root.path().to_path_buf();
+        self.exchange("reindex request", move || request_reindex(&root, false))
+            .expect("Reindex request failed");
     }
 
     /// Shut down the watch server and wait for the thread to exit.
     pub fn shutdown(&mut self) {
         if let Some(handle) = self.server_thread.take() {
-            let reply = shutdown_server(self.root.path()).expect("Shutdown request failed");
+            let root = self.root.path().to_path_buf();
+            let reply = self
+                .exchange("shutdown request", move || shutdown_server(&root))
+                .expect("Shutdown request failed");
             assert_eq!(reply, ServerMessage::ShutdownAck);
             match join_with_timeout(handle) {
                 Some(result) => result.expect("Watch server thread panicked"),
@@ -424,10 +488,16 @@ impl TestHarness {
         let sock_path = ipc_socket_path(self.root.path());
         loop {
             if ipc_connect(&sock_path).is_ok() {
-                // Server is listening. Do a full status request to
-                // wait for initial indexing to complete.
-                let mut conn = send_status_request(self.root.path(), false).unwrap();
-                let _ = recv_status_response(&mut conn, false);
+                // Server is listening. Do a full status request to wait for
+                // initial indexing to complete. A failed indexing pass still
+                // answers, so only a failure to send is an error.
+                let root = self.root.path().to_path_buf();
+                self.exchange("status request", move || -> IpcResult<()> {
+                    let mut conn = send_status_request(&root, false)?;
+                    let _ = recv_status_response(&mut conn, false);
+                    Ok(())
+                })
+                .unwrap();
                 return;
             }
             assert!(
@@ -451,7 +521,10 @@ impl Drop for TestHarness {
         // Best-effort shutdown. Ignore a thread panic (the test may already be
         // unwinding), but bound the wait.
         let wedged = if let Some(handle) = self.server_thread.take() {
-            let _ = shutdown_server(self.root.path());
+            // Bounded, so a server that stopped answering can't hang teardown
+            // before the trace is dumped.
+            let root = self.root.path().to_path_buf();
+            let _ = within_timeout(move || shutdown_server(&root));
             join_with_timeout(handle).is_none()
         } else {
             false
