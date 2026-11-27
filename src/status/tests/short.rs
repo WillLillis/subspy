@@ -15,10 +15,12 @@ use crate::{
     cli::ProjectPath,
     status::{
         IgnoreSubmodules, IgnoredFiles, OutputFormat, OutputOpts, PorcelainOpts, UntrackedFiles,
-        assemble_status, compute_local_statuses, short::display_short,
+        compute_local_statuses, short::display_short,
     },
     test_support::formats,
 };
+
+use super::assemble_status;
 
 use super::fixtures::*;
 

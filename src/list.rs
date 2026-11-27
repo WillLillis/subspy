@@ -12,13 +12,9 @@ use thiserror::Error;
 
 use crate::{
     StatusSummary,
-    connection::{
-        IpcError,
-        client::{recv_status_response, send_status_request},
-    },
     git::{parse_gitmodules, path::GitPath, read_submodule_head, substatus},
     status::{
-        ConfigDefaults,
+        ConfigDefaults, SourceError, StatusSource,
         quote::{QuoteMode, needs_quoting, write_escaped},
     },
     template::{Template, TemplateError, display_width},
@@ -33,7 +29,7 @@ pub enum ListError {
     #[error(transparent)]
     Substatus(#[from] substatus::SubstatusError),
     #[error(transparent)]
-    Ipc(#[from] IpcError),
+    Source(#[from] SourceError),
     #[error(transparent)]
     Template(#[from] TemplateError),
     #[error(transparent)]
@@ -176,17 +172,16 @@ const IDX_STATUS: usize = 8;
 ///
 /// Parses `.gitmodules` directly for names and branches and reads the parent's
 /// `HEAD` tree for committed OIDs, bypassing `repo.submodules()` to avoid
-/// libgit2's per-submodule config snapshot overhead. Per-submodule I/O (reading
-/// the submodule's HEAD for workdir OID/branch, computing status) is
-/// parallelized via rayon.
+/// libgit2's per-submodule config snapshot overhead. Reading each submodule's
+/// HEAD for its workdir OID and branch is parallelized via rayon, and only
+/// done when `need_submod_head` says the template uses them.
 ///
-/// `need_submod_head` and `need_local_status` select the expensive operations
-/// required by the template.
+/// `changed` holds the submodules that are not clean when the template shows
+/// statuses, and is `None` otherwise.
 fn gather_info(
     root_path: &Path,
-    server_statuses: Option<&[(GitPath, StatusSummary)]>,
+    changed: Option<&[(GitPath, StatusSummary)]>,
     need_submod_head: bool,
-    need_local_status: bool,
 ) -> ListResult<Vec<SubmoduleInfo>> {
     use std::collections::HashMap;
 
@@ -211,12 +206,11 @@ fn gather_info(
         .collect();
 
     let status_map: Option<HashMap<&GitPath, StatusSummary>> =
-        server_statuses.map(|statuses| statuses.iter().map(|(p, s)| (p, *s)).collect());
-    let tl_repo = thread_local::ThreadLocal::new();
+        changed.map(|statuses| statuses.iter().map(|(p, s)| (p, *s)).collect());
 
     // Resolve per-submodule fields in parallel. The gitlinks arrive in index
     // (path) order, which `collect` preserves.
-    partial
+    Ok(partial
         .into_par_iter()
         .map(|(path, commit, gitmodule)| {
             // A path this platform cannot represent has no workdir to read.
@@ -225,20 +219,12 @@ fn gather_info(
                 _ => (None, None),
             };
 
-            let status = match &status_map {
-                Some(map) => Some(map.get(&path).copied().unwrap_or(StatusSummary::clean())),
-                None if need_local_status => {
-                    let repo = tl_repo.get_or_try(|| Repository::open(root_path))?;
-                    Some(
-                        substatus::submodule_status(repo, &path)
-                            .unwrap_or(StatusSummary::UNREADABLE),
-                    )
-                }
-                None => None,
-            };
+            let status = status_map
+                .as_ref()
+                .map(|map| map.get(&path).copied().unwrap_or(StatusSummary::clean()));
 
             let (name, branch) = gitmodule.map_or((None, None), |g| (Some(g.name), g.branch));
-            Ok(SubmoduleInfo {
+            SubmoduleInfo {
                 name,
                 path,
                 commit,
@@ -246,9 +232,9 @@ fn gather_info(
                 branch,
                 head_branch,
                 status,
-            })
+            }
         })
-        .collect()
+        .collect())
 }
 
 /// Computes the column width for each placeholder by taking the maximum of
@@ -311,42 +297,34 @@ fn format_output(
     output
 }
 
-/// Lists submodule metadata for the repository at `root_path`.
+/// Lists submodule metadata for the repository at `root_path`, reading
+/// statuses from `source`.
 ///
 /// # Errors
 ///
 /// Returns `Err` if the format template is invalid, the repository cannot be
-/// opened, or communication with the watch server fails.
+/// opened, or reading statuses fails.
 pub fn list(
     root_path: &Path,
     format: Option<&str>,
     header: bool,
-    no_server: bool,
+    source: StatusSource,
 ) -> ListResult<()> {
-    // The placeholder bitmap controls which metadata fields are fetch and whether
-    // the server is contacted.
+    // The placeholder bitmap controls which metadata fields are fetched.
     let template = Template::parse(format.unwrap_or(DEFAULT_FORMAT), &PLACEHOLDERS)?;
     let used = *template.used();
 
-    // Contact (and possibly cold-start) the watch server only when `{status}` is
-    // requested and server use is enabled. Other  formats gather all required
-    // fields locally.
-    let server_statuses = if no_server || !used[IDX_STATUS] {
-        None
-    } else {
+    // Read statuses (possibly cold-starting the watch server) only when the
+    // template shows them.
+    let statuses = if used[IDX_STATUS] {
         let display_progress = std::io::stderr().is_terminal();
-        let mut conn = send_status_request(root_path, display_progress)?;
-        Some(recv_status_response(&mut conn, display_progress)?.0)
+        Some(source.read(root_path, display_progress)?.0)
+    } else {
+        None
     };
 
     let need_submod_head = used[IDX_HEAD] || used[IDX_HEAD_LONG] || used[IDX_HEAD_BRANCH];
-    let need_local_status = used[IDX_STATUS] && server_statuses.is_none();
-    let infos = gather_info(
-        root_path,
-        server_statuses.as_deref(),
-        need_submod_head,
-        need_local_status,
-    )?;
+    let infos = gather_info(root_path, statuses.as_deref(), need_submod_head)?;
     let quote_path = ConfigDefaults::read(root_path).quote_path;
     let output = format_output(&infos, &template, header, quote_path);
     std::io::stdout().write_all(&output)?;
@@ -365,39 +343,6 @@ mod tests {
 
     // -- gather_info --
 
-    #[apply(formats)]
-    fn local_status_of_an_unopenable_submodule_is_unreadable(ref_format: RefFormat) {
-        let harness = HarnessBuilder::new()
-            .no_server()
-            .ref_format(ref_format)
-            .submodule("sub_a")
-            .submodule("sub_b")
-            .build();
-        let statuses = || -> Vec<(GitPath, Option<StatusSummary>)> {
-            gather_info(harness.root().path(), None, false, true)
-                .unwrap()
-                .into_iter()
-                .map(|info| (info.path, info.status))
-                .collect()
-        };
-        assert_eq!(
-            statuses(),
-            [
-                (GitPath::from("sub_a"), Some(StatusSummary::clean())),
-                (GitPath::from("sub_b"), Some(StatusSummary::clean())),
-            ]
-        );
-
-        harness.submodule("sub_a").declare_unsupported_extension();
-        assert_eq!(
-            statuses(),
-            [
-                (GitPath::from("sub_a"), Some(StatusSummary::UNREADABLE)),
-                (GitPath::from("sub_b"), Some(StatusSummary::clean())),
-            ]
-        );
-    }
-
     /// Rows come from the index, so a gitlink without a `.gitmodules` entry
     /// still lists, with an empty name.
     #[apply(formats)]
@@ -409,7 +354,7 @@ mod tests {
             .submodule("sub_b")
             .build();
         let rows = || {
-            let infos = gather_info(harness.root().path(), None, false, false).unwrap();
+            let infos = gather_info(harness.root().path(), None, false).unwrap();
             String::from_utf8(format_output(&infos, &tmpl("{name} {path}\n"), false, true)).unwrap()
         };
         assert_eq!(rows(), "sub_a sub_a\nsub_b sub_b\n");
@@ -436,7 +381,7 @@ mod tests {
             .ref_format(ref_format)
             .submodule(b"sub\xff")
             .build();
-        let infos = gather_info(harness.root().path(), None, false, false).unwrap();
+        let infos = gather_info(harness.root().path(), None, false).unwrap();
         let template = tmpl("{name} {path}\n");
         assert_eq!(
             format_output(&infos, &template, false, true),

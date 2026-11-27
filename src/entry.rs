@@ -1,12 +1,12 @@
 //! Subspy CLI entry point.
 //!
 //! [`subspy_entry`] is what the `subspy` binary's main runs, and what the
-//! `subspy-git` shim hands off to when it sees the [`INTERNAL_FLAG`]
-//! sentinel that `spawn_daemon` prepends. That sentinel lets
-//! [`crate::watch::spawn_daemon`] use `current_exe()`, with either resolved
+//! `subspy-git` shim and `subspy-mcp` server hand off to when they see the
+//! [`INTERNAL_FLAG`] sentinel that `spawn_daemon` prepends. That sentinel lets
+//! [`crate::watch::spawn_daemon`] use `current_exe()`, with any resolved
 //! binary able to serve the daemon role.
 
-use std::{ffi::OsString, io, process::ExitCode};
+use std::{ffi::OsString, fmt::Display, io, process::ExitCode};
 
 use clap::{Command, FromArgMatches as _, Subcommand as _};
 use etcetera::BaseStrategy as _;
@@ -34,12 +34,16 @@ where
     I: IntoIterator<Item = T>,
     T: Into<OsString>,
 {
-    match subspy_dispatch(strip_internal_flag(args)) {
+    exit_code(subspy_dispatch(strip_internal_flag(args)))
+}
+
+/// The exit code for a binary's result. An error is printed to stderr as
+/// `Error: <message>` first.
+pub fn exit_code<E: Display>(result: Result<(), E>) -> ExitCode {
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
-            if !err.to_string().is_empty() {
-                eprintln!("{}: {err}", Paint::new(RED, "Error"));
-            }
+            eprintln!("{}: {err}", Paint::new(RED, "Error"));
             ExitCode::FAILURE
         }
     }
@@ -162,8 +166,14 @@ fn setup_logging(command: &Commands) {
 
         info!("Invoked with command: {command:#?}");
     } else {
-        let _ = Logger::with(LogLevel::Warn).log_to_stderr().start();
+        install_subspy_client_logger();
     }
+}
+
+/// Sends warnings and errors to stderr, as every command but the watch server
+/// does. Best-effort: a logger that fails to start leaves logging off.
+pub fn install_subspy_client_logger() {
+    let _ = Logger::with(LogLevel::Warn).log_to_stderr().start();
 }
 
 #[cfg(test)]

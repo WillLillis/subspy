@@ -48,7 +48,8 @@ jobs:
       - name: Build and upload archive
         uses: taiki-e/upload-rust-binary-action@f0d45ae91ee7b8ee928de7a9d04d893a08bcbec6 # v1.30.2
         with:
-          bin: subspy,subspy-git
+          bin: subspy,subspy-git,subspy-mcp
+          features: mcp
           target: ${{ matrix.target }}
           archive: subspy-$tag-$target
           locked: true

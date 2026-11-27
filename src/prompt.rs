@@ -17,7 +17,7 @@ use crate::{
         read_full_message, server_not_started, set_recv_timeout, write_full_message_fixed,
     },
     git::path::GitPath,
-    status::compute_local_statuses,
+    status::StatusSource,
     template::{Template, TemplateError},
     watch::spawn_daemon,
 };
@@ -38,10 +38,8 @@ const PLACEHOLDERS: [&str; 5] = ["dirty", "staged", "new_commits", "clean", "tot
 /// Outputs a formatted summary of submodule statuses for shell prompt
 /// integration.
 ///
-/// With `use_server`, waits up to `timeout` for a server response, spawning the
-/// server when necessary. Timeout and communication failures produce no output.
-///
-/// Without `use_server`, computes status locally via libgit2.
+/// From the server, waits up to `timeout` for a response, spawning the server
+/// when necessary. Timeout and communication failures produce no output.
 ///
 /// # Errors
 ///
@@ -49,28 +47,24 @@ const PLACEHOLDERS: [&str; 5] = ["dirty", "staged", "new_commits", "clean", "tot
 /// are suppressed because prompt output must remain silent.
 pub fn prompt(
     root_path: &Path,
-    use_server: bool,
+    source: StatusSource,
     format: Option<&str>,
     timeout: Duration,
 ) -> PromptResult<()> {
     let template = Template::parse(format.unwrap_or(DEFAULT_FORMAT), &PLACEHOLDERS)?;
-    let (statuses, total) = if use_server {
-        let Some((statuses, total)) = try_get_statuses(root_path, timeout) else {
-            return Ok(());
-        };
-        (statuses, total as usize)
-    } else {
-        let Ok(local) = compute_local_statuses(root_path) else {
-            return Ok(());
-        };
-        local
+    let statuses = match source {
+        StatusSource::Server => try_get_statuses(root_path, timeout),
+        StatusSource::Local => source.read(root_path, false).ok(),
+    };
+    let Some((changed, total)) = statuses else {
+        return Ok(());
     };
 
     let mut dirty = 0u32;
     let mut staged = 0u32;
     let mut new_commits = 0u32;
 
-    for (_, status) in &statuses {
+    for (_, status) in &changed {
         if status.contains(StatusSummary::MODIFIED_CONTENT)
             || status.contains(StatusSummary::UNTRACKED_CONTENT)
             || status.contains(StatusSummary::UNREADABLE)
@@ -92,7 +86,7 @@ pub fn prompt(
                 "dirty" => dirty,
                 "staged" => staged,
                 "new_commits" => new_commits,
-                "clean" => total.saturating_sub(statuses.len()) as u32,
+                "clean" => total.saturating_sub(changed.len()) as u32,
                 "total" => total as u32,
                 _ => unreachable!("validated by Template::parse"),
             };
@@ -107,10 +101,13 @@ pub fn prompt(
 /// Connects to the watch server and retrieves submodule statuses. If no
 /// server is running, spawns one and retries until connected or `timeout`
 /// is exceeded. Returns `None` if the timeout expires or communication fails.
+///
+/// Unlike [`StatusSource::read`], every step is bounded by the one deadline, and
+/// nothing is drawn while waiting.
 fn try_get_statuses(
     root_path: &Path,
     timeout: Duration,
-) -> Option<(Vec<(GitPath, StatusSummary)>, u32)> {
+) -> Option<(Vec<(GitPath, StatusSummary)>, usize)> {
     let deadline = Instant::now() + timeout;
     let sock_path = ipc_socket_path(root_path);
 
@@ -154,7 +151,9 @@ fn try_get_statuses(
         let (resp_msg, _): (ServerMessage, usize) =
             bincode::borrow_decode_from_slice(&buffer, BINCODE_CFG).ok()?;
         match resp_msg {
-            ServerMessage::Status { statuses, total } => break Some((statuses, total)),
+            ServerMessage::Status { statuses, total } => {
+                break Some((statuses, total as usize));
+            }
             ServerMessage::Indexing { .. } => {}
             ServerMessage::VersionMismatch { .. }
             | ServerMessage::ShutdownAck

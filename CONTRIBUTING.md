@@ -46,7 +46,7 @@ over IPC to retrieve or manipulate that cache.
 | File | Purpose |
 |---|---|
 | `main.rs` | Thin process entry point: dispatches to `entry::subspy_entry` |
-| `entry.rs` | Shared CLI run loop, logging setup, error display; consumed by both `main.rs` and the `subspy-git` shim when it forwards `--subspy-internal` to subspy's CLI |
+| `entry.rs` | Shared CLI run loop, logging setup, error display; consumed by `main.rs`, and by the `subspy-git` shim and `subspy-mcp` server when they forward `--subspy-internal` to subspy's CLI |
 | `cli.rs` | Clap argument structs, subcommand definitions, `RunError`, `ProjectPath` + `get_project_path` |
 | `lib.rs` | `StatusSummary` bitflags, progress bar, module declarations |
 | `paint.rs` | ANSI styling primitives (`Paint<T>` zero-alloc Display wrapper, `paint_into` streaming form, `NO_COLOR` handling) |
@@ -72,7 +72,7 @@ each with its own renderer. Long stands alone; short + porcelain v1 share an
 
 | File | Purpose |
 |---|---|
-| `mod.rs` | CLI and shim status entry points, status scopes/outcomes, output options, status assembly, cwd resolution |
+| `mod.rs` | Status entry points for the CLI, shim, and MCP server; `StatusFlags` (explicit flags resolved against config), status scopes/outcomes and warnings, output options, status assembly, cwd resolution |
 | `display.rs` | Long-format output (`display_status`), section formatting, submodule predicates |
 | `header.rs` | Branch / upstream / operation-state header (`HeaderState`, `HeaderBody`, `print_header`, `print_unmerged_paths`) |
 | `short.rs` | `git status -s` / `--short` (`display_short`): thin wrapper around `xy_line` with `Standard` quoting + `SHORT_PALETTE` colors |
@@ -85,11 +85,12 @@ each with its own renderer. Long stands alone; short + porcelain v1 share an
 | `conflict.rs` | Shared conflict-index parsing for XY-line and porcelain v2 entries |
 | `tracked.rs` | Rename reconciliation: `normalized_tracked_rows` builds the shared `TrackedRow` stream (exact + inexact rename pairing in git's order) that all four renderers consume |
 | `rename_score.rs` | Clean-room git rename-similarity scoring (`Signature`, `Similarity`, `score_sigs`, inverted-index `overlapping_pairs`) |
-| `config.rs` | `ConfigDefaults`: the git config keys that supply output defaults when no flag sets them, plus detection of settings subspy cannot honor |
+| `config.rs` | `ConfigDefaults`: the git config keys that supply output defaults when no flag sets them (applied by `StatusFlags::resolve` in `mod.rs`), plus detection of settings subspy cannot honor |
 | `effective_status/` | Where libgit2's `Status` disagrees with git's, one divergence per file (case collisions, skip-worktree, intent-to-add) behind a single `effective_status` entry point |
 | `case.rs` | Shared `core.ignorecase` comparison policy, resolved once per request and handed to every consumer |
 | `pathspec.rs` | Cwd-subtree status filtering plus detection of collapsed untracked scans that must fall back to Git |
 | `submodule.rs` | `compute_local_statuses`, `deleted_submodule_paths`, `apply_ignore_submodules` |
+| `source.rs` | `StatusSource`: whether submodule statuses come from the watch server or are computed locally, plus a one-call read for `list` and `prompt` |
 | `tests/` | Output-format verification tests (see [Snapshot tests](#snapshot-tests)). Submodules: `long.rs` + `short.rs` (snapshot-based), `porcelain.rs` (live `git status` oracle), `config.rs` (config resolution), `fixtures.rs` (shared `setup_*` helpers) |
 | `snapshots/{long,short}/*.snapshot` | Committed snapshot fixtures for the long- and short-format tests |
 
@@ -409,6 +410,7 @@ Each test file exercises a specific category of git operation against a real wat
 | `lifecycle.rs` | Server shutdown, reindex, IPC version mismatch, stale socket recovery |
 | `worktree.rs` | Linked worktrees, whose `.git` is a file pointing at `<main>/.git/worktrees/<name>/`: status, external ref updates, reindex, and gitlink-moving checkouts |
 | `shim.rs` | End-to-end `subspy-git` interception, forwarding, and byte-for-byte status parity against real Git |
+| `mcp.rs` | Smoke tests for `subspy-mcp` over stdio: a full session through a clean exit, a failed call that leaves the server running, and the hand-off to subspy's CLI |
 | `mixed_ref_formats.rs` | Trees whose root and submodules use different ref formats, in both directions |
 
 Tests aim to be deterministic: each test sets up a specific git state, performs an

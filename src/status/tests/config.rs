@@ -9,7 +9,7 @@ use testutil::{RefFormat, Repo};
 
 use crate::{
     status::{
-        ConfigDefaults, UntrackedFiles,
+        ConfigDefaults, OutputFormat, PorcelainVersion, StatusFlags, UntrackedFiles,
         tracked::{RenameDetection, RenameKey, rename_detection},
     },
     test_support::formats,
@@ -86,4 +86,101 @@ fn copies_is_reported_with_its_key(ref_format: RefFormat) {
         detection(&[("diff.renames", "copies")], ref_format),
         RenameDetection::Copies(RenameKey::Diff)
     );
+}
+
+// -- StatusFlags::resolve --
+
+#[test]
+fn explicit_flags_outrank_config() {
+    let config = ConfigDefaults {
+        short: true,
+        untracked_files: UntrackedFiles::No,
+        quote_path: false,
+        show_stash: true,
+        ..ConfigDefaults::GIT
+    };
+    let opts = StatusFlags {
+        format: Some(OutputFormat::Long),
+        untracked_files: Some(UntrackedFiles::All),
+        quote_path: Some(true),
+        show_stash: Some(false),
+        ..StatusFlags::default()
+    }
+    .resolve(config);
+    assert_eq!(opts.format, OutputFormat::Long);
+    assert_eq!(opts.untracked_files, UntrackedFiles::All);
+    assert!(opts.quote_path);
+    assert!(!opts.show_stash);
+
+    let opts = StatusFlags::default().resolve(config);
+    assert_eq!(opts.format, OutputFormat::Short);
+    assert_eq!(opts.untracked_files, UntrackedFiles::No);
+    assert!(!opts.quote_path);
+    assert!(opts.show_stash);
+}
+
+/// Bare `-z` is porcelain v1, even over `status.short`.
+#[test]
+fn bare_null_terminate_is_porcelain_v1() {
+    let config = ConfigDefaults {
+        short: true,
+        ..ConfigDefaults::GIT
+    };
+    let flags = StatusFlags {
+        null_terminate: true,
+        ..StatusFlags::default()
+    };
+    assert_eq!(
+        flags.resolve(config).format,
+        OutputFormat::Porcelain(PorcelainVersion::V1)
+    );
+    let short = StatusFlags {
+        format: Some(OutputFormat::Short),
+        ..flags
+    };
+    assert_eq!(short.resolve(config).format, OutputFormat::Short);
+}
+
+/// `status.branch` reaches the short format only. Porcelain headers need an
+/// explicit `--branch`.
+#[test]
+fn status_branch_reaches_short_only() {
+    let config = ConfigDefaults {
+        branch: true,
+        ..ConfigDefaults::GIT
+    };
+    let with_format = |format| StatusFlags {
+        format: Some(format),
+        ..StatusFlags::default()
+    };
+    assert!(with_format(OutputFormat::Short).resolve(config).branch);
+    let porcelain = with_format(OutputFormat::Porcelain(PorcelainVersion::V2));
+    assert!(!porcelain.resolve(config).branch);
+    let explicit = StatusFlags {
+        branch: true,
+        ..porcelain
+    };
+    assert!(explicit.resolve(config).branch);
+}
+
+/// `status.aheadBehind` reaches the long format only. Porcelain keeps real
+/// counts unless `--no-ahead-behind` says otherwise.
+#[test]
+fn status_ahead_behind_reaches_long_only() {
+    let config = ConfigDefaults {
+        ahead_behind: false,
+        ..ConfigDefaults::GIT
+    };
+    let with_format = |format| StatusFlags {
+        format: Some(format),
+        ..StatusFlags::default()
+    };
+    assert!(!with_format(OutputFormat::Long).resolve(config).ahead_behind);
+    let porcelain = with_format(OutputFormat::Porcelain(PorcelainVersion::V2));
+    assert!(porcelain.resolve(config).ahead_behind);
+    let explicit = StatusFlags {
+        ahead_behind: Some(false),
+        ..porcelain
+    };
+    assert!(!explicit.resolve(config).ahead_behind);
 }

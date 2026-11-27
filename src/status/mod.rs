@@ -14,6 +14,8 @@
 //! - [`header`]: branch/upstream/operation-state header rendering (long format)
 //! - [`conflict`]: shared conflict-index parsing
 //! - [`submodule`]: submodule status computation and filtering
+//! - [`source`]: whether submodule statuses come from the watch server or are
+//!   computed locally
 //! - [`case`]: `core.ignorecase` matching and phantom-delete suppression
 //! - [`pathspec`]: cwd-subtree filtering and unsupported-scan detection
 //! - [`relativize`]: cwd-relative path rewriting at write time
@@ -33,6 +35,7 @@ pub(crate) mod quote;
 mod relativize;
 mod rename_score;
 mod short;
+mod source;
 mod submodule;
 mod tracked;
 mod xy_line;
@@ -42,7 +45,6 @@ mod tests;
 
 use clap::ValueEnum;
 use git2::Repository;
-use log::warn;
 use rustc_hash::{FxHashMap, FxHashSet};
 use thiserror::Error;
 
@@ -59,10 +61,11 @@ use crate::{
 };
 
 pub use case::CaseSensitivity;
-pub use config::ConfigDefaults;
+pub use config::{ConfigDefaults, UnmodeledConfig};
 pub use effective_status::Corrections;
 pub use pathspec::PathFilter;
 pub use relativize::Relativizer;
+pub use source::{SourceError, StatusSource};
 pub use submodule::{SubmoduleChanges, SubmoduleRename, compute_local_statuses, submodule_changes};
 
 use interleave::SubRow;
@@ -95,11 +98,9 @@ pub enum StatusScope {
 pub enum DeclineReason {
     /// libgit2 collapsed an untracked directory above the selected cwd.
     CwdInsideCollapsedUntrackedDirectory,
-    /// `status.renames`/`diff.renames` asked for copy detection, which subspy
-    /// does not implement.
-    CopyDetectionConfigured,
-    /// A config setting subspy cannot honor for this request.
-    UnmodeledConfig(config::UnmodeledConfig),
+    /// A setting subspy cannot honor exactly. `subspy status` renders anyway
+    /// and reports it as a warning.
+    Unsupported(StatusWarning),
     /// A submodule's status could not be read.
     UnreadableSubmodule,
 }
@@ -109,6 +110,29 @@ pub enum DeclineReason {
 pub enum ShimStatusOutcome {
     Rendered,
     Declined(DeclineReason),
+}
+
+/// A setting subspy cannot honor exactly. The status still renders, but may
+/// differ from git's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatusWarning {
+    /// `status.renames` or `diff.renames` (the named key) asks for copy
+    /// detection, which subspy does not implement, so only renames are reported.
+    NoCopyDetection(&'static str),
+    /// A setting subspy does not model.
+    UnmodeledConfig(UnmodeledConfig),
+}
+
+impl std::fmt::Display for StatusWarning {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoCopyDetection(key) => write!(
+                f,
+                "subspy has no copy detection. Only renames will be reported ({key} enables it)"
+            ),
+            Self::UnmodeledConfig(config) => write!(f, "{config}. Output may differ from git"),
+        }
+    }
 }
 
 #[derive(Error, Debug)]
@@ -218,6 +242,65 @@ pub struct OutputOpts {
     pub status_hints: bool,
 }
 
+/// The status options a caller set explicitly.
+///
+/// Whatever they leave unset (`None` or `false`) comes from the repository's
+/// config, then git's default, the same precedence git gives its own flags.
+/// Every entry point resolves options through this.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct StatusFlags {
+    /// `--long`, `--short`, or `--porcelain[=<version>]`.
+    pub format: Option<OutputFormat>,
+    /// `-z`. Without a format, it implies porcelain v1.
+    pub null_terminate: bool,
+    /// `--ignore-submodules[=<when>]`
+    pub ignore_submodules: Option<IgnoreSubmodules>,
+    /// `--untracked-files[=<mode>]`
+    pub untracked_files: Option<UntrackedFiles>,
+    /// `--ignored[=<mode>]`
+    pub ignored_files: Option<IgnoredFiles>,
+    /// `--branch`
+    pub branch: bool,
+    /// `--ahead-behind` or `--no-ahead-behind`.
+    pub ahead_behind: Option<bool>,
+    /// An explicit `core.quotepath`.
+    pub quote_path: Option<bool>,
+    /// `--show-stash` or `--no-show-stash`.
+    pub show_stash: Option<bool>,
+}
+
+impl StatusFlags {
+    /// Fills in every option these flags leave unset from `defaults`.
+    #[must_use]
+    pub fn resolve(self, defaults: ConfigDefaults) -> OutputOpts {
+        let format = match self.format {
+            Some(format) => format,
+            None if self.null_terminate => OutputFormat::Porcelain(PorcelainVersion::V1),
+            None if defaults.short => OutputFormat::Short,
+            None => OutputFormat::Long,
+        };
+        OutputOpts {
+            format,
+            null_terminate: self.null_terminate,
+            ignore_submodules: self.ignore_submodules.unwrap_or(defaults.ignore_submodules),
+            untracked_files: self.untracked_files.unwrap_or(defaults.untracked_files),
+            ignored_files: self.ignored_files.unwrap_or_default(),
+            // `status.branch` reaches the short format only. Porcelain headers
+            // stay behind an explicit `--branch`, as in git.
+            branch: self.branch || (defaults.branch && format == OutputFormat::Short),
+            // `status.aheadBehind` reaches the long format only, so porcelain
+            // keeps real counts unless a flag says otherwise.
+            ahead_behind: self
+                .ahead_behind
+                .unwrap_or(format != OutputFormat::Long || defaults.ahead_behind),
+            quote_path: self.quote_path.unwrap_or(defaults.quote_path),
+            show_stash: self.show_stash.unwrap_or(defaults.show_stash),
+            relative_paths: defaults.relative_paths,
+            status_hints: defaults.status_hints,
+        }
+    }
+}
+
 /// Long-format flags (`--ahead-behind`, `--show-stash`, `--untracked-files`,
 /// `advice.statusHints`).
 #[derive(Debug, Clone, Copy)]
@@ -306,8 +389,17 @@ pub(super) const fn is_untracked(st: git2::Status) -> bool {
 }
 
 enum AssembleOutcome<T> {
-    Rendered(T),
+    Rendered(T, Vec<StatusWarning>),
     Declined(DeclineReason),
+}
+
+/// An early return from [`assemble_status_scoped`] that hands the request back.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "keeps each early return to one line"
+)]
+const fn decline<T>(reason: DeclineReason) -> StatusResult<AssembleOutcome<T>> {
+    Ok(AssembleOutcome::Declined(reason))
 }
 
 /// Builds the `git2::StatusOptions` used by production and tests. Kept
@@ -365,64 +457,26 @@ pub fn build_status_options(opts: OutputOpts, repo_kind: RepoKind) -> git2::Stat
     st_opts
 }
 
-/// Opens the repository, runs the shared status-assembly pipeline, and
-/// hands the result to `render`.
+/// The settings this request cannot honor exactly.
 ///
-/// Pipeline: `git2::statuses`, `submodule_changes`, ignore-submodules
-/// masking, rename-new filter, relativizer, `StatusEntries`. The
-/// `submodule_statuses` supplies  submodule-level statuses. Production
-/// receives them over IPC, while tests fall back to [`compute_local_statuses`].
-///
-/// # Errors
-///
-/// Propagates [`StatusError`] from the closures and from intermediate
-/// libgit2 calls.
-pub fn assemble_status<R>(
-    project: &ProjectPath,
-    opts: OutputOpts,
-    submodule_statuses: impl FnOnce() -> StatusResult<Vec<(GitPath, StatusSummary)>>,
-    render: impl FnOnce(&Repository, &StatusEntries<'_>, &Relativizer<'_>) -> StatusResult<R>,
-) -> StatusResult<R> {
-    match assemble_status_scoped(
-        project,
-        opts,
-        StatusScope::All,
-        false,
-        submodule_statuses,
-        render,
-    )? {
-        AssembleOutcome::Rendered(rendered) => Ok(rendered),
-        AssembleOutcome::Declined(_) => {
-            unreachable!("whole-repository status requests cannot decline")
-        }
-    }
-}
-
-/// Why this request cannot be served exactly, if at all.
-///
-/// The shim keeps its bytes identical to git by forwarding, so it declines.
-/// `subspy status` has nothing to forward to and warns instead, then renders
-/// what it can.
+/// The shim keeps its bytes identical to git by forwarding, so it declines on
+/// the first. `subspy status` has nothing to forward to, so it renders what it
+/// can and reports them all.
 fn unsupported_config(
     repo: &Repository,
     format: OutputFormat,
     rename_detection: tracked::RenameDetection,
-    can_decline: bool,
-) -> Option<DeclineReason> {
+) -> Vec<StatusWarning> {
+    let mut warnings = Vec::new();
     if let tracked::RenameDetection::Copies(key) = rename_detection {
-        if can_decline {
-            return Some(DeclineReason::CopyDetectionConfigured);
-        }
-        warn!("subspy has no copy detection. Only renames will be reported ({key} enables it)");
+        warnings.push(StatusWarning::NoCopyDetection(key.name()));
     }
-
-    let config = repo.config().ok()?;
-    let unmodeled = config::unmodeled(&config, format == OutputFormat::Long)?;
-    if can_decline {
-        return Some(DeclineReason::UnmodeledConfig(unmodeled));
+    if let Ok(config) = repo.config()
+        && let Some(unmodeled) = config::unmodeled(&config, format == OutputFormat::Long)
+    {
+        warnings.push(StatusWarning::UnmodeledConfig(unmodeled));
     }
-    warn!("{unmodeled}. Output may differ from git");
-    None
+    warnings
 }
 
 /// Short and porcelain output have no way to mark a submodule whose status
@@ -447,6 +501,22 @@ fn reject_unreadable_submodules(
     }
 }
 
+/// Opens the repository, runs the shared status-assembly pipeline, and
+/// hands the result to `render`.
+///
+/// Pipeline: `git2::statuses`, `submodule_changes`, ignore-submodules
+/// masking, rename-new filter, relativizer, `StatusEntries`.
+/// `submodule_statuses` supplies the submodule-level statuses, from the watch
+/// server or [`compute_local_statuses`].
+///
+/// With `can_decline`, a request subspy cannot serve exactly comes back
+/// [`AssembleOutcome::Declined`]. Otherwise it renders, and the reasons come
+/// back as warnings.
+///
+/// # Errors
+///
+/// Propagates [`StatusError`] from the closures and from intermediate
+/// libgit2 calls.
 fn assemble_status_scoped<R>(
     project: &ProjectPath,
     opts: OutputOpts,
@@ -459,8 +529,9 @@ fn assemble_status_scoped<R>(
 
     // The shim declines so git renders the `C` rows itself.
     let rename_detection = tracked::rename_detection(&repo);
-    if let Some(reason) = unsupported_config(&repo, opts.format, rename_detection, can_decline) {
-        return Ok(AssembleOutcome::Declined(reason));
+    let warnings = unsupported_config(&repo, opts.format, rename_detection);
+    if can_decline && let Some(&warning) = warnings.first() {
+        return decline(DeclineReason::Unsupported(warning));
     }
 
     let mut so = build_status_options(opts, project.kind);
@@ -512,9 +583,7 @@ fn assemble_status_scoped<R>(
             entry.status() == git2::Status::WT_NEW && path_filter.contains_cwd(entry.path_bytes())
         })
     {
-        return Ok(AssembleOutcome::Declined(
-            DeclineReason::CwdInsideCollapsedUntrackedDirectory,
-        ));
+        return decline(DeclineReason::CwdInsideCollapsedUntrackedDirectory);
     }
 
     let mut submod_changes = if opts.ignore_submodules == IgnoreSubmodules::All {
@@ -533,9 +602,7 @@ fn assemble_status_scoped<R>(
             .iter()
             .any(|(_, status)| status.contains(StatusSummary::UNREADABLE))
     {
-        return Ok(AssembleOutcome::Declined(
-            DeclineReason::UnreadableSubmodule,
-        ));
+        return decline(DeclineReason::UnreadableSubmodule);
     }
     // Per-submodule `submodule.<name>.ignore` only matters when the global
     // flag is unset (or `--ignore-submodules=none`). Any other global value
@@ -590,7 +657,8 @@ fn assemble_status_scoped<R>(
         path_filter,
     };
 
-    Ok(AssembleOutcome::Rendered(render(&repo, &entries, &rel)?))
+    let rendered = render(&repo, &entries, &rel)?;
+    Ok(AssembleOutcome::Rendered(rendered, warnings))
 }
 
 fn apply_path_filter_to_submodules(
@@ -638,13 +706,19 @@ fn apply_path_filter_to_submodules(
 /// `project`. Paths in the output are reported relative to
 /// [`ProjectPath::effective_cwd`], matching `git -C <path> status`.
 ///
+/// Returns the settings that kept the output from matching git exactly, for
+/// the caller to report.
+///
 /// # Errors
 ///
 /// Returns `Err` if statuses cannot be retrieved from the repository or watch server.
-pub fn status(request: ResolvedStatusRequest<'_>, out: &mut impl io::Write) -> StatusResult<()> {
+pub fn status(
+    request: ResolvedStatusRequest<'_>,
+    out: &mut impl io::Write,
+) -> StatusResult<Vec<StatusWarning>> {
     match render_status(request, StatusScope::All, false, out)? {
-        ShimStatusOutcome::Rendered => Ok(()),
-        ShimStatusOutcome::Declined(_) => {
+        AssembleOutcome::Rendered((), warnings) => Ok(warnings),
+        AssembleOutcome::Declined(_) => {
             unreachable!("whole-repository status requests cannot decline")
         }
     }
@@ -662,7 +736,11 @@ pub fn status_for_shim(
     scope: StatusScope,
     out: &mut impl io::Write,
 ) -> StatusResult<ShimStatusOutcome> {
-    render_status(request, scope, true, out)
+    Ok(match render_status(request, scope, true, out)? {
+        // A request that could decline declines rather than warn.
+        AssembleOutcome::Rendered((), _) => ShimStatusOutcome::Rendered,
+        AssembleOutcome::Declined(reason) => ShimStatusOutcome::Declined(reason),
+    })
 }
 
 fn render_status(
@@ -670,23 +748,23 @@ fn render_status(
     scope: StatusScope,
     can_decline: bool,
     out: &mut impl io::Write,
-) -> StatusResult<ShimStatusOutcome> {
+) -> StatusResult<AssembleOutcome<()>> {
     let ResolvedStatusRequest {
         project,
         no_server,
         display_progress,
         output: opts,
     } = request;
-    let use_server = !no_server
-        && project.kind.server_eligible()
-        && opts.ignore_submodules != IgnoreSubmodules::All;
-    // Send IPC request early so the server starts processing while we
-    // do local work.
-    let mut conn = if use_server {
-        Some(send_status_request(&project.repo_root, display_progress)?)
-    } else {
-        None
-    };
+    let wants_submodules =
+        project.kind.has_submodules() && opts.ignore_submodules != IgnoreSubmodules::All;
+    // Send the request before the local work below, so the server answers in
+    // parallel.
+    let conn =
+        if wants_submodules && StatusSource::new(project.kind, no_server) == StatusSource::Server {
+            Some(send_status_request(&project.repo_root, display_progress)?)
+        } else {
+            None
+        };
 
     let porcelain_opts = PorcelainOpts {
         null_terminate: opts.null_terminate,
@@ -702,19 +780,15 @@ fn render_status(
         show_untracked: opts.untracked_files != UntrackedFiles::No,
     };
     let format = opts.format;
-    let ignore_submodules = opts.ignore_submodules;
-    let kind = project.kind;
 
-    match assemble_status_scoped(
+    assemble_status_scoped(
         project,
         opts,
         scope,
         can_decline,
         || match conn {
-            Some(ref mut c) => Ok(recv_status_response(c, display_progress)?.0),
-            None if kind.has_submodules() && ignore_submodules != IgnoreSubmodules::All => {
-                Ok(compute_local_statuses(&project.repo_root)?.0)
-            }
+            Some(mut conn) => Ok(recv_status_response(&mut conn, display_progress)?.0),
+            None if wants_submodules => Ok(compute_local_statuses(&project.repo_root)?.0),
             None => Ok(Vec::new()),
         },
         |repo, entries, rel| {
@@ -734,10 +808,7 @@ fn render_status(
             }
             Ok(())
         },
-    )? {
-        AssembleOutcome::Rendered(()) => Ok(ShimStatusOutcome::Rendered),
-        AssembleOutcome::Declined(reason) => Ok(ShimStatusOutcome::Declined(reason)),
-    }
+    )
 }
 
 /// Returns `effective_cwd` expressed relative to `repo_root`, as forward-slash

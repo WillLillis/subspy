@@ -35,13 +35,13 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - name: clippy
-        run: cargo clippy --workspace --all-targets --locked
+        run: cargo clippy --workspace --all-targets --all-features --locked
       - name: build
-        run: cargo build --workspace --locked
+        run: cargo build --workspace --all-features --locked
       - name: test
         # `--cfg trace_events` arms the watch-server trace capture for every
         # test run, so a rare, load-dependent failure dumps a full per-test
         # event timeline under the failing test (see CONTRIBUTING.md).
         env:
           RUSTFLAGS: -D warnings --cfg trace_events
-        run: cargo test --workspace --locked
+        run: cargo test --workspace --all-features --locked

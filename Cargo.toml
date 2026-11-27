@@ -61,9 +61,17 @@ log.workspace = true
 memchr = "2"
 notify = "=9.0.0-rc.5"
 rayon = "1.10"
+rmcp = { version = "3.11", default-features = false, features = [
+    "server",
+    "transport-io",
+    "macros",
+], optional = true }
 rustc-hash = "2"
+serde = { version = "1.0.229", features = ["derive"], optional = true }
+serde_json = { version = "1.0.154", optional = true }
 thiserror.workspace = true
 thread_local = "1.1"
+tokio = { version = "1.54.1", default-features = false, features = ["rt"], optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2.189"
@@ -84,6 +92,25 @@ rstest = "0.26.1"
 rstest_reuse = "0.7.0"
 tempfile.workspace = true
 testutil = { path = "testutil" }
+
+[features]
+default = ["mcp"]
+mcp = ["dep:rmcp", "dep:serde", "dep:serde_json", "dep:tokio"]
+
+[[bin]]
+name = "subspy"
+path = "src/main.rs"
+
+[[bin]]
+name = "subspy-git"
+
+[[bin]]
+name = "subspy-mcp"
+required-features = ["mcp"]
+
+[[test]]
+name = "mcp"
+required-features = ["mcp"]
 
 [profile.release]
 lto = true
